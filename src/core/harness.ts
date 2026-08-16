@@ -18,6 +18,26 @@ export interface HarnessHandle {
   proc: ChildProcess
 }
 
+export interface DshExec {
+  /** 可执行文件：系统 dsh 或捆绑的 dsh lib/bin.js */
+  exec: string
+  /** 捆绑 Node（存在时用 node 启动 exec） */
+  node?: string
+}
+
+/** 解析 dsh 执行方式：优先打包内 runtime，回退系统 PATH */
+export function resolveDshExec(): DshExec | null {
+  const base = process.resourcesPath ?? join(process.cwd(), 'resources')
+  const roots = process.resourcesPath ? [join(base, 'app.asar.unpacked', 'resources'), base] : [base]
+  for (const root of roots) {
+    const runtimeBin = join(root, 'dsh-runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    const nodeBin = join(root, 'node', 'bin', 'node')
+    if (existsSync(runtimeBin) && existsSync(nodeBin)) return { exec: runtimeBin, node: nodeBin }
+  }
+  const dsh = findDsh()
+  return dsh ? { exec: dsh } : null
+}
+
 /** 从 PATH 解析 dsh 可执行文件 */
 export function findDsh(): string | null {
   const candidates = [process.env.DSH_BIN, '/opt/homebrew/bin/dsh', '/usr/local/bin/dsh', '/usr/bin/dsh'].filter(
@@ -86,12 +106,13 @@ export function startHarness(opts: {
   onLog?: (line: string) => void
   readyTimeoutMs?: number
 }): Promise<HarnessHandle> {
-  const dsh = findDsh()
-  if (!dsh) return Promise.reject(new Error('未找到 dsh 可执行文件（请先安装 DeepSeek Harness）'))
+  const exec = resolveDshExec()
+  if (!exec) return Promise.reject(new Error('未找到 dsh 可执行文件（请先安装 DeepSeek Harness）'))
   const cwd = opts.cwd ?? homedir()
-  const args = opts.profile ? ['web', '--port', String(opts.port ?? 0)] : ['web', '--port', String(opts.port ?? 0)]
+  const args = ['web', '--port', String(opts.port ?? 0)]
   // M1 统一走官方 web profile；port 0 = 由 dsh 自选
-  const proc = spawn(dsh, args, { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  const spawnArgs = exec.node ? [exec.exec, ...args] : args
+  const proc = spawn(exec.node ?? exec.exec, spawnArgs, { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
 
   return new Promise((resolve, reject) => {
     let url: string | null = null

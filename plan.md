@@ -25,8 +25,10 @@
   - 验证：单测（fixture 目录，含同名 shadow 判定）；真实 `~/.dsh/skills/huashu-design` 展示正确。
   - 实测 2026-08-16：单测 4/4（rank 合并/shadowed/往返一致/创建 kebab 校验/可见性切换）；Electron 冒烟真实数据：huashu-design(user-dsh)+media-use(user-agents)=2 个，rank 扫描正确。
 
-- [ ] **M5 桌面整合与打包** — 多 Tab UI（Harness / Plugin / MCP / Skills）整合；electron-builder 出 dmg。
+- [x] **M5 桌面整合与打包** — 多 Tab UI（Harness / Plugin / MCP / Skills）整合；electron-builder 出 dmg。
   - 验证：应用启动后各 Tab 功能走通；打包产物存在且可启动。
+  - 实测 2026-08-16：默认模式＝harness Web UI + 菜单「管理台」；DMG 256MB（arm64）；打包 app 在 PATH 仅 /usr/bin:/bin（无系统 node/dsh）下用捆绑 Node+dsh 启动，HTTP 200；TERM 退出无孤儿。
+  - 已知限制：强杀（timeout/group-kill）可能遗留 dsh 子进程；应用图标为 Electron 默认；Windows 打包待后续（本机构建环境为 macOS）。
 
 ## 约束
 

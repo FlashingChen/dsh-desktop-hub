@@ -1,0 +1,21 @@
+appId: com.dshdesktop.app
+productName: DSH Desktop
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - package.json
+  - resources/**/*
+asarUnpack:
+  - resources/dsh-runtime/**/*
+  - resources/node/**/*
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64]
+  identity: null
+dmg:
+  artifactName: DSH-Desktop-${version}-${arch}.${ext}
+npmRebuild: false

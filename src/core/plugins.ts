@@ -51,17 +51,16 @@ export interface PluginOpHandle {
 /** 执行 dsh plugin 操作（真实改动 profile，须由显式用户动作触发） */
 export function runPluginOp(opts: {
   dsh: string
+  node?: string
   profile: string
   action: 'add' | 'remove' | 'update'
   args?: string[]
   cwd?: string
   signal?: AbortSignal
 }): PluginOpHandle {
-  const child = spawn(
-    opts.dsh,
-    buildPluginCommand(opts.profile, opts.action, opts.args ?? []),
-    { cwd: opts.cwd, stdio: ['ignore', 'pipe', 'pipe'] },
-  )
+  const cmd = buildPluginCommand(opts.profile, opts.action, opts.args ?? [])
+  const spawnArgs = opts.node ? [opts.dsh, ...cmd] : cmd
+  const child = spawn(opts.node ?? opts.dsh, spawnArgs, { cwd: opts.cwd, stdio: ['ignore', 'pipe', 'pipe'] })
   const { promise, resolve } = Promise.withResolvers<{
     exitCode: number | null
     signal: NodeJS.Signals | null

@@ -1,8 +1,8 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu } from 'electron'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { startHarness, findDsh, dshHome, listProfiles, type HarnessHandle } from '../core/harness.js'
+import { startHarness, resolveDshExec, dshHome, listProfiles, type HarnessHandle } from '../core/harness.js'
 import { listPlugins, runPluginOp } from '../core/plugins.js'
 import {
   convertJsonToYaml,
@@ -19,10 +19,11 @@ const RENDERER_HTML = join(__dirname, '..', 'renderer', 'index.html')
 
 const argv = process.argv
 const SMOKE = argv.includes('--smoke')
-const HARNESS = argv.includes('--harness')
 const HARNESS_SMOKE = argv.includes('--harness-smoke')
+// 默认（无 flag）＝产品行为：加载 harness Web UI + 菜单「管理台」
 
 let mainWindow: BrowserWindow | null = null
+let managementWindow: BrowserWindow | null = null
 let harness: HarnessHandle | null = null
 
 /** M2 管理的目标 profile（与 harness 启动一致）；M5 将支持切换 */
@@ -33,9 +34,9 @@ function activeProfile() {
 }
 
 async function runPluginMutation(action: 'add' | 'remove' | 'update', args: string[]) {
-  const dsh = findDsh()
-  if (!dsh) return { ok: false as const, error: '未找到 dsh 可执行文件', output: '' }
-  const op = runPluginOp({ dsh, profile: ACTIVE_PROFILE, action, args })
+  const exec = resolveDshExec()
+  if (!exec) return { ok: false as const, error: '未找到 dsh 可执行文件', output: '' }
+  const op = runPluginOp({ dsh: exec.exec, node: exec.node, profile: ACTIVE_PROFILE, action, args })
   let output = ''
   op.stdout.on('data', (d: Buffer) => (output += String(d)))
   op.stderr.on('data', (d: Buffer) => (output += String(d)))
@@ -140,6 +141,28 @@ function createWindow(url: string): void {
 
 function createSkeletonWindow(): void {
   createWindow(`file://${RENDERER_HTML}`)
+}
+
+function openManagementWindow(): void {
+  if (managementWindow && !managementWindow.isDestroyed()) {
+    managementWindow.focus()
+    return
+  }
+  managementWindow = new BrowserWindow({
+    width: 1080,
+    height: 720,
+    title: 'DSH Desktop 管理台',
+    webPreferences: {
+      preload: join(__dirname, '..', 'preload', 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  })
+  void managementWindow.loadFile(RENDERER_HTML)
+  managementWindow.on('closed', () => {
+    managementWindow = null
+  })
 }
 
 async function assertDomAndScreenshot(tag: string, assert: (dom: unknown) => boolean, exitAfter = true): Promise<void> {
@@ -260,7 +283,12 @@ function wireSmoke(): void {
 
 app.whenReady().then(async () => {
   registerIpc()
-  if (HARNESS || HARNESS_SMOKE) {
+  if (SMOKE) {
+    createSkeletonWindow()
+    wireSmoke()
+    return
+  }
+  if (HARNESS_SMOKE) {
     try {
       harness = await startHarness({ profile: 'web', readyTimeoutMs: 120_000 })
       console.log(`harness ready: ${harness.url}`)
@@ -273,10 +301,31 @@ app.whenReady().then(async () => {
     wireSmoke()
     return
   }
-  createSkeletonWindow()
-  wireSmoke()
+  // 默认产品行为：harness Web UI + 菜单管理台
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { label: 'DSH Desktop', submenu: [{ role: 'quit', label: '退出' }] },
+      {
+        label: '窗口',
+        submenu: [
+          { label: '管理台（Plugin / MCP / Skills）', click: () => openManagementWindow() },
+          { type: 'separator' },
+          { role: 'togglefullscreen', label: '全屏' },
+        ],
+      },
+    ]),
+  )
+  try {
+    harness = await startHarness({ profile: 'web', readyTimeoutMs: 120_000 })
+    console.log(`harness ready: ${harness.url}`)
+  } catch (err) {
+    console.error(`harness 启动失败: ${String(err)}`)
+    app.exit(1)
+    return
+  }
+  createWindow(harness.url)
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createSkeletonWindow()
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(harness!.url)
   })
 })
 
