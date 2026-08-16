@@ -1,6 +1,6 @@
 # DSH Desktop — 产品需求文档（PRD）
 
-> 状态：**待审核**（调研已完成，结论已落入本文档）
+> 状态：**已实现**（§2 调研结论为实施依据；M0-M5 已按 plan.md 全部落地并通过验证，见 §5）
 > 版本：v0.1 · 日期：2026-08-16
 > 应用名：暂定「DSH Desktop」（与社区项目 `myYangyunfan/dsh_desktop` 撞名，命名风险见 §6）
 
@@ -253,18 +253,20 @@ dsh plugin --profile <name> update
 | U4 | 作为 DSH 用户，我能在 Skills 系统浏览、创建、编辑、启用/禁用用户级与项目级 skills，改动即时生效 |
 | U5 | 作为用户，我能看到 harness 运行状态、API Key/模型配置状态，并能彻底退出（不留孤儿进程） |
 
-### 3.3 多 Tab 系统设计
+### 3.3 多 Tab 主窗口（当前实现）
 
-**壳层**：应用启动 → 内置运行时拉起 `dsh web`（选中 profile）→ 加载官方 Web UI 为主内容区；多 Tab 管理系统作为独立面板（与 Web UI 并列切换，或覆盖式管理台）。
+**壳层（已落地）**：主窗口＝四 Tab 壳（顶部 Tab 栏：Harness / Plugin / MCP / Skills，`src/renderer/index.html`）。应用启动后主进程拉起 `dsh web`（profile「web」，`--port 0` 由 dsh 自选端口），轮询 HTTP 200 就绪后创建 BrowserWindow（1280×800，sandbox + contextIsolation）；**Harness Tab 以 `<iframe>` 内嵌官方 Web UI**（CSP `frame-src http://127.0.0.1:*`）。由于 iframe 的 `load` 事件对长连接页面不可靠，由主进程监听 `did-frame-navigate`（非主帧且前缀命中 harness URL）推送 `harness:frame-loaded`，渲染层据此更新状态条「harness 已连接: 127.0.0.1:PORT」。
 
-| Tab | 功能 | 关键交互 |
+| Tab | 功能 | 关键交互（已实现） |
 |---|---|---|
-| **Harness（主）** | 官方 Web UI（会话、模型、工具） | 内嵌 WebView 加载 loopback Web UI；右上角 API Key/模型状态指示 |
-| **Plugin** | 本机插件全量管理 | 列表（名称/版本/来源/内置或第三方/启用状态）；安装框（npm 包名 / `github:owner/repo#commit` / 本地目录 / tarball）；移除、更新；**git 安装的 `allowBuilds` 授权向导**；变更后「重启生效」提示与一键重启 |
-| **MCP** | JSON → YAML 转换器 + 服务器管理 | 输入区（粘贴 JSON / 选择 `.mcp.json` 文件 / 导入 Claude Code/Cursor/mcporter 预设）；转换预览（源 JSON ↔ 目标 YAML 对照）；服务器列表（增删改，等价于编辑 profile patch）；连接状态探测（`listTools` 握手）；**写入确认**（官方安全提示：服务器命令是沙箱外可信代码） |
-| **Skills** | skills 目录管理 | 两级视图：用户级 `$DSH_HOME/skills` / 项目级 `.dsh/skills`（bundled 只读展示）；列表按 rank 标注来源；新建/编辑（kebab-case 名称校验 + frontmatter 表单 + 正文编辑）；启用/禁用 = 设置 frontmatter 的 `disable-model-invocation`/`user-invocable`；改动即时生效提示 |
-| **Settings（壳级）** | API Key、模型、profile、更新 | 复用官方 Web UI 的设置能力 + 壳级项（选中 profile、桌面更新） |
-| **第四系统（占位）** | 预留 Tab，显示「规划中」 | 仅保留入口 |
+| **Harness（主）** | 官方 Web UI（会话、模型、工具） | iframe 内嵌 loopback Web UI；`harness:frame-loaded` 状态推送 |
+| **Plugin** | profile「web」插件管理 | 列表（名称 / 来源：内置组合包、第三方组合包、普通依赖 / spec）；安装框支持 **npm 包名、`github:owner/repo#commit`、本地路径，并已升级为支持直接粘贴 GitHub 链接**（spec 透传给 `dsh plugin --profile web add`）；移除（第三方包）、更新；写操作前确认，变更后提示「重启 harness 生效」 |
+| **MCP** | JSON → YAML 转换器 + 服务器管理 | 粘贴 Claude Code / Cursor 风格 JSON → 转换预览（含警告：`type: sse` 仅按 HTTP 处理、非法 serverName 跳过）→ 确认后写入 profile「web」的 `cordis.patch.yml`（**写入前自动 `.bak-<ts>` 备份**，原子写，官方 HMR 热生效）；显示现有服务器数 |
+| **Skills** | skills 目录管理 | 按 rank 100-600 扫描（项目 `.dsh`/`.agents` → 自定义 → 用户 `~/.dsh/skills` / `~/.agents/skills` → bundled）；列表按来源标注，同名低 rank 生效、高 rank 标「被遮蔽」；**新建**（kebab-case 名称校验 + 描述 + 正文表单，落盘 `~/.dsh/skills/<name>/SKILL.md`）；模型可见 / 用户可见切换（写 frontmatter `disable-model-invocation` / `user-invocable`），改动即时生效 |
+| **Settings（壳级）** | API Key、模型、profile、更新 | 本期未实现（预留；API Key/模型配置复用官方 Web UI 内能力） |
+| **第四系统（占位）** | 预留入口 | 本期未实现（§0 原始需求：暂不做） |
+
+UI 风格：深色主题（`color-scheme: dark` + 面板底色/强调色），与官方 Harness Web UI 视觉基调一致；四个系统 Tab 与官方会话界面并列切换。
 
 ### 3.4 平台与范围
 
@@ -273,51 +275,63 @@ dsh plugin --profile <name> update
 
 ---
 
-## 4. 技术方案（草案）
+## 4. 技术方案（当前实现）
 
 ### 4.1 技术选型
 
-| 决策点 | 选择 | 理由 |
+| 决策点 | 选择（已落地） | 理由 |
 |---|---|---|
-| 壳 | **Electron** | DSH 是 Node 应用，Electron 自带 Node（`ELECTRON_RUN_AS_NODE` 已被 anywhere-labs 验证可用于运行 harness/内置工具链）；Tauri 需另捆绑 Node 二进制，复杂度更高、收益低 |
-| 内置 DSH | **`@deepseek-ai/dsh` npm 包**（方案 A） | 比 pinned 子模块简单：`npm install` 即得、与官方发布同步、打包体积可控；子模块方案（anywhere-labs）留作升级项 |
-| 内置包管理 | 随 Electron 的 Node 跑 **pnpm**（`ELECTRON_RUN_AS_NODE` 模式，私有 shim 目录，不动系统 PATH） | 插件管理必须走 `dsh plugin`（其内部调用 pnpm）；不依赖用户安装 pnpm |
-| 插件操作通道 | 主进程 spawn `dsh plugin --profile <active> ...`（进程树托管 + 输出流回 UI） | 与 anywhere-labs `desktopPnpm.runPlugin()` 同构；`dsh` 是 bundle reconcile 的权威 |
-| 配置写入 | 直接编辑 `$DSH_HOME/profiles/<active>/cordis.patch.yml`（MCP 行、skills 相关 patch），利用官方 HMR 热生效 | 配置层变更无需重启；bundle 安装仍走 `dsh plugin` + 重启 |
-| 转换器 | 主进程纯逻辑模块：JSON 解析/校验 → 映射表 → YAML 序列化（`yaml` 库）；输入格式探测器（Claude Code / Cursor / mcporter） | 可单测；无网络依赖 |
-| 状态文件 | 壳私有 `lastKnownGood`/`active` profile 记录（Electron userData，原子写） | 借鉴 anywhere-labs；profile 切换是重启边界 |
+| 壳 | **Electron 37 + TypeScript 5.8**，三套 tsc 配置：main+core（NodeNext）/ preload（CommonJS → `preload.cjs`）/ renderer（纯脚本，无模块） | DSH 是 Node 应用，Electron 自带 Node；Tauri 需另捆绑 Node 二进制，复杂度更高 |
+| 内置 DSH | **`@deepseek-ai/dsh@0.1.0-rc.6` npm 包**（方案 A 已落地）：`scripts/bundle-runtime.mjs` 下载 Node v24.10.0 到 `resources/node`、npm 安装 dsh 到 `resources/dsh-runtime` | 与官方发布同步、打包体积可控；`--ignore-scripts` 安装规避未知副作用 |
+| 运行时解析 | `resolveDshExec()`：**优先打包内 runtime**（`resources/dsh-runtime/node_modules/@deepseek-ai/dsh/lib/bin.js` + `resources/node/bin/node`，兼容 `app.asar.unpacked/resources` 布局），回退系统 PATH（`$DSH_BIN` / Homebrew / `/usr/local` / `/usr` / PATH） | 打包应用不依赖用户安装 Node/dsh（双击即用） |
+| 插件操作通道 | 主进程 spawn `dsh plugin --profile web add|remove|update`（进程树托管、输出流回 UI、支持取消） | 与 anywhere-labs `desktopPnpm.runPlugin()` 同构；`dsh` 是 bundle reconcile 的权威 |
+| 配置写入 | 直接编辑 `$DSH_HOME/profiles/web/cordis.patch.yml`（MCP 行），原子写（tmp + rename）+ `.bak-<ts>` 备份，利用官方 HMR 热生效 | 配置层变更无需重启；bundle 安装仍走 `dsh plugin` + 重启 |
+| 转换器 | 主进程纯逻辑模块（`src/core/mcp.ts`，`yaml` 库）：JSON 解析/校验 → 映射表 → YAML 插件行；兼容 `url`/`baseUrl`，`type: sse` 仅警告 | 可单测；无网络依赖 |
+| Skills 管理 | `src/core/skills.ts`：rank 100-600 多根扫描 + frontmatter 解析 + 创建 + 可见性切换（与官方检测机制同构，§2.2） | 改动即时生效，天然适合 UI 管理 |
+| 状态文件 | 暂无（`ACTIVE_PROFILE` 常量 = `'web'`；profile 切换为后续工作） | 当前 MVP 单 profile 起步 |
 
 ### 4.2 进程与生命周期
 
 ```
-用户双击 → Electron main（单实例锁）
-  → 解析选中 profile（last-known-good 回退）
-  → 生成私有运行时 shim（node/pnpm，仅子进程可见）
-  → spawn 内置 node：dsh web --host 127.0.0.1 --port <保存/随机>
-  → 轮询 HTTP 200 → 创建 BrowserWindow 加载 http://127.0.0.1:<port>
-  → 多 Tab 管理面板就绪
-退出 → 优雅 dispose → 终止 dsh 进程树（不留孤儿）
+启动 → app.whenReady
+  → registerIpc()（harness:url / plugins:* / mcp:* / skills:*）
+  → resolveDshExec()（打包内 runtime 优先，回退 PATH）
+  → spawn dsh web --port 0（detached 独立进程组，cwd=~）
+  → 解析输出 127.0.0.1:PORT → 轮询 HTTP 200（就绪超时 120s）
+  → 创建 BrowserWindow（1280×800，sandbox + contextIsolation + preload.cjs）
+  → 加载四 Tab 壳（file://dist/renderer/index.html）
+  → renderer 经 IPC 取 harness URL → iframe 挂载官方 Web UI
+  → 主进程 did-frame-navigate（非主帧且前缀命中）推送 harness:frame-loaded
+退出 → window-all-closed（非 macOS 退出）
+  → will-quit → harness.stop()：SIGTERM 进程组 → 2s 兜底 SIGKILL → app.quit
 ```
 
-### 4.3 安全边界
+冒烟模式：`--smoke`（不启 harness：四 Tab DOM + 真实插件/MCP/skills 数据断言，截屏 `artifacts/m0-smoke.png`）；`--harness-smoke`（真实 harness + iframe 加载断言，截屏 `artifacts/m1-harness.png`）。
 
-- harness 只监听 loopback（官方无认证设计，**绝不**开放 `0.0.0.0`）。
-- 插件安装/git `allowBuilds` 授权/MCP 服务器启用 = 全部显式用户确认（官方明示：这些都是沙箱外受信代码）。
-- API Key 走官方通道（`$DSH_HOME/.credentials.yaml`，只写）。
+### 4.3 安全边界（当前实现）
+
+- BrowserWindow：`sandbox: true` + `contextIsolation: true` + `nodeIntegration: false`；preload 仅经 `contextBridge` 暴露白名单 API（`window.dshDesktop`）。
+- 渲染层 CSP：`default-src 'self'`；`script-src 'self'`；`frame-src http://127.0.0.1:*`（仅允许 loopback 内嵌）；`connect-src 'self' http://127.0.0.1:*`。
+- harness 只监听 loopback（`dsh web --port 0` 由 dsh 自选端口，官方无认证设计，**绝不**开放 `0.0.0.0`）。
+- 插件安装 / MCP 写入 = 全部显式用户确认（官方明示：这些都是沙箱外受信代码）；git 来源插件的 `allowBuilds` 授权流程见 §2.3。
+- MCP 写入前自动备份（`.bak-<ts>`），原子写（tmp + rename）失败不落盘。
 - 转换器只做解析与映射，不执行任何命令。
+- API Key 走官方通道（`$DSH_HOME/.credentials.yaml`，只写），壳层不触碰。
 
 ---
 
-## 5. 里程碑（审核通过后细化，预告拆分）
+## 5. 里程碑（已实现：M0-M5 全部完成，验证证据与 plan.md 一致）
 
-| 里程碑 | 内容 | 验证标准 |
+| 里程碑 | 内容 | 状态与验证 |
 |---|---|---|
-| M0 壳 | Electron 工程 + 内置 Node/dsh + 启动 `dsh web` + 加载 UI | 双击启动进入 Web UI；退出无孤儿进程 |
-| M1 Settings | API Key/模型配置引导（对接官方凭据通道） | 配置后能发起一次真实对话 |
-| M2 Plugin Tab | 插件列表 + 安装（npm/github/本地）+ 移除 + 重启生效 | 安装→重启→插件出现在 harness |
-| M3 MCP Tab | JSON→YAML 转换器 + 写入 profile patch + 热生效 | Claude Code `.mcp.json` 导入 → 工具出现在会话 |
-| M4 Skills Tab | skills 浏览/新建/编辑/启停 | 新建 skill → harness 会话可见可调用 |
-| M5 打包 | macOS dmg + Windows 安装包 + 更新 | 干净机器双击可用 |
+| M0 壳骨架 | Electron + TypeScript 三端工程（main/preload/renderer）；四 Tab 契约；`typecheck` / `test` / `verify` 脚本 | ✅ 已完成：`npm run verify` 全绿；`npm run smoke` 四 Tab DOM 断言（截屏 `artifacts/m0-smoke.png`） |
+| M1 Harness 启动与加载 | `dsh` / `$DSH_HOME` / profiles 检测；spawn `dsh web`（`--port 0`，detached 进程组）；轮询 HTTP 200；Harness Tab iframe 内嵌官方 Web UI（`did-frame-navigate` 状态推送）；退出清理进程树 | ✅ 已完成：`npm run verify:m1`（真实启动 → HTTP 200 → 优雅停止 → 端口关闭无孤儿）；`npm run smoke:harness`（iframe 挂载 + 状态「已连接」，截屏 `artifacts/m1-harness.png`） |
+| M2 Plugin Tab | profile 发现 + 插件列表（`dsh.profile.bundles` ∪ dependencies）；封装 `dsh plugin --profile web add|remove|update`（支持 npm 包名 / `github:owner/repo#commit` / 本地路径 / 直接粘贴 GitHub 链接） | ✅ 已完成：单测 4 例（分类/排序/命令形态/退出码+取消）；冒烟断言真实 web profile ≥4 项含 dsh-base |
+| M3 MCP Tab | JSON→YAML 转换器 + profile `cordis.patch.yml` 事务读写（备份/回滚）+ 服务器列表 | ✅ 已完成：单测 8 例（混合输入/sse 警告/格式拒绝/YAML 同构/提取/替换保留注释/空 patch 新建/备份事务）；冒烟端到端驱动转换（renderer→IPC→core→renderer） |
+| M4 Skills Tab | rank 100-600 目录扫描；SKILL.md/扁平 md 解析 + frontmatter；新建（kebab-case 校验）；模型/用户可见性切换 | ✅ 已完成：单测 4 例（rank 合并/shadowed/往返一致/创建校验/可见性切换）；冒烟真实数据 huashu-design + media-use |
+| M5 桌面整合与打包 | 四 Tab 主窗口整合（Harness iframe 内嵌官方 Web UI）+ electron-builder 出 DMG | ✅ 已完成：默认模式＝启动 harness + 四 Tab 壳；`release/DSH-Desktop-0.1.0-arm64.dmg` 产物存在；打包 app 在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）下用捆绑运行时启动，HTTP 200；TERM 退出无孤儿 |
+
+> 后续演进（未在本期范围）：Settings Tab（API Key/模型/更新）、profile 切换、插件 `allowBuilds` 授权向导、MCP/Skills 文件导入、Windows/Linux 打包、自动更新 —— 详见 plan.md「下一步」。
 
 ---
 
@@ -334,5 +348,5 @@ dsh plugin --profile <name> update
 
 ## 7. 交付说明
 
-- 本文档为 **v0.1 待审核版**；用户审核通过后，将按 §5 里程碑制定详细 plan，以最小可验证方式逐项推进并自测。
-- 调研证据均为公开仓库当前 main/HEAD 状态；DSH 迭代快，实施时以锁定的 npm 版本为准。
+- 本文档为 **v0.1 已实现版**：§2 调研结论作为实施依据落地（见 §3.3 / §4 / §5 的当前实现说明）；M0-M5 已按 plan.md 完成并通过验证（`npm run verify` / `smoke` / `smoke:harness` / `verify:m1`）。
+- 调研证据均为公开仓库当前 main/HEAD 状态；DSH 迭代快，实施以锁定的 npm 版本（`@deepseek-ai/dsh@0.1.0-rc.6`）为准。

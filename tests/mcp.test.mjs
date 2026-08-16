@@ -74,6 +74,16 @@ test('convertJsonToYaml 输出与官方示例同构的 YAML', () => {
   assert.equal(rows[1].config.serverName, 'remote-search')
 })
 
+test('convertJsonToYaml 将 ${VAR} 转为 !!js process.env.VAR（Claude Code 环境替换语义）', () => {
+  const res = convertJsonToYaml(SAMPLE)
+  assert.ok((res.yaml ?? '').includes('GITHUB_TOKEN: !!js process.env.GITHUB_TOKEN'), `实际: ${res.yaml}`)
+  assert.ok((res.warnings ?? []).some((w) => w.includes('环境变量引用')), '应有环境变量提示')
+  // 非纯变量值保持字面
+  const mixed = convertJsonToYaml(JSON.stringify({ mcpServers: { x: { command: 'a', env: { PATH: '/usr/bin:/bin', TOKEN: '${T}' } } } }))
+  assert.ok((mixed.yaml ?? '').includes('PATH: /usr/bin:/bin'), `PATH 应保持字面: ${mixed.yaml}`)
+  assert.ok((mixed.yaml ?? '').includes('TOKEN: !!js process.env.T'), `TOKEN 应转换: ${mixed.yaml}`)
+})
+
 test('extractMcpServers 从真实风格 patch 提取行', () => {
   const patch = `# 注释应保留
 - insert:

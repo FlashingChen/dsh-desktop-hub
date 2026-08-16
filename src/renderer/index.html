@@ -2,93 +2,165 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-src http://127.0.0.1:*; connect-src 'self' http://127.0.0.1:*" />
     <title>DSH Desktop</title>
     <style>
+      /* DSH Desktop UI — 设计语言对齐 DeepSeek Harness 深色主题
+         token 来源：官方 web UI（#0f1115 底 / 品牌蓝 #3964fe / 浅蓝 #99c8ff / 状态色系） */
       :root {
         color-scheme: dark;
         --bg: #0f1115;
-        --panel: #171a21;
-        --line: #2a2f3a;
-        --text: #e6e9ef;
-        --muted: #8b93a3;
-        --accent: #4f8cff;
+        --surface: #14161c;
+        --surface-2: #191c23;
+        --line: rgb(255 255 255 / 8%);
+        --line-strong: rgb(255 255 255 / 14%);
+        --text: #e9ecf1;
+        --text-dim: #8b93a3;
+        --text-faint: #5c6472;
+        --brand: #3964fe;
+        --brand-hover: #5580ff;
+        --brand-soft: rgb(57 100 254 / 14%);
+        --accent-text: #99c8ff;
+        --success: #69db7c;
+        --danger: #ff6b6b;
+        --warn: #ffa94d;
+        --radius: 8px;
+        --font-code: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       }
       * { box-sizing: border-box; margin: 0; padding: 0; }
       body {
-        font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+        font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
         background: var(--bg);
         color: var(--text);
         height: 100vh;
         display: flex;
         flex-direction: column;
+        overflow: hidden;
       }
+      /* 顶栏：半透明玻璃 + 细描边，贴近 harness 头部 */
       header {
         display: flex;
         align-items: center;
-        gap: 4px;
-        padding: 8px 12px;
-        background: var(--panel);
+        gap: 2px;
+        padding: 0 14px;
+        height: 44px;
+        flex: none;
+        background: rgb(15 17 21 / 82%);
+        backdrop-filter: blur(12px);
         border-bottom: 1px solid var(--line);
+        -webkit-app-region: drag;
       }
-      header .brand { font-weight: 600; margin-right: 16px; font-size: 14px; }
+      header .brand {
+        font-weight: 600;
+        font-size: 13px;
+        letter-spacing: 0.2px;
+        margin-right: 18px;
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        -webkit-app-region: no-drag;
+      }
+      header .brand::before {
+        content: "";
+        width: 8px; height: 8px; border-radius: 50%;
+        background: var(--brand);
+        box-shadow: 0 0 10px var(--brand);
+      }
       .tab {
+        -webkit-app-region: no-drag;
+        appearance: none;
+        background: transparent;
+        border: none;
+        color: var(--text-dim);
+        font-size: 13px;
         padding: 6px 14px;
         border-radius: 6px;
-        border: 1px solid transparent;
-        background: transparent;
-        color: var(--muted);
         cursor: pointer;
-        font-size: 13px;
+        position: relative;
+        transition: color 0.15s, background 0.15s;
       }
-      .tab:hover { color: var(--text); }
-      .tab.active { color: var(--text); background: #232837; border-color: var(--line); }
-      main { flex: 1; overflow: auto; }
-      .panel { display: none; padding: 24px; height: 100%; }
+      .tab:hover { color: var(--text); background: rgb(255 255 255 / 6%); }
+      .tab.active { color: var(--accent-text); background: var(--brand-soft); }
+      main { flex: 1; overflow: auto; min-height: 0; }
+      .panel { display: none; height: 100%; padding: 20px 24px; overflow: auto; }
       .panel.active { display: block; }
-      .placeholder { color: var(--muted); font-size: 13px; line-height: 1.8; }
-      h3 { margin-bottom: 8px; font-size: 15px; }
-      .muted { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
-      .row { display: flex; gap: 8px; margin-bottom: 10px; }
-      input[type="text"] {
-        flex: 1; max-width: 420px; padding: 6px 10px; border-radius: 6px;
-        border: 1px solid var(--line); background: var(--panel); color: var(--text);
+      /* Harness 内嵌区 */
+      .harness-wrap { display: flex; flex-direction: column; height: 100%; padding: 0; }
+      .panel#panel-harness { padding: 0; }
+      #harness-frame { flex: 1; width: 100%; border: none; background: var(--bg); }
+      .panel#panel-harness .status {
+        position: absolute; top: 54px; right: 16px; z-index: 10;
+        background: rgb(15 17 21 / 85%); border: 1px solid var(--line);
+        padding: 3px 10px; border-radius: 999px; font-size: 11px;
+        backdrop-filter: blur(8px);
       }
+      h3 { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+      .muted { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; line-height: 1.7; }
+      .row { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+      input[type="text"], input[type="url"] {
+        flex: 1; min-width: 220px; max-width: 460px;
+        padding: 7px 12px; border-radius: var(--radius);
+        border: 1px solid var(--line-strong); background: var(--surface);
+        color: var(--text); font-size: 13px; outline: none;
+        transition: border-color 0.15s, box-shadow 0.15s;
+      }
+      input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+      input::placeholder { color: var(--text-faint); }
       button {
-        padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line);
-        background: #232837; color: var(--text); cursor: pointer; font-size: 13px;
+        appearance: none;
+        padding: 7px 14px; border-radius: var(--radius);
+        border: 1px solid var(--line-strong); background: var(--surface-2);
+        color: var(--text); cursor: pointer; font-size: 13px;
+        transition: background 0.15s, border-color 0.15s;
       }
-      button.primary { background: var(--accent); border-color: var(--accent); }
-      .status { font-size: 12px; color: var(--muted); margin-bottom: 10px; white-space: pre-wrap; }
-      .status.error { color: #ff7b72; }
-      .status.ok { color: #7ee787; }
+      button:hover { background: rgb(255 255 255 / 9%); }
+      button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+      button.primary:hover { background: var(--brand-hover); }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .status { font-size: 12px; color: var(--text-dim); white-space: pre-wrap; line-height: 1.6; }
+      .status.error { color: var(--danger); }
+      .status.ok { color: var(--success); }
+      /* 表格：harness 风格——细线、行 hover、无强边框 */
       table.list { width: 100%; border-collapse: collapse; font-size: 13px; }
-      table.list th, table.list td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }
-      table.list th { color: var(--muted); font-weight: 500; }
-      table.list tr.dim { opacity: 0.5; }
+      table.list th, table.list td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+      table.list th {
+        color: var(--text-faint); font-weight: 500; font-size: 11px;
+        text-transform: uppercase; letter-spacing: 0.4px;
+      }
+      table.list tbody tr { transition: background 0.1s; }
+      table.list tbody tr:hover { background: rgb(255 255 255 / 3.5%); }
+      table.list tr.dim { opacity: 0.45; }
       .tag {
-        font-size: 10px; color: var(--muted); border: 1px solid var(--line);
-        border-radius: 4px; padding: 1px 5px; margin-left: 4px;
+        font-size: 10px; color: var(--text-dim); border: 1px solid var(--line-strong);
+        border-radius: 4px; padding: 1px 6px; margin-left: 6px; vertical-align: 1px;
       }
       textarea {
-        width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line);
-        background: var(--panel); color: var(--text); font-family: ui-monospace, Menlo, monospace;
-        font-size: 12px; resize: vertical; margin-bottom: 10px;
+        width: 100%; padding: 10px 12px; border-radius: var(--radius);
+        border: 1px solid var(--line-strong); background: var(--surface);
+        color: var(--text); font-family: var(--font-code); font-size: 12px;
+        line-height: 1.6; resize: vertical; outline: none; margin-bottom: 12px;
+        transition: border-color 0.15s, box-shadow 0.15s;
       }
+      textarea:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
       pre {
-        background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
-        padding: 10px; font-size: 12px; overflow: auto; max-height: 320px;
-        font-family: ui-monospace, Menlo, monospace; color: var(--text);
+        background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+        padding: 12px; font-size: 12px; overflow: auto; max-height: 320px;
+        font-family: var(--font-code); color: var(--accent-text); line-height: 1.6;
       }
+      /* 卡片（MCP 转换/上传区） */
+      .card {
+        background: var(--surface); border: 1px solid var(--line);
+        border-radius: calc(var(--radius) + 2px); padding: 16px; margin-bottom: 14px;
+      }
+      .card h4 { font-size: 12px; font-weight: 600; color: var(--text-dim); margin-bottom: 10px; }
       footer {
-        padding: 6px 12px;
-        font-size: 11px;
-        color: var(--muted);
-        background: var(--panel);
-        border-top: 1px solid var(--line);
-        display: flex;
-        gap: 16px;
+        flex: none;
+        display: flex; gap: 16px; align-items: center;
+        padding: 5px 14px; font-size: 11px; color: var(--text-faint);
+        background: rgb(15 17 21 / 82%); border-top: 1px solid var(--line);
       }
+      .divider { width: 1px; height: 12px; background: var(--line-strong); }
     </style>
   </head>
   <body>
@@ -101,13 +173,16 @@
     </header>
     <main>
       <section class="panel active" id="panel-harness">
-        <div class="placeholder">Harness 面板：M1 将在此加载 DSH Web UI。</div>
+        <div class="harness-wrap">
+          <div id="harness-status" class="status">harness 连接中…</div>
+          <iframe id="harness-frame" title="DeepSeek Harness"></iframe>
+        </div>
       </section>
       <section class="panel" id="panel-plugin">
-        <h3>Plugin 系统</h3>
-        <p class="muted">管理 profile「web」的插件。安装/移除会真实执行 <code>dsh plugin</code>，变更后需重启 harness 生效。</p>
+        <h3>Plugin</h3>
+        <p class="muted">管理 profile「web」的插件。安装支持 npm 包名、GitHub 仓库链接或本地路径；变更后需重启 harness 生效。</p>
         <div class="row">
-          <input id="plugin-spec" type="text" placeholder="npm 包名 或 github:owner/repo#commit" />
+          <input id="plugin-spec" type="text" placeholder="npm 包名 · https://github.com/owner/repo · ./本地路径" />
           <button id="plugin-install" class="primary">安装</button>
           <button id="plugin-refresh">刷新</button>
         </div>
@@ -120,26 +195,50 @@
         </table>
       </section>
       <section class="panel" id="panel-mcp">
-        <h3>MCP 系统</h3>
-        <p class="muted">粘贴 Claude Code / Cursor 风格 MCP JSON，转换为 DSH 所需 YAML 并写入 profile「web」的 cordis.patch.yml（写入前自动备份，HMR 热生效）。</p>
+        <h3>MCP</h3>
+        <p class="muted">将 Claude Code / Cursor 风格的 MCP JSON 转换为 DSH 所需 YAML（写入 profile「web」的 cordis.patch.yml，写入前自动备份，HMR 热生效）。</p>
         <div class="row">
           <button id="mcp-list">刷新服务器</button>
           <span id="mcp-servers" class="status"></span>
         </div>
-        <textarea id="mcp-json" rows="8" placeholder='{"mcpServers": { "name": { "command": "npx", "args": ["-y", "…"], "env": {"TOKEN": "…"} } } }'></textarea>
-        <div class="row">
-          <button id="mcp-convert">转换预览</button>
-          <button id="mcp-apply" class="primary">写入 patch（备份 + 确认）</button>
+        <div class="card">
+          <h4>输入 JSON</h4>
+          <textarea id="mcp-json" rows="7" placeholder='{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
+    }
+  }
+}'></textarea>
+          <div class="row">
+            <button id="mcp-convert">转换预览</button>
+            <button id="mcp-apply" class="primary">写入 patch（备份 + 确认）</button>
+          </div>
         </div>
         <div id="mcp-warnings" class="status"></div>
-        <pre id="mcp-preview"></pre>
+        <h4 style="margin:10px 0 6px">转换结果（DSH YAML）</h4>
+        <pre id="mcp-preview">—</pre>
       </section>
       <section class="panel" id="panel-skills">
-        <h3>Skills 系统</h3>
-        <p class="muted">管理本机可用的 skills（rank: 项目 .dsh/.agents → 用户 ~/.dsh/skills）。改动即时生效，无需重启。</p>
+        <h3>Skills</h3>
+        <p class="muted">管理本机可用的 skills（rank: 项目 .dsh/.agents → 用户 ~/.dsh/skills）。支持上传 .skill/.zip 或 GitHub 仓库链接导入，改动即时生效。</p>
         <div class="row">
           <button id="skills-refresh">刷新</button>
           <span id="skills-status" class="status"></span>
+        </div>
+        <div class="card">
+          <h4>导入 skill（.skill / .zip / GitHub 链接）</h4>
+          <div class="row">
+            <input id="skill-import-url" type="url" placeholder="https://github.com/owner/repo 或 https://github.com/owner/repo/tree/main/skills/xxx" />
+            <button id="skill-import-url-btn" class="primary">从链接导入</button>
+          </div>
+          <div class="row">
+            <input id="skill-file" type="file" accept=".skill,.zip" />
+            <button id="skill-import-file">上传文件</button>
+          </div>
+          <div id="skill-import-status" class="status"></div>
         </div>
         <table class="list">
           <thead>
@@ -147,19 +246,21 @@
           </thead>
           <tbody id="skills-rows"></tbody>
         </table>
-        <h3 style="margin-top:16px">新建 skill（用户级 ~/.dsh/skills）</h3>
-        <div class="row">
-          <input id="skill-name" type="text" placeholder="kebab-case 名称" />
-          <input id="skill-desc" type="text" placeholder="描述" />
-        </div>
-        <textarea id="skill-body" rows="4" placeholder="skill 正文（Markdown 指令）"></textarea>
-        <div class="row">
+        <div class="card" style="margin-top:14px">
+          <h4>从模板创建（用户级 ~/.dsh/skills）</h4>
+          <div class="row">
+            <input id="skill-name" type="text" placeholder="kebab-case 名称" />
+            <input id="skill-desc" type="text" placeholder="描述" />
+          </div>
+          <textarea id="skill-body" rows="4" placeholder="skill 正文（Markdown 指令）"></textarea>
           <button id="skill-create" class="primary">创建</button>
         </div>
       </section>
     </main>
     <footer>
       <span id="footer-versions"></span>
+      <span class="divider"></span>
+      <span>DSH Desktop v0.1</span>
     </footer>
     <script src="renderer.js"></script>
   </body>

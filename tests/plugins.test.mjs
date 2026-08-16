@@ -7,7 +7,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const { listPlugins, buildPluginCommand, runPluginOp } = await import(join(root, 'dist', 'core', 'plugins.js'))
+const { listPlugins, buildPluginCommand, runPluginOp, normalizeInstallSpec } = await import(join(root, 'dist', 'core', 'plugins.js'))
 
 test('listPlugins 从 bundles ∪ dependencies 解析并分类', () => {
   const dir = mkdtempSync(join(tmpdir(), 'profile-'))
@@ -55,6 +55,20 @@ test('buildPluginCommand 构造官方命令形态', () => {
   assert.deepEqual(buildPluginCommand('web', 'remove', ['some-plugin']), [
     'plugin', '--profile', 'web', 'remove', 'some-plugin',
   ])
+})
+
+test('normalizeInstallSpec 将 GitHub 链接转为 github:owner/repo#branch', () => {
+  assert.equal(normalizeInstallSpec('https://github.com/deepseek-ai/deepseek-harness'), 'github:deepseek-ai/deepseek-harness')
+  assert.equal(normalizeInstallSpec('https://github.com/owner/repo.git'), 'github:owner/repo')
+  assert.equal(normalizeInstallSpec('https://github.com/owner/repo/tree/main'), 'github:owner/repo#main')
+  assert.equal(normalizeInstallSpec('https://github.com/owner/repo/tree/feat/x'), 'github:owner/repo#feat/x')
+  assert.equal(
+    normalizeInstallSpec('https://github.com/owner/repo/commit/abc123def456'),
+    'github:owner/repo#abc123def456',
+  )
+  assert.equal(normalizeInstallSpec('some-npm-package'), 'some-npm-package')
+  assert.equal(normalizeInstallSpec('github:owner/repo#main'), 'github:owner/repo#main')
+  assert.equal(normalizeInstallSpec('./local/path'), './local/path')
 })
 
 test('runPluginOp 透传退出码并支持取消', async () => {

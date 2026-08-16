@@ -3,12 +3,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import AdmZip from 'adm-zip'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const mod = await import(join(root, 'dist', 'core', 'skills.js'))
-const { scanSkills, parseSkillFile, renderSkillFile, createSkill, setInvocation } = mod
+const { scanSkills, parseSkillFile, renderSkillFile, createSkill, setInvocation, importSkillFromZip, parseGitHubSkillUrl } = mod
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'skills-'))
@@ -91,4 +92,52 @@ test('setInvocation 切换 model/user 可见性', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('importSkillFromZip 从 .skill/.zip 导入 bundle 并保留资源文件', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+
+    const zip = new AdmZip()
+    zip.addFile('my-skill/SKILL.md', Buffer.from('---\nname: my-skill\ndescription: 导入测试\n---\n正文\n'))
+    zip.addFile('my-skill/references/ref.md', Buffer.from('参考资料'))
+    zip.addFile('my-skill/scripts/run.sh', Buffer.from('#!/bin/sh\necho hi'))
+    const buf = zip.toBuffer()
+    const res = importSkillFromZip(buf, { root: join(dir, 'skills') })
+    assert.equal(res.name, 'my-skill')
+    const skill = readFileSync(join(dir, 'skills', 'my-skill', 'SKILL.md'), 'utf8')
+    assert.ok(skill.includes('name: my-skill'))
+    assert.ok(existsSync(join(dir, 'skills', 'my-skill', 'references', 'ref.md')), '资源文件应一并安装')
+    assert.ok(existsSync(join(dir, 'skills', 'my-skill', 'scripts', 'run.sh')))
+    assert.throws(() => importSkillFromZip(buf, { root: join(dir, 'skills') }), /已存在/, '默认拒绝覆盖')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('importSkillFromZip 剥离单一包裹目录并拒绝无 SKILL.md 的包', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+
+    const zip = new AdmZip()
+    zip.addFile('repo-main/my-skill/SKILL.md', Buffer.from('---\nname: my-skill\ndescription: d\n---\nb\n'))
+    const res = importSkillFromZip(zip.toBuffer(), { root: join(dir, 'skills'), overwrite: true })
+    assert.equal(res.name, 'my-skill')
+    assert.ok(existsSync(join(dir, 'skills', 'my-skill', 'SKILL.md')))
+    const bad = new AdmZip()
+    bad.addFile('readme.txt', Buffer.from('not a skill'))
+    assert.throws(() => importSkillFromZip(bad.toBuffer(), { root: join(dir, 'skills') }), /SKILL\.md/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('parseGitHubSkillUrl 解析仓库根与 tree 路径', () => {
+  assert.deepEqual(parseGitHubSkillUrl('https://github.com/owner/skill-repo'), {
+    owner: 'owner', repo: 'skill-repo', branch: 'main', subPath: '',
+  })
+  assert.deepEqual(parseGitHubSkillUrl('https://github.com/owner/skill-repo/tree/main/skills/foo'), {
+    owner: 'owner', repo: 'skill-repo', branch: 'main', subPath: 'skills/foo',
+  })
+  assert.throws(() => parseGitHubSkillUrl('https://example.com/x'), /GitHub/)
 })

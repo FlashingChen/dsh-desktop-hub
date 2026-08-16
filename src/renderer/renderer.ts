@@ -25,6 +25,10 @@ interface PluginOpResult {
 
 interface DesktopApi {
   versions: { electron: string; node: string; chrome: string }
+  harness: {
+    url: () => Promise<string | null>
+    onFrameLoaded: (cb: (url: string) => void) => void
+  }
   plugins: {
     list: () => Promise<PluginListResult>
     install: (spec: string) => Promise<PluginOpResult>
@@ -40,7 +44,15 @@ interface DesktopApi {
     list: () => Promise<SkillsListResult>
     create: (input: { name: string; description: string; body: string }) => Promise<SkillsOpResult>
     toggle: (input: { path: string; kind: 'model' | 'user'; value: boolean }) => Promise<SkillsOpResult>
+    importFile: (buffer: ArrayBuffer, overwrite: boolean) => Promise<SkillsImportResult>
+    importUrl: (url: string, overwrite: boolean) => Promise<SkillsImportResult>
   }
+}
+
+interface SkillsImportResult {
+  ok: boolean
+  result?: { name: string; file: string; installed: string[] }
+  error?: string
 }
 
 interface SkillsSummary {
@@ -304,6 +316,70 @@ async function createSkill(): Promise<void> {
 document.getElementById('skills-refresh')?.addEventListener('click', () => void refreshSkills())
 document.getElementById('skill-create')?.addEventListener('click', () => void createSkill())
 
+// ---- Skills 导入（.skill/.zip/GitHub 链接）----
+function setImportStatus(text: string, kind: 'error' | 'ok' = 'ok'): void {
+  const el = document.getElementById('skill-import-status')
+  if (!el) return
+  el.textContent = text
+  el.className = `status ${kind}`
+}
+
+async function importFromUrl(): Promise<void> {
+  const input = document.getElementById('skill-import-url') as HTMLInputElement | null
+  if (!input || !api) return
+  const url = input.value.trim()
+  if (!url) {
+    setImportStatus('请输入 GitHub 链接', 'error')
+    return
+  }
+  const overwrite = confirm('确认从 GitHub 导入该 skill 到 ~/.dsh/skills？\n（若已存在同名 skill 将覆盖）')
+  setImportStatus(`下载导入中: ${url}`)
+  const res = await api.skills.importUrl(url, overwrite)
+  setImportStatus(
+    res.ok ? `导入成功: ${res.result?.name}（${res.result?.installed.length} 个文件）` : `导入失败: ${res.error ?? ''}`,
+    res.ok ? 'ok' : 'error',
+  )
+  if (res.ok) await refreshSkills()
+}
+
+async function importFromFile(): Promise<void> {
+  const input = document.getElementById('skill-file') as HTMLInputElement | null
+  if (!input || !api || !input.files?.length) return
+  const file = input.files[0]
+  const overwrite = confirm(`确认导入「${file.name}」到 ~/.dsh/skills？\n（若已存在同名 skill 将覆盖）`)
+  setImportStatus(`导入中: ${file.name}`)
+  const buffer = await file.arrayBuffer()
+  const res = await api.skills.importFile(buffer, overwrite)
+  setImportStatus(
+    res.ok ? `导入成功: ${res.result?.name}（${res.result?.installed.length} 个文件）` : `导入失败: ${res.error ?? ''}`,
+    res.ok ? 'ok' : 'error',
+  )
+  input.value = ''
+  if (res.ok) await refreshSkills()
+}
+
+document.getElementById('skill-import-url-btn')?.addEventListener('click', () => void importFromUrl())
+document.getElementById('skill-import-file')?.addEventListener('click', () => void importFromFile())
+
+// ---- Harness 面板：内嵌官方 Web UI ----
+async function mountHarness(): Promise<void> {
+  const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
+  const status = document.getElementById('harness-status')
+  if (!frame || !status || !api) return
+  const url = await api.harness.url()
+  if (!url) {
+    status.textContent = 'harness 未就绪'
+    status.className = 'status error'
+    return
+  }
+  // iframe 的 load 事件对长连接页面不可靠，改由主进程导航事件推送确认
+  api.harness.onFrameLoaded((frameUrl: string) => {
+    status.textContent = `harness 已连接: ${frameUrl.replace('http://', '')}`
+    status.className = 'status ok'
+  })
+  frame.src = url
+}
+
 if (api) {
   const el = document.getElementById('footer-versions')
   if (el) {
@@ -312,4 +388,5 @@ if (api) {
   void refreshPlugins()
   void refreshMcpServers()
   void refreshSkills()
+  void mountHarness()
 }

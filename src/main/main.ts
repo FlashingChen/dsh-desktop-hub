@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { startHarness, resolveDshExec, dshHome, listProfiles, type HarnessHandle } from '../core/harness.js'
-import { listPlugins, runPluginOp } from '../core/plugins.js'
+import { listPlugins, runPluginOp, normalizeInstallSpec } from '../core/plugins.js'
 import {
   convertJsonToYaml,
   extractMcpServers,
@@ -12,7 +12,7 @@ import {
   readPatch,
   type McpRow,
 } from '../core/mcp.js'
-import { scanSkills, createSkill, setInvocation } from '../core/skills.js'
+import { scanSkills, createSkill, setInvocation, importSkillFromZip, importSkillFromGitHub } from '../core/skills.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const RENDERER_HTML = join(__dirname, '..', 'renderer', 'index.html')
@@ -23,7 +23,6 @@ const HARNESS_SMOKE = argv.includes('--harness-smoke')
 // 默认（无 flag）＝产品行为：加载 harness Web UI + 菜单「管理台」
 
 let mainWindow: BrowserWindow | null = null
-let managementWindow: BrowserWindow | null = null
 let harness: HarnessHandle | null = null
 
 /** M2 管理的目标 profile（与 harness 启动一致）；M5 将支持切换 */
@@ -45,6 +44,7 @@ async function runPluginMutation(action: 'add' | 'remove' | 'update', args: stri
 }
 
 function registerIpc(): void {
+  ipcMain.handle('harness:url', () => harness?.url ?? null)
   ipcMain.handle('plugins:list', () => {
     const profile = activeProfile()
     if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, entries: [] }
@@ -52,7 +52,7 @@ function registerIpc(): void {
   })
   ipcMain.handle('plugins:install', (_e, spec: string) => {
     if (typeof spec !== 'string' || !spec.trim()) return { ok: false as const, error: 'spec 无效', output: '' }
-    return runPluginMutation('add', [spec.trim()])
+    return runPluginMutation('add', [normalizeInstallSpec(spec)])
   })
   ipcMain.handle('plugins:remove', (_e, name: string) => {
     if (typeof name !== 'string' || !name.trim()) return { ok: false as const, error: 'name 无效', output: '' }
@@ -118,6 +118,25 @@ function registerIpc(): void {
       return { ok: false as const, error: (err as Error).message }
     }
   })
+  ipcMain.handle('skills:import-file', (_e, buffer: ArrayBuffer, overwrite: boolean) => {
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) return { ok: false as const, error: '文件无效', result: null }
+    if (buffer.byteLength > 20 * 1024 * 1024) return { ok: false as const, error: '文件超过 20MB 上限', result: null }
+    try {
+      const result = importSkillFromZip(Buffer.from(buffer), { root: join(dshHome(), 'skills'), overwrite })
+      return { ok: true as const, result }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, result: null }
+    }
+  })
+  ipcMain.handle('skills:import-url', async (_e, url: string, overwrite: boolean) => {
+    if (typeof url !== 'string' || !url.trim()) return { ok: false as const, error: '链接无效', result: null }
+    try {
+      const result = await importSkillFromGitHub(url, { root: join(dshHome(), 'skills'), overwrite })
+      return { ok: true as const, result }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, result: null }
+    }
+  })
 }
 
 function createWindow(url: string): void {
@@ -141,27 +160,11 @@ function createWindow(url: string): void {
 
 function createSkeletonWindow(): void {
   createWindow(`file://${RENDERER_HTML}`)
-}
-
-function openManagementWindow(): void {
-  if (managementWindow && !managementWindow.isDestroyed()) {
-    managementWindow.focus()
-    return
-  }
-  managementWindow = new BrowserWindow({
-    width: 1080,
-    height: 720,
-    title: 'DSH Desktop 管理台',
-    webPreferences: {
-      preload: join(__dirname, '..', 'preload', 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  })
-  void managementWindow.loadFile(RENDERER_HTML)
-  managementWindow.on('closed', () => {
-    managementWindow = null
+  // harness iframe 导航完成时推送状态（iframe load 事件对长连接页面不可靠）
+  mainWindow?.webContents.on('did-frame-navigate', (_e, frameURL, _code, _status, isMainFrame) => {
+    if (!isMainFrame && harness && frameURL.startsWith(harness.url)) {
+      mainWindow?.webContents.send('harness:frame-loaded', frameURL)
+    }
   })
 }
 
@@ -272,11 +275,60 @@ function wireSmoke(): void {
       })()
     })
   } else if (HARNESS_SMOKE) {
+    mainWindow?.webContents.on('console-message', (_e, _level, message) => {
+      if (message.includes('[harness]')) console.log(`[renderer] ${message}`)
+    })
+    let harnessFrameLoaded = false
+    mainWindow?.webContents.on('did-frame-navigate', (_e, frameURL, _code, _status, isMainFrame) => {
+      if (!isMainFrame && frameURL.startsWith('http://127.0.0.1:')) {
+        harnessFrameLoaded = true
+        console.log(`frame loaded: ${frameURL}`)
+      }
+    })
     mainWindow?.webContents.once('did-finish-load', () => {
-      void assertDomAndScreenshot('m1-harness', (dom) => {
-        const d = dom as { title: string; bodyLen: number }
-        return d.title.length > 0 && d.bodyLen > 0
-      })
+      void (async () => {
+        // 等待 renderer 通过 IPC 拿到 harness URL 并挂载 iframe
+        const deadline = Date.now() + 8000
+        while (Date.now() < deadline) {
+          const src = await mainWindow!.webContents.executeJavaScript(
+            `document.getElementById('harness-frame').src`,
+          )
+          if (src && src.startsWith('http://127.0.0.1:')) break
+          await new Promise((r) => setTimeout(r, 250))
+        }
+        await assertDomAndScreenshot('m1-harness', (dom) => {
+          const d = dom as { title: string; bodyLen: number }
+          return d.title === 'DSH Desktop' && d.bodyLen > 0
+        }, false)
+        const src = (await mainWindow!.webContents.executeJavaScript(
+          `document.getElementById('harness-frame').src`,
+        )) as string
+        if (!src.startsWith('http://127.0.0.1:')) {
+          console.error(`SMOKE FAIL: harness iframe 未挂载 (${src})`)
+          app.exit(1)
+        }
+        const status = (await mainWindow!.webContents.executeJavaScript(
+          `document.getElementById('harness-status').textContent`,
+        )) as string
+        const loaded = harnessFrameLoaded || status.includes('已连接')
+        let finalStatus = status
+        if (!loaded) {
+          const waitDeadline = Date.now() + 5000
+          while (Date.now() < waitDeadline) {
+            finalStatus = (await mainWindow!.webContents.executeJavaScript(
+              `document.getElementById('harness-status').textContent`,
+            )) as string
+            if (finalStatus.includes('已连接') || harnessFrameLoaded) break
+            await new Promise((r) => setTimeout(r, 400))
+          }
+        }
+        if (!harnessFrameLoaded && !finalStatus.includes('已连接')) {
+          console.error(`SMOKE FAIL: harness iframe 页面未加载（${finalStatus}）`)
+          app.exit(1)
+        }
+        console.log(`SMOKE OK: harness 内嵌成功（iframe ${src}，状态「${finalStatus}」）`)
+        app.exit(0)
+      })()
     })
   }
 }
@@ -297,19 +349,17 @@ app.whenReady().then(async () => {
       app.exit(1)
       return
     }
-    createWindow(harness.url)
+    createSkeletonWindow()
     wireSmoke()
     return
   }
-  // 默认产品行为：harness Web UI + 菜单管理台
+  // 默认产品行为：主窗口＝四 Tab 壳，Harness Tab 内嵌官方 Web UI
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       { label: 'DSH Desktop', submenu: [{ role: 'quit', label: '退出' }] },
       {
         label: '窗口',
         submenu: [
-          { label: '管理台（Plugin / MCP / Skills）', click: () => openManagementWindow() },
-          { type: 'separator' },
           { role: 'togglefullscreen', label: '全屏' },
         ],
       },
@@ -323,9 +373,9 @@ app.whenReady().then(async () => {
     app.exit(1)
     return
   }
-  createWindow(harness.url)
+  createSkeletonWindow()
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(harness!.url)
+    if (BrowserWindow.getAllWindows().length === 0) createSkeletonWindow()
   })
 })
 

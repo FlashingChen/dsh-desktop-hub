@@ -90,13 +90,23 @@ export function convertToRows(servers: McpServerSpec[]): McpRow[] {
   })
 }
 
-/** JSON 文本 → 转换预览（YAML） */
+/** JSON 文本 → 转换预览（YAML），env/headers 中 ${VAR} 转为 DSH 的 !!js process.env.VAR */
 export function convertJsonToYaml(text: string): ConvertResult {
   try {
     const { servers, warnings } = parseMcpJson(text)
     if (servers.length === 0) return { ok: false, error: '没有可转换的服务器', warnings }
     const rows = convertToRows(servers)
-    return { ok: true, rows, yaml: stringify(rows), warnings }
+    const yamlText = stringify(rows)
+    // Claude Code 的 ${VAR} 是客户端环境替换语义；DSH 不展开，需 !!js process.env.VAR 动态求值
+    const envRefCount = (yamlText.match(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/g) ?? []).length
+    const converted = yamlText.replace(
+      /^(\s*[A-Za-z0-9_.-]+):\s*(['"])?\$\{([A-Za-z_][A-Za-z0-9_]*)\}\2\s*$/gm,
+      '$1: !!js process.env.$3',
+    )
+    if (envRefCount > 0) {
+      warnings.push(`检测到 ${envRefCount} 处环境变量引用（如 \${VAR}），已转换为 !!js process.env.VAR —— 请确保变量在启动 dsh 的环境（或 $DSH_HOME/.env）中可用`)
+    }
+    return { ok: true, rows, yaml: converted, warnings }
   } catch (err) {
     return { ok: false, error: (err as Error).message }
   }

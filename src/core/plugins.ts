@@ -41,6 +41,29 @@ export function buildPluginCommand(
   return ['plugin', '--profile', profile, action, ...args]
 }
 
+/**
+ * 归一化安装 spec：支持直接粘贴 GitHub 链接。
+ * - https://github.com/owner/repo           → github:owner/repo
+ * - https://github.com/owner/repo.git       → github:owner/repo
+ * - https://github.com/owner/repo/tree/main → github:owner/repo#main
+ * - https://github.com/owner/repo/commit/x  → github:owner/repo#x（commit 锁定）
+ * - 已是 github:owner/repo 或 npm 包名/本地路径 → 原样返回
+ */
+export function normalizeInstallSpec(spec: string): string {
+  const s = spec.trim()
+  const m = s.match(/^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:\/|$)/)
+  if (!m) return s
+  const owner = m[1]
+  let repo = m[2]
+  const rest = s.slice(m[0].length)
+  if (!rest) return `github:${owner}/${repo}`
+  const tree = rest.match(/^tree\/(.+)$/)
+  if (tree) return `github:${owner}/${repo}#${tree[1]}`
+  const commit = rest.match(/^commit\/([0-9a-fA-F]{7,40})$/)
+  if (commit) return `github:${owner}/${repo}#${commit[1]}`
+  return `github:${owner}/${repo}`
+}
+
 export interface PluginOpHandle {
   stdout: NodeJS.ReadableStream
   stderr: NodeJS.ReadableStream

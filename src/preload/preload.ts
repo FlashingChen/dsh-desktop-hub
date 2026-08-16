@@ -6,6 +6,12 @@ contextBridge.exposeInMainWorld('dshDesktop', {
     node: process.versions.node,
     chrome: process.versions.chrome,
   },
+  harness: {
+    url: () => ipcRenderer.invoke('harness:url'),
+    onFrameLoaded: (cb: (url: string) => void) => {
+      ipcRenderer.on('harness:frame-loaded', (_e, url: string) => cb(url))
+    },
+  },
   plugins: {
     list: () => ipcRenderer.invoke('plugins:list'),
     install: (spec: string) => ipcRenderer.invoke('plugins:install', spec),
@@ -21,5 +27,7 @@ contextBridge.exposeInMainWorld('dshDesktop', {
     list: () => ipcRenderer.invoke('skills:list'),
     create: (input: { name: string; description: string; body: string }) => ipcRenderer.invoke('skills:create', input),
     toggle: (input: { path: string; kind: 'model' | 'user'; value: boolean }) => ipcRenderer.invoke('skills:toggle', input),
+    importFile: (buffer: ArrayBuffer, overwrite: boolean) => ipcRenderer.invoke('skills:import-file', buffer, overwrite),
+    importUrl: (url: string, overwrite: boolean) => ipcRenderer.invoke('skills:import-url', url, overwrite),
   },
 })
