@@ -1,5 +1,5 @@
 // M1 实机验证：真实启动 dsh web → HTTP 200 → 优雅停止 → 无孤儿进程
-import { startHarness, findDsh } from '../dist/core/harness.js'
+import { startHarness, resolveDshExec } from '../dist/core/harness.js'
 
 const fail = (msg) => {
   console.error(`M1 FAIL: ${msg}`)
@@ -7,8 +7,9 @@ const fail = (msg) => {
 }
 const ok = (msg) => console.log(`PASS  ${msg}`)
 
-const dsh = findDsh()
-if (!dsh) fail('未找到 dsh')
+// 与产品启动同源：bundled runtime 优先，回退系统 PATH（干净机器仅 bundled 也能验证）
+const exec = resolveDshExec()
+if (!exec) fail('未找到 dsh 可执行文件（无 bundled runtime，PATH 中也没有 dsh）')
 
 let handle
 try {

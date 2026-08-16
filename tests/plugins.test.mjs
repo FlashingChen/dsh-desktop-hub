@@ -17,6 +17,7 @@ const {
   isPluginActive,
   activatePlugin,
   deactivatePlugin,
+  deactivatePluginIfActive,
 } = await import(join(root, 'dist', 'core', 'plugins.js'))
 
 test('listPlugins 从 bundles ∪ dependencies 解析并分类', () => {
@@ -138,6 +139,20 @@ test('activatePlugin 为无 dsh.bundle 依赖写入 patch 激活行', () => {
 })
 
 
+
+test('deactivatePluginIfActive 幂等清理 patch 激活行（remove 后残留清理）', () => {
+  const patch = `# keep
+- insert:
+    - id: my-tool
+      name: my-tool
+`
+  const cleaned = deactivatePluginIfActive(patch, 'my-tool')
+  assert.equal(isPluginActive(cleaned, 'my-tool'), false, '激活行必须被移除')
+  assert.match(cleaned, /# keep/, '无关注释必须保留')
+  // 幂等：已清理或从未激活时原样返回，不 throw
+  assert.equal(deactivatePluginIfActive(cleaned, 'my-tool'), cleaned)
+  assert.equal(deactivatePluginIfActive(patch, 'never-installed'), patch)
+})
 
 test('runPluginOp 透传退出码并支持取消', async () => {
   const bin = mkdtempSync(join(tmpdir(), 'dsh-bin-'))

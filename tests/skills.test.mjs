@@ -262,6 +262,50 @@ test('setInvocation 保留未知 frontmatter 字段与正文', () => {
   }
 })
 
+test('scanSkills 扫描 custom 与 bundled 根并标注来源（rank 300/600）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    mkdirSync(join(dir, 'custom', 'alpha'), { recursive: true })
+    writeFileSync(join(dir, 'custom', 'alpha', 'SKILL.md'), '---\nname: alpha\ndescription: 自定义 skill\n---\nb\n')
+    mkdirSync(join(dir, 'bundled', 'gamma'), { recursive: true })
+    writeFileSync(join(dir, 'bundled', 'gamma', 'SKILL.md'), '---\nname: gamma\ndescription: 随包 skill\n---\nb\n')
+    // 同名用户级 beta（rank 400 < bundled 600）与 custom 级 beta（rank 300 < 400）
+    mkdirSync(join(dir, 'home', 'skills', 'beta'), { recursive: true })
+    writeFileSync(join(dir, 'home', 'skills', 'beta', 'SKILL.md'), '---\nname: beta\ndescription: 用户级\n---\nb\n')
+    mkdirSync(join(dir, 'custom', 'beta'), { recursive: true })
+    writeFileSync(join(dir, 'custom', 'beta', 'SKILL.md'), '---\nname: beta\ndescription: 自定义级\n---\nb\n')
+    const skills = scanSkills({ dshHome: join(dir, 'home'), customDirs: [join(dir, 'custom')], bundledDir: join(dir, 'bundled') })
+    assert.equal(skills.find((s) => s.name === 'alpha')?.source, 'custom')
+    assert.equal(skills.find((s) => s.name === 'alpha')?.shadowed, false)
+    assert.equal(skills.find((s) => s.name === 'gamma')?.source, 'bundled')
+    const beta = skills.filter((s) => s.name === 'beta')
+    assert.equal(beta.length, 2, '同名应列出两个来源')
+    assert.equal(beta.find((s) => s.source === 'custom')?.shadowed, false, 'rank 300 custom 应为有效')
+    assert.equal(beta.find((s) => s.source === 'user-dsh')?.shadowed, true, 'rank 400 user 应被 custom shadowed')
+    // 不传根时 bundled/custom 不出现
+    const bare = scanSkills({ dshHome: join(dir, 'home') })
+    assert.ok(!bare.some((s) => s.source === 'bundled' || s.source === 'custom'), '未配置的根不应扫描')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('setInvocation 对扁平 skill 用文件名作为 name 回退（而非目录名）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    const file = join(dir, 'skills', 'flat-skill.md')
+    mkdirSync(join(dir, 'skills'), { recursive: true })
+    writeFileSync(file, '---\ndescription: 无 name 的扁平 skill\n---\n正文\n')
+    setInvocation(file, 'model', false)
+    const text = readFileSync(file, 'utf8')
+    assert.ok(text.includes('name: flat-skill'), `应回退为文件名: ${text}`)
+    assert.ok(!text.includes('name: skills'), '不得用目录名（skills 根目录）')
+    assert.ok(text.includes('disable-model-invocation: true'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('覆盖导入清理旧资源且为事务性', () => {
   const dir = mkdtempSync(join(tmpdir(), 'skills-'))
   try {

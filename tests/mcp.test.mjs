@@ -231,6 +231,69 @@ test('mergeMcpRows 按 id 覆盖/追加并保留其他插件与既有服务器',
   assert.equal(doc.errors.length, 0)
 })
 
+// ---- P1 修复：!!js 动态值在提取/合并/编辑/删除后必须保真（AST 行级操作）----
+
+const JS_PATCH = `- insert:
+    - id: mcp-github
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: github
+        transport: stdio
+        command: npx
+        env:
+          GITHUB_TOKEN: !!js process.env.GITHUB_TOKEN
+`
+
+test('extractMcpServers 对 !!js 动态值返回 $js 哨兵（保真提取，不 unwrap 成字面字符串）', () => {
+  const [row] = extractMcpServers(JS_PATCH)
+  assert.deepEqual(row.config.env, { GITHUB_TOKEN: { $js: 'process.env.GITHUB_TOKEN' } }, `提取应保留动态语义: ${JSON.stringify(row.config.env)}`)
+})
+
+test('mergeMcpRows 合并新行时保留既有 !!js 行（行级替换，不整表重建）', () => {
+  const next = mergeMcpRows(JS_PATCH, [
+    { id: 'mcp-added', name: MCP_PLUGIN, config: { serverName: 'added', transport: 'stdio', command: 'node' } },
+  ])
+  assert.ok(next.includes('GITHUB_TOKEN: !!js process.env.GITHUB_TOKEN'), `!!js 行必须原样保留: ${next}`)
+  assert.ok(!next.includes('GITHUB_TOKEN: process.env.GITHUB_TOKEN'), '不得退化为字面字符串')
+  assert.ok(next.includes('serverName: added'), '新行必须写入')
+  const doc = parseDocument(next)
+  assert.equal(doc.errors.length, 0)
+})
+
+test('updateMcpRow 编辑一行时保留其他行的 !!js（行级替换）', () => {
+  const patch = `${JS_PATCH}- insert:
+    - id: mcp-other
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: other
+        transport: stdio
+        command: node
+`
+  const next = updateMcpRow(patch, {
+    id: 'mcp-other',
+    name: MCP_PLUGIN,
+    config: { serverName: 'other-v2', transport: 'streamable-http', url: 'http://new' },
+  })
+  assert.ok(next.includes('GITHUB_TOKEN: !!js process.env.GITHUB_TOKEN'), `未编辑行 !!js 必须保留: ${next}`)
+  assert.ok(next.includes('serverName: other-v2'), '目标行必须更新')
+  const doc = parseDocument(next)
+  assert.equal(doc.errors.length, 0)
+})
+
+test('deleteMcpRow 删除一行时保留其余行的 !!js（行级删除）', () => {
+  const patch = `${JS_PATCH}- insert:
+    - id: mcp-other
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: other
+        transport: stdio
+        command: node
+`
+  const next = deleteMcpRow(patch, 'mcp-other')
+  assert.ok(next.includes('GITHUB_TOKEN: !!js process.env.GITHUB_TOKEN'), `剩余行 !!js 必须保留: ${next}`)
+  assert.ok(!next.includes('mcp-other'), '目标行必须删除')
+})
+
 test('atomicWriteWithBackup 原文件不存在时跳过备份并按 0600 新建；存在时保留原 mode', () => {
   const dir = mkdtempSync(join(tmpdir(), 'mcp-patch-'))
   try {

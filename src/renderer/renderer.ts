@@ -453,6 +453,21 @@ async function refreshMcpServers(): Promise<void> {
   }
 }
 
+/** 深度还原 !!js 哨兵（{ $js: 'process.env.X' } → '${X}'；其他表达式保持字面字符串），
+ * 供 MCP 编辑表单使用：转换回 renderRowsYaml 时 ${X} 会重新生成 !!js，动态语义闭环。 */
+function restoreJsRefs(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(restoreJsRefs)
+  if (value && typeof value === 'object') {
+    const o = value as Record<string, unknown>
+    if (typeof o.$js === 'string') {
+      const m = o.$js.match(/^process\.env\.([A-Za-z_][A-Za-z0-9_]*)$/)
+      return m ? `\${${m[1]}}` : o.$js
+    }
+    return Object.fromEntries(Object.entries(o).map(([k, v]) => [k, restoreJsRefs(v)]))
+  }
+  return value
+}
+
 function startMcpEdit(id: string): void {
   const row = managedMcpRows.find((candidate) => candidate.id === id)
   const input = document.getElementById('mcp-json') as HTMLTextAreaElement | null
@@ -467,7 +482,8 @@ function startMcpEdit(id: string): void {
   input.value = JSON.stringify({ mcpServers: { [serverName]: config } }, null, 2)
   if (preview) preview.textContent = ''
   editingMcpId = row.id
-  mcpDraftRows = [row]
+  // 哨兵还原后作为编辑草稿：即使不重新转换，保存时 ${VAR} 也能恢复 !!js
+  mcpDraftRows = [{ ...row, config: restoreJsRefs(row.config) as Record<string, unknown> }]
   setMcpEditorState()
   setMcpStatus(`正在编辑 MCP「${serverName}」；转换后可保存修改`, 'ok')
 }
@@ -604,15 +620,29 @@ async function refreshSkills(): Promise<void> {
     const tdSource = document.createElement('td')
     tdSource.textContent = SKILL_SOURCE_LABEL[s.source] ?? s.source
     const tdModel = document.createElement('td')
-    const btnModel = document.createElement('button')
-    btnModel.textContent = s.modelInvocable ? '开' : '关'
-    btnModel.addEventListener('click', () => void toggleSkill(s.name, s.source, 'model', !s.modelInvocable))
-    tdModel.appendChild(btnModel)
     const tdUser = document.createElement('td')
-    const btnUser = document.createElement('button')
-    btnUser.textContent = s.userInvocable ? '开' : '关'
-    btnUser.addEventListener('click', () => void toggleSkill(s.name, s.source, 'user', !s.userInvocable))
-    tdUser.appendChild(btnUser)
+    // 只有用户级（~/.dsh/skills、~/.agents/skills）允许壳层切换；项目/自定义/随包只读展示
+    if (s.source === 'user-dsh' || s.source === 'user-agents') {
+      const btnModel = document.createElement('button')
+      btnModel.textContent = s.modelInvocable ? '开' : '关'
+      btnModel.addEventListener('click', () => void toggleSkill(s.name, s.source, 'model', !s.modelInvocable))
+      tdModel.appendChild(btnModel)
+      const btnUser = document.createElement('button')
+      btnUser.textContent = s.userInvocable ? '开' : '关'
+      btnUser.addEventListener('click', () => void toggleSkill(s.name, s.source, 'user', !s.userInvocable))
+      tdUser.appendChild(btnUser)
+    } else {
+      const spanModel = document.createElement('span')
+      spanModel.className = 'tag'
+      spanModel.textContent = s.modelInvocable ? '开' : '关'
+      spanModel.title = '仅用户级 skill 可在此切换'
+      tdModel.appendChild(spanModel)
+      const spanUser = document.createElement('span')
+      spanUser.className = 'tag'
+      spanUser.textContent = s.userInvocable ? '开' : '关'
+      spanUser.title = '仅用户级 skill 可在此切换'
+      tdUser.appendChild(spanUser)
+    }
     tr.append(tdName, tdDesc, tdSource, tdModel, tdUser)
     el.appendChild(tr)
   }
@@ -742,6 +772,13 @@ async function restartHarness(): Promise<void> {
     setHarnessStatusText({ state: 'exited', code: -1 })
     const el = document.getElementById('harness-status')
     if (el) el.textContent = `重启失败: ${res.error ?? ''}`
+    return
+  }
+  // 重启后 --port 0 会换新端口：必须把 iframe 重挂到新 URL，否则停留在已死进程的旧端口
+  const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
+  if (frame && res.url) {
+    frame.src = res.url
+    setHarnessStatusText({ state: 'ready', url: res.url })
   }
 }
 
