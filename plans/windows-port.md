@@ -80,6 +80,41 @@ PRD §3.4 明确 MVP 目标含 Windows（最大用户盘）；plan.md「下一�
 - [ ] S4 electron-builder --win nsis 出包（Windows 实机/CI），安装试跑
 - [ ] S5 文档：README 平台声明、已知限制、Windows 机器操作清单（本节下附）
 
+## Windows 机器操作清单（S3，在 Windows 机器 PowerShell 中执行）
+
+```powershell
+# 1. 准备：安装 Node.js LTS 24（https://nodejs.org；跑脚本需要，打包产物不依赖）
+node --version
+
+# 2. 拉取分支代码
+cd ~
+git clone https://github.com/FlashingChen/dsh-desktop-hub.git
+cd dsh-desktop-hub
+git checkout FlashingChen/win
+
+# 3. 依赖 + 平台无关验证（全绿才继续）
+npm ci
+npm run verify
+
+# 4. 关键：win32 运行时捆绑（下载 win-x64.zip → SHA256 → adm-zip 解压 → node.exe 跑 npm ci 装 dsh）
+node scripts/bundle-runtime.mjs
+# 预期：末尾 [bundle] OK: ...dsh.cmd + ...pnpm.cmd；manifest platform=win32 arch=x64
+
+# 5. 决议验证①：dsh web 在 Windows 真实启动 → HTTP 200 → taskkill 优雅停止 → 无孤儿
+npm run verify:m1
+
+# 6. 决议验证②：Electron 冒烟（iframe 内嵌 harness UI + 四 Tab + 截图 artifacts/m1-harness.png）
+npm run smoke:harness
+
+# 7. 出包
+npx electron-builder --win nsis --x64 --publish never
+# 预期：release\DSH-Desktop-Hub-0.1.0-x64.exe
+
+# 8. 安装 exe 试跑：默认模式（四 Tab + Harness iframe 内嵌）、插件/MCP/Skills 各点一遍、退出后任务管理器无残留 node.exe
+```
+
+**请回报**：第 4/5/6 步输出；第 8 步 Harness 是否正常加载、有无报错面板；退出后是否无孤儿进程。
+
 ## Verification
 
 - 平台无关：`npm run verify` 全绿（mac 本地回归）
