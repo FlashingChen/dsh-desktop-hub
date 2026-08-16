@@ -31,6 +31,32 @@ interface DesktopApi {
     remove: (name: string) => Promise<PluginOpResult>
     update: () => Promise<PluginOpResult>
   }
+  mcp: {
+    list: () => Promise<McpListResult>
+    convert: (jsonText: string) => Promise<McpConvertResult>
+    apply: (rows: unknown[]) => Promise<McpApplyResult>
+  }
+}
+
+interface McpListResult {
+  ok: boolean
+  profile?: string
+  servers?: { id: string; config: Record<string, unknown> }[]
+  error?: string
+}
+
+interface McpConvertResult {
+  ok: boolean
+  rows?: unknown[]
+  yaml?: string
+  warnings?: string[]
+  error?: string
+}
+
+interface McpApplyResult {
+  ok: boolean
+  backup?: string
+  error?: string
 }
 
 type DesktopWindow = Window & { dshDesktop?: DesktopApi }
@@ -116,10 +142,69 @@ async function removePlugin(name: string): Promise<void> {
 document.getElementById('plugin-install')?.addEventListener('click', () => void installPlugin())
 document.getElementById('plugin-refresh')?.addEventListener('click', () => void refreshPlugins())
 
+// ---- MCP 面板 ----
+let mcpRows: unknown[] = []
+
+function setMcpStatus(text: string, kind: 'error' | 'ok' = 'ok'): void {
+  const el = document.getElementById('mcp-warnings')
+  if (!el) return
+  el.textContent = text
+  el.className = `status ${kind}`
+}
+
+async function refreshMcpServers(): Promise<void> {
+  if (!api) return
+  const el = document.getElementById('mcp-servers')
+  if (!el) return
+  const res = await api.mcp.list()
+  el.textContent = res.ok ? `profile「${res.profile}」现有 MCP 服务器: ${res.servers?.length ?? 0}` : `加载失败: ${res.error ?? ''}`
+  el.className = `status ${res.ok ? 'ok' : 'error'}`
+}
+
+async function convertPreview(): Promise<void> {
+  const input = document.getElementById('mcp-json') as HTMLTextAreaElement | null
+  const preview = document.getElementById('mcp-preview') as HTMLPreElement | null
+  if (!input || !preview || !api) return
+  const text = input.value.trim()
+  if (!text) {
+    setMcpStatus('请先粘贴 JSON', 'error')
+    preview.textContent = ''
+    return
+  }
+  const res = await api.mcp.convert(text)
+  if (!res.ok) {
+    setMcpStatus(`转换失败: ${res.error ?? ''}`, 'error')
+    preview.textContent = ''
+    mcpRows = []
+    return
+  }
+  mcpRows = res.rows ?? []
+  preview.textContent = res.yaml ?? ''
+  setMcpStatus(`转换成功: ${mcpRows.length} 个服务器${res.warnings && res.warnings.length ? `\n警告: ${res.warnings.join('；')}` : ''}`, 'ok')
+}
+
+async function applyMcp(): Promise<void> {
+  if (!api) return
+  if (mcpRows.length === 0) {
+    setMcpStatus('请先转换得到 YAML 再写入', 'error')
+    return
+  }
+  if (!confirm(`确认将 ${mcpRows.length} 个 MCP 服务器写入 profile「web」的 cordis.patch.yml？\n服务器命令将在本机执行（沙箱之外），写入前自动备份。`)) return
+  setMcpStatus('写入中…')
+  const res = await api.mcp.apply(mcpRows)
+  setMcpStatus(res.ok ? `写入成功（备份: ${res.backup}），HMR 热生效中` : `写入失败: ${res.error ?? ''}`, res.ok ? 'ok' : 'error')
+  await refreshMcpServers()
+}
+
+document.getElementById('mcp-convert')?.addEventListener('click', () => void convertPreview())
+document.getElementById('mcp-apply')?.addEventListener('click', () => void applyMcp())
+document.getElementById('mcp-list')?.addEventListener('click', () => void refreshMcpServers())
+
 if (api) {
   const el = document.getElementById('footer-versions')
   if (el) {
     el.textContent = `Electron ${api.versions.electron} · Node ${api.versions.node} · Chromium ${api.versions.chrome}`
   }
   void refreshPlugins()
+  void refreshMcpServers()
 }

@@ -12,4 +12,9 @@ contextBridge.exposeInMainWorld('dshDesktop', {
     remove: (name: string) => ipcRenderer.invoke('plugins:remove', name),
     update: () => ipcRenderer.invoke('plugins:update'),
   },
+  mcp: {
+    list: () => ipcRenderer.invoke('mcp:list'),
+    convert: (jsonText: string) => ipcRenderer.invoke('mcp:convert', jsonText),
+    apply: (rows: unknown[]) => ipcRenderer.invoke('mcp:apply', rows),
+  },
 })

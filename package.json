@@ -19,5 +19,8 @@
     "@types/node": "^24.0.0",
     "electron": "^37.0.0",
     "typescript": "^5.8.0"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
   }
 }

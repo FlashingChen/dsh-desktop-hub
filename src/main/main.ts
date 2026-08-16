@@ -4,6 +4,14 @@ import { dirname, join } from 'node:path'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { startHarness, findDsh, dshHome, listProfiles, type HarnessHandle } from '../core/harness.js'
 import { listPlugins, runPluginOp } from '../core/plugins.js'
+import {
+  convertJsonToYaml,
+  extractMcpServers,
+  replaceMcpRows,
+  atomicWriteWithBackup,
+  readPatch,
+  type McpRow,
+} from '../core/mcp.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const RENDERER_HTML = join(__dirname, '..', 'renderer', 'index.html')
@@ -49,6 +57,36 @@ function registerIpc(): void {
     return runPluginMutation('remove', [name.trim()])
   })
   ipcMain.handle('plugins:update', () => runPluginMutation('update', []))
+  ipcMain.handle('mcp:list', () => {
+    const profile = activeProfile()
+    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, servers: [] }
+    try {
+      const servers = extractMcpServers(readPatch(profile.dir)).map((r) => ({
+        id: r.id,
+        config: r.config as Record<string, unknown>,
+      }))
+      return { ok: true as const, profile: ACTIVE_PROFILE, servers }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, servers: [] }
+    }
+  })
+  ipcMain.handle('mcp:convert', (_e, jsonText: string) => {
+    if (typeof jsonText !== 'string') return { ok: false as const, error: '输入无效', yaml: '', warnings: [] }
+    return convertJsonToYaml(jsonText)
+  })
+  ipcMain.handle('mcp:apply', (_e, rows: McpRow[]) => {
+    const profile = activeProfile()
+    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, backup: '' }
+    if (!Array.isArray(rows) || rows.length === 0) return { ok: false as const, error: '没有可写入的服务器', backup: '' }
+    try {
+      const patchFile = join(profile.dir, 'cordis.patch.yml')
+      const next = replaceMcpRows(readPatch(profile.dir), rows)
+      const backup = atomicWriteWithBackup(patchFile, next)
+      return { ok: true as const, backup, rows: rows.length }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, backup: '' }
+    }
+  })
 }
 
 function createWindow(url: string): void {
@@ -74,7 +112,7 @@ function createSkeletonWindow(): void {
   createWindow(`file://${RENDERER_HTML}`)
 }
 
-async function assertDomAndScreenshot(tag: string, assert: (dom: unknown) => boolean): Promise<void> {
+async function assertDomAndScreenshot(tag: string, assert: (dom: unknown) => boolean, exitAfter = true): Promise<void> {
   const dom = (await mainWindow!.webContents.executeJavaScript(`(() => {
     const tabs = [...document.querySelectorAll('[data-tab]')].map(b => b.dataset.tab)
     const active = document.querySelector('.tab.active')?.dataset.tab
@@ -106,7 +144,7 @@ async function assertDomAndScreenshot(tag: string, assert: (dom: unknown) => boo
   mkdirSync(dirname(out), { recursive: true })
   writeFileSync(out, image.toPNG())
   console.log(`SMOKE OK: ${tag} DOM ${JSON.stringify({ title: dom.title, bodyLen: dom.bodyLen })} screenshot ${out}`)
-  app.exit(0)
+  if (exitAfter) app.exit(0)
 }
 
 function wireSmoke(): void {
@@ -120,10 +158,27 @@ function wireSmoke(): void {
         // 等待 Plugin 面板通过 IPC 加载真实 profile 插件
         const deadline = Date.now() + 5000
         while (Date.now() < deadline) {
-          const n = await mainWindow!.webContents.executeJavaScript(
-            `document.querySelectorAll('#plugin-rows tr').length`,
+          const ready = await mainWindow!.webContents.executeJavaScript(
+            `document.querySelectorAll('#plugin-rows tr').length > 0 && document.getElementById('mcp-servers').textContent.length > 0`,
           )
-          if (n > 0) break
+          if (ready) break
+          await new Promise((r) => setTimeout(r, 200))
+        }
+        // 驱动 MCP JSON→YAML 转换（只读，不写 profile）
+        await mainWindow!.webContents.executeJavaScript(`(() => {
+          const ta = document.getElementById('mcp-json')
+          ta.value = JSON.stringify({ mcpServers: {
+            github: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], env: { GITHUB_TOKEN: 'x' } },
+            remote: { type: 'http', url: 'https://mcp.example.com/search', headers: { Authorization: 'Bearer t' } }
+          }})
+          document.getElementById('mcp-convert').click()
+        })()`)
+        const convDeadline = Date.now() + 5000
+        while (Date.now() < convDeadline) {
+          const done = await mainWindow!.webContents.executeJavaScript(
+            `document.getElementById('mcp-preview').textContent.length > 0`,
+          )
+          if (done) break
           await new Promise((r) => setTimeout(r, 200))
         }
         await assertDomAndScreenshot('m0-smoke', (dom) => {
@@ -137,7 +192,19 @@ function wireSmoke(): void {
             rows.length >= 4 &&
             rows.some((r) => r.includes('dsh-base'))
           )
-        })
+        }, false)
+        // MCP 转换结果单独校验
+        const mcp = (await mainWindow!.webContents.executeJavaScript(`(() => {
+          const preview = document.getElementById('mcp-preview').textContent
+          const warnings = document.getElementById('mcp-warnings').textContent
+          return { preview, warnings, servers: document.getElementById('mcp-servers').textContent }
+        })()`)) as { preview: string; warnings: string; servers: string }
+        if (!mcp.preview.includes('dsh-mcp-client') || !mcp.preview.includes('streamable-http')) {
+          console.error(`SMOKE FAIL: MCP 转换异常 ${JSON.stringify(mcp)}`)
+          app.exit(1)
+        }
+        console.log(`SMOKE OK: MCP convert 端到端通过（${JSON.stringify(mcp.servers)}）`)
+        app.exit(0)
       })()
     })
   } else if (HARNESS_SMOKE) {

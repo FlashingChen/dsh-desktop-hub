@@ -17,8 +17,9 @@
   - 验证：单测（临时 profile 模拟 bundle 解析）；真实 `web` profile 只读列表正确。
   - 实测 2026-08-16：单测 4/4（分类/排序/命令形态/退出码+取消）；Electron 冒烟断言真实列表 ≥4 项含 dsh-base；真实 CLI `dsh plugin --profile web why` 通。
 
-- [ ] **M3 MCP 系统** — JSON→YAML 转换器（PRD §2.4 已验证算法）+ profile `cordis.patch.yml` 事务读写（备份/回滚）+ 服务器列表/增删改。
+- [x] **M3 MCP 系统** — JSON→YAML 转换器（PRD §2.4 已验证算法）+ profile `cordis.patch.yml` 事务读写（备份/回滚）+ 服务器列表/增删改。
   - 验证：单测（转换器 + patch 事务，损坏写入可回滚）；真实 `web` profile 的 cordis.patch.yml 只读展示。
+  - 实测 2026-08-16：单测 8/8（混合输入/sse 警告/格式拒绝/YAML 同构/提取/替换保留注释/空 patch 新建/备份事务）；Electron 冒烟端到端驱动转换（renderer→IPC→core→renderer），真实 profile 只读列表 = 0。
 
 - [ ] **M4 Skills 系统** — rank 100-600 目录扫描；SKILL.md/平铺 md 解析 + frontmatter（name/description/disable-model-invocation/user-invocable）；新建/编辑/可见性切换。
   - 验证：单测（fixture 目录，含同名 shadow 判定）；真实 `~/.dsh/skills/huashu-design` 展示正确。

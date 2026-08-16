@@ -65,6 +65,16 @@
       table.list { width: 100%; border-collapse: collapse; font-size: 13px; }
       table.list th, table.list td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }
       table.list th { color: var(--muted); font-weight: 500; }
+      textarea {
+        width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line);
+        background: var(--panel); color: var(--text); font-family: ui-monospace, Menlo, monospace;
+        font-size: 12px; resize: vertical; margin-bottom: 10px;
+      }
+      pre {
+        background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+        padding: 10px; font-size: 12px; overflow: auto; max-height: 320px;
+        font-family: ui-monospace, Menlo, monospace; color: var(--text);
+      }
       footer {
         padding: 6px 12px;
         font-size: 11px;
@@ -105,7 +115,19 @@
         </table>
       </section>
       <section class="panel" id="panel-mcp">
-        <div class="placeholder">MCP 系统：M3 将在此实现 JSON→YAML 转换。</div>
+        <h3>MCP 系统</h3>
+        <p class="muted">粘贴 Claude Code / Cursor 风格 MCP JSON，转换为 DSH 所需 YAML 并写入 profile「web」的 cordis.patch.yml（写入前自动备份，HMR 热生效）。</p>
+        <div class="row">
+          <button id="mcp-list">刷新服务器</button>
+          <span id="mcp-servers" class="status"></span>
+        </div>
+        <textarea id="mcp-json" rows="8" placeholder='{"mcpServers": { "name": { "command": "npx", "args": ["-y", "…"], "env": {"TOKEN": "…"} } } }'></textarea>
+        <div class="row">
+          <button id="mcp-convert">转换预览</button>
+          <button id="mcp-apply" class="primary">写入 patch（备份 + 确认）</button>
+        </div>
+        <div id="mcp-warnings" class="status"></div>
+        <pre id="mcp-preview"></pre>
       </section>
       <section class="panel" id="panel-skills">
         <div class="placeholder">Skills 系统：M4 将在此实现 skills 管理。</div>
