@@ -36,6 +36,33 @@ interface DesktopApi {
     convert: (jsonText: string) => Promise<McpConvertResult>
     apply: (rows: unknown[]) => Promise<McpApplyResult>
   }
+  skills: {
+    list: () => Promise<SkillsListResult>
+    create: (input: { name: string; description: string; body: string }) => Promise<SkillsOpResult>
+    toggle: (input: { path: string; kind: 'model' | 'user'; value: boolean }) => Promise<SkillsOpResult>
+  }
+}
+
+interface SkillsSummary {
+  name: string
+  description: string
+  source: string
+  path: string
+  shadowed: boolean
+  modelInvocable: boolean
+  userInvocable: boolean
+}
+
+interface SkillsListResult {
+  ok: boolean
+  skills?: SkillsSummary[]
+  error?: string
+}
+
+interface SkillsOpResult {
+  ok: boolean
+  path?: string
+  error?: string
 }
 
 interface McpListResult {
@@ -200,6 +227,83 @@ document.getElementById('mcp-convert')?.addEventListener('click', () => void con
 document.getElementById('mcp-apply')?.addEventListener('click', () => void applyMcp())
 document.getElementById('mcp-list')?.addEventListener('click', () => void refreshMcpServers())
 
+// ---- Skills 面板 ----
+const SOURCE_LABEL: Record<string, string> = {
+  'project-dsh': '项目 .dsh/skills',
+  'project-agents': '项目 .agents/skills',
+  custom: '自定义目录',
+  'user-dsh': '用户 ~/.dsh/skills',
+  'user-agents': '用户 ~/.agents/skills',
+  bundled: '随包',
+}
+
+function setSkillsStatus(text: string, kind: 'error' | 'ok' = 'ok'): void {
+  const el = document.getElementById('skills-status')
+  if (!el) return
+  el.textContent = text
+  el.className = `status ${kind}`
+}
+
+async function refreshSkills(): Promise<void> {
+  const el = document.getElementById('skills-rows')
+  if (!el || !api) return
+  el.innerHTML = '<tr><td colspan="5">加载中…</td></tr>'
+  const res = await api.skills.list()
+  if (!res.ok || !res.skills) {
+    el.innerHTML = ''
+    setSkillsStatus(`加载失败: ${res.error ?? ''}`, 'error')
+    return
+  }
+  el.innerHTML = res.skills
+    .map(
+      (s) => `<tr${s.shadowed ? ' class="dim"' : ''}>
+        <td>${s.name}${s.shadowed ? ' <span class="tag">被遮蔽</span>' : ''}</td>
+        <td>${s.description || '—'}</td>
+        <td>${SOURCE_LABEL[s.source] ?? s.source}</td>
+        <td><button data-toggle="${s.path}" data-kind="model" data-value="${s.modelInvocable ? '0' : '1'}">${s.modelInvocable ? '开' : '关'}</button></td>
+        <td><button data-toggle="${s.path}" data-kind="user" data-value="${s.userInvocable ? '0' : '1'}">${s.userInvocable ? '开' : '关'}</button></td>
+      </tr>`,
+    )
+    .join('')
+  el.querySelectorAll('[data-toggle]').forEach((btn) => {
+    btn.addEventListener('click', () =>
+      void toggleSkill(
+        String((btn as HTMLElement).dataset.toggle),
+        (btn as HTMLElement).dataset.kind as 'model' | 'user',
+        (btn as HTMLElement).dataset.value === '1',
+      ),
+    )
+  })
+  setSkillsStatus(`共 ${res.skills.length} 个 skill（含被遮蔽项）`)
+}
+
+async function toggleSkill(path: string, kind: 'model' | 'user', value: boolean): Promise<void> {
+  if (!api) return
+  const label = kind === 'model' ? '模型可见' : '用户可见'
+  if (!confirm(`确认将「${path.split('/').pop()}」的${label}切换为${value ? '开启' : '关闭'}？`)) return
+  const res = await api.skills.toggle({ path, kind, value })
+  setSkillsStatus(res.ok ? `${label}已更新，即时生效` : `失败: ${res.error ?? ''}`, res.ok ? 'ok' : 'error')
+  await refreshSkills()
+}
+
+async function createSkill(): Promise<void> {
+  const name = (document.getElementById('skill-name') as HTMLInputElement | null)?.value.trim() ?? ''
+  const desc = (document.getElementById('skill-desc') as HTMLInputElement | null)?.value.trim() ?? ''
+  const body = (document.getElementById('skill-body') as HTMLTextAreaElement | null)?.value ?? ''
+  if (!api) return
+  if (!name) {
+    setSkillsStatus('名称必填（kebab-case）', 'error')
+    return
+  }
+  if (!confirm(`确认在 ~/.dsh/skills 创建 skill「${name}」？`)) return
+  const res = await api.skills.create({ name, description: desc, body })
+  setSkillsStatus(res.ok ? `已创建: ${res.path}` : `创建失败: ${res.error ?? ''}`, res.ok ? 'ok' : 'error')
+  if (res.ok) await refreshSkills()
+}
+
+document.getElementById('skills-refresh')?.addEventListener('click', () => void refreshSkills())
+document.getElementById('skill-create')?.addEventListener('click', () => void createSkill())
+
 if (api) {
   const el = document.getElementById('footer-versions')
   if (el) {
@@ -207,4 +311,5 @@ if (api) {
   }
   void refreshPlugins()
   void refreshMcpServers()
+  void refreshSkills()
 }

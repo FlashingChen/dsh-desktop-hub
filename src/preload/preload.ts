@@ -17,4 +17,9 @@ contextBridge.exposeInMainWorld('dshDesktop', {
     convert: (jsonText: string) => ipcRenderer.invoke('mcp:convert', jsonText),
     apply: (rows: unknown[]) => ipcRenderer.invoke('mcp:apply', rows),
   },
+  skills: {
+    list: () => ipcRenderer.invoke('skills:list'),
+    create: (input: { name: string; description: string; body: string }) => ipcRenderer.invoke('skills:create', input),
+    toggle: (input: { path: string; kind: 'model' | 'user'; value: boolean }) => ipcRenderer.invoke('skills:toggle', input),
+  },
 })

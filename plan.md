@@ -21,8 +21,9 @@
   - 验证：单测（转换器 + patch 事务，损坏写入可回滚）；真实 `web` profile 的 cordis.patch.yml 只读展示。
   - 实测 2026-08-16：单测 8/8（混合输入/sse 警告/格式拒绝/YAML 同构/提取/替换保留注释/空 patch 新建/备份事务）；Electron 冒烟端到端驱动转换（renderer→IPC→core→renderer），真实 profile 只读列表 = 0。
 
-- [ ] **M4 Skills 系统** — rank 100-600 目录扫描；SKILL.md/平铺 md 解析 + frontmatter（name/description/disable-model-invocation/user-invocable）；新建/编辑/可见性切换。
+- [x] **M4 Skills 系统** — rank 100-600 目录扫描；SKILL.md/平铺 md 解析 + frontmatter（name/description/disable-model-invocation/user-invocable）；新建/编辑/可见性切换。
   - 验证：单测（fixture 目录，含同名 shadow 判定）；真实 `~/.dsh/skills/huashu-design` 展示正确。
+  - 实测 2026-08-16：单测 4/4（rank 合并/shadowed/往返一致/创建 kebab 校验/可见性切换）；Electron 冒烟真实数据：huashu-design(user-dsh)+media-use(user-agents)=2 个，rank 扫描正确。
 
 - [ ] **M5 桌面整合与打包** — 多 Tab UI（Harness / Plugin / MCP / Skills）整合；electron-builder 出 dmg。
   - 验证：应用启动后各 Tab 功能走通；打包产物存在且可启动。

@@ -65,6 +65,11 @@
       table.list { width: 100%; border-collapse: collapse; font-size: 13px; }
       table.list th, table.list td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }
       table.list th { color: var(--muted); font-weight: 500; }
+      table.list tr.dim { opacity: 0.5; }
+      .tag {
+        font-size: 10px; color: var(--muted); border: 1px solid var(--line);
+        border-radius: 4px; padding: 1px 5px; margin-left: 4px;
+      }
       textarea {
         width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line);
         background: var(--panel); color: var(--text); font-family: ui-monospace, Menlo, monospace;
@@ -130,7 +135,27 @@
         <pre id="mcp-preview"></pre>
       </section>
       <section class="panel" id="panel-skills">
-        <div class="placeholder">Skills 系统：M4 将在此实现 skills 管理。</div>
+        <h3>Skills 系统</h3>
+        <p class="muted">管理本机可用的 skills（rank: 项目 .dsh/.agents → 用户 ~/.dsh/skills）。改动即时生效，无需重启。</p>
+        <div class="row">
+          <button id="skills-refresh">刷新</button>
+          <span id="skills-status" class="status"></span>
+        </div>
+        <table class="list">
+          <thead>
+            <tr><th>名称</th><th>描述</th><th>来源</th><th>模型可见</th><th>用户可见</th></tr>
+          </thead>
+          <tbody id="skills-rows"></tbody>
+        </table>
+        <h3 style="margin-top:16px">新建 skill（用户级 ~/.dsh/skills）</h3>
+        <div class="row">
+          <input id="skill-name" type="text" placeholder="kebab-case 名称" />
+          <input id="skill-desc" type="text" placeholder="描述" />
+        </div>
+        <textarea id="skill-body" rows="4" placeholder="skill 正文（Markdown 指令）"></textarea>
+        <div class="row">
+          <button id="skill-create" class="primary">创建</button>
+        </div>
       </section>
     </main>
     <footer>

@@ -12,6 +12,7 @@ import {
   readPatch,
   type McpRow,
 } from '../core/mcp.js'
+import { scanSkills, createSkill, setInvocation } from '../core/skills.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const RENDERER_HTML = join(__dirname, '..', 'renderer', 'index.html')
@@ -87,6 +88,35 @@ function registerIpc(): void {
       return { ok: false as const, error: (err as Error).message, backup: '' }
     }
   })
+  ipcMain.handle('skills:list', () => {
+    try {
+      return { ok: true as const, skills: scanSkills({ dshHome: dshHome() }) }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, skills: [] }
+    }
+  })
+  ipcMain.handle('skills:create', (_e, input: { name: string; description: string; body: string }) => {
+    if (!input || typeof input.name !== 'string' || typeof input.description !== 'string' || typeof input.body !== 'string') {
+      return { ok: false as const, error: '输入无效', path: '' }
+    }
+    try {
+      const path = createSkill({ root: join(dshHome(), 'skills'), name: input.name, description: input.description, body: input.body })
+      return { ok: true as const, path }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, path: '' }
+    }
+  })
+  ipcMain.handle('skills:toggle', (_e, input: { path: string; kind: 'model' | 'user'; value: boolean }) => {
+    if (!input || typeof input.path !== 'string' || !['model', 'user'].includes(input.kind)) {
+      return { ok: false as const, error: '输入无效' }
+    }
+    try {
+      setInvocation(input.path, input.kind, input.value)
+      return { ok: true as const }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message }
+    }
+  })
 }
 
 function createWindow(url: string): void {
@@ -159,7 +189,7 @@ function wireSmoke(): void {
         const deadline = Date.now() + 5000
         while (Date.now() < deadline) {
           const ready = await mainWindow!.webContents.executeJavaScript(
-            `document.querySelectorAll('#plugin-rows tr').length > 0 && document.getElementById('mcp-servers').textContent.length > 0`,
+            `document.querySelectorAll('#plugin-rows tr').length > 0 && document.getElementById('mcp-servers').textContent.length > 0 && document.querySelectorAll('#skills-rows tr').length > 0`,
           )
           if (ready) break
           await new Promise((r) => setTimeout(r, 200))
@@ -204,6 +234,17 @@ function wireSmoke(): void {
           app.exit(1)
         }
         console.log(`SMOKE OK: MCP convert 端到端通过（${JSON.stringify(mcp.servers)}）`)
+        // Skills 列表校验（真实 ~/.dsh/skills）
+        const skills = (await mainWindow!.webContents.executeJavaScript(`(() => {
+          const rows = [...document.querySelectorAll('#skills-rows tr')].map(r => r.textContent ?? '')
+          const status = document.getElementById('skills-status').textContent
+          return { rows, status }
+        })()`)) as { rows: string[]; status: string }
+        if (!skills.rows.some((r) => r.includes('huashu-design')) || !skills.status.includes('共')) {
+          console.error(`SMOKE FAIL: Skills 加载异常 ${JSON.stringify(skills)}`)
+          app.exit(1)
+        }
+        console.log(`SMOKE OK: Skills 真实数据加载（${JSON.stringify(skills.status)}）`)
         app.exit(0)
       })()
     })
