@@ -1,4 +1,7 @@
 node_modules/
 dist/
+release/
+resources/
+artifacts/
 *.log
 .DS_Store
