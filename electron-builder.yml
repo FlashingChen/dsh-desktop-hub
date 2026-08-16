@@ -1,5 +1,5 @@
-appId: com.dshdesktop.app
-productName: DSH Desktop
+appId: com.dshdesktophub.app
+productName: DSH Desktop Hub
 directories:
   output: release
   buildResources: build
@@ -12,10 +12,11 @@ asarUnpack:
   - resources/node/**/*
 mac:
   category: public.app-category.developer-tools
+  icon: build/icon.png
   target:
     - target: dmg
       arch: [arm64]
   identity: null
 dmg:
-  artifactName: DSH-Desktop-${version}-${arch}.${ext}
+  artifactName: DSH-Desktop-Hub-${version}-${arch}.${ext}
 npmRebuild: false

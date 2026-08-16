@@ -1,0 +1,10 @@
+{
+  "nodeVersion": "v24.10.0",
+  "nodeTarball": "node-v24.10.0-darwin-arm64.tar.gz",
+  "nodeSha256": "fbc3d6e1e1d962450d058e918214373872cc4c46e08673f31c35932afac4a8c5",
+  "dshVersion": "0.1.0-rc.6",
+  "pnpmVersion": "11.22.0",
+  "platform": "darwin",
+  "arch": "arm64",
+  "generatedAt": "2026-08-16T10:23:01.090Z"
+}

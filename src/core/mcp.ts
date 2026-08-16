@@ -1,7 +1,7 @@
 // MCP 系统核心：JSON 导入转换 + profile cordis.patch.yml 事务读写
 import { parseDocument, stringify } from 'yaml'
-import { readFileSync, writeFileSync, renameSync, copyFileSync, mkdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync, writeFileSync, renameSync, copyFileSync, mkdirSync, statSync, chmodSync } from 'node:fs'
+import { dirname, join, basename } from 'node:path'
 
 export const MCP_PLUGIN = '@deepseek-ai/dsh-mcp-client'
 const SRV_NAME = /^[A-Za-z0-9_-]{1,32}$/
@@ -90,24 +90,33 @@ export function convertToRows(servers: McpServerSpec[]): McpRow[] {
   })
 }
 
+const ENV_REF = /\$\{[A-Za-z_][A-Za-z0-9_]*\}/g
+
+/**
+ * 唯一的 MCP 行序列化器：预览与落盘共用，保证所见即所写。
+ * Claude Code 的 `${VAR}` 是客户端环境替换语义；DSH 不展开，需转成
+ * `!!js process.env.VAR` 动态求值。行级纯 `${VAR}` 值被转换，混合字符串保持字面。
+ */
+export function renderRowsYaml(rows: McpRow[]): string {
+  const text = stringify([{ insert: rows }])
+  return text.replace(
+    /^(\s*[A-Za-z0-9_.-]+):\s*(['"])?\$\{([A-Za-z_][A-Za-z0-9_]*)\}\2\s*$/gm,
+    '$1: !!js process.env.$3',
+  )
+}
+
 /** JSON 文本 → 转换预览（YAML），env/headers 中 ${VAR} 转为 DSH 的 !!js process.env.VAR */
 export function convertJsonToYaml(text: string): ConvertResult {
   try {
     const { servers, warnings } = parseMcpJson(text)
     if (servers.length === 0) return { ok: false, error: '没有可转换的服务器', warnings }
     const rows = convertToRows(servers)
-    // 预览必须与 cordis.patch.yml 同构；插件行要包在顶层 insert 操作下。
-    const yamlText = stringify([{ insert: rows }])
-    // Claude Code 的 ${VAR} 是客户端环境替换语义；DSH 不展开，需 !!js process.env.VAR 动态求值
-    const envRefCount = (yamlText.match(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/g) ?? []).length
-    const converted = yamlText.replace(
-      /^(\s*[A-Za-z0-9_.-]+):\s*(['"])?\$\{([A-Za-z_][A-Za-z0-9_]*)\}\2\s*$/gm,
-      '$1: !!js process.env.$3',
-    )
+    const envRefCount = (stringify([{ insert: rows }]).match(ENV_REF) ?? []).length
+    const yamlText = renderRowsYaml(rows)
     if (envRefCount > 0) {
       warnings.push(`检测到 ${envRefCount} 处环境变量引用（如 \${VAR}），已转换为 !!js process.env.VAR —— 请确保变量在启动 dsh 的环境（或 $DSH_HOME/.env）中可用`)
     }
-    return { ok: true, rows, yaml: converted, warnings }
+    return { ok: true, rows, yaml: yamlText, warnings }
   } catch (err) {
     return { ok: false, error: (err as Error).message }
   }
@@ -164,7 +173,8 @@ export function extractMcpServers(patchText: string): McpRow[] {
   return rows
 }
 
-/** 替换 patch 中的 MCP 行（保留其余行与注释），返回新 patch 文本 */
+/** 替换 patch 中的 MCP 行（保留其余行与注释），返回新 patch 文本
+ * 新行由 renderRowsYaml 序列化后解析接入，保证与预览文本完全一致（含 !!js 标签）。 */
 export function replaceMcpRows(patchText: string, rows: McpRow[]): string {
   const doc = parseDocument(patchText)
   if (doc.errors.length > 0) throw new Error(`patch 解析失败: ${doc.errors[0].message}`)
@@ -190,20 +200,31 @@ export function replaceMcpRows(patchText: string, rows: McpRow[]): string {
     }
   }
   if (rows.length > 0) {
+    const fresh = parseDocument(renderRowsYaml(rows))
+    const freshEntries = ((fresh.contents as { items?: unknown[] } | null)?.items ?? []) as unknown[]
     if (!targetInsert) {
-      const freshText = stringify([{ insert: rows }])
-      if (!doc.contents) return freshText
-      const fresh = parseDocument(freshText)
-      const freshItems = ((fresh.contents as { items?: unknown[] } | null)?.items ?? []) as unknown[]
+      if (!doc.contents) return fresh.toString()
       const contents = doc.contents as { items?: unknown[] }
-      ;(contents.items ??= []).push(...freshItems)
+      ;(contents.items ??= []).push(...freshEntries)
     } else {
-      for (const row of rows) {
-        targetInsert.push(doc.createNode(row))
-      }
+      const insertEntry = freshEntries[0] as { items?: { key?: { value?: string }; value?: { items?: unknown[] } }[] } | null
+      const seq = insertEntry?.items?.find((p) => p.key?.value === 'insert')?.value
+      if (seq?.items) targetInsert.push(...seq.items)
     }
   }
   return doc.toString()
+}
+
+/** 合并写入：按行 id 就地更新/追加草稿行，保留现有非草稿 MCP 行 */
+export function mergeMcpRows(patchText: string, rows: McpRow[]): string {
+  const existing = extractMcpServers(patchText)
+  const merged = [...existing]
+  for (const row of rows) {
+    const idx = merged.findIndex((r) => r.id === row.id)
+    if (idx >= 0) merged[idx] = row
+    else merged.push(row)
+  }
+  return replaceMcpRows(patchText, merged)
 }
 
 /** 更新已有 MCP 行，保留同一 id 以支持 UI 编辑。 */
@@ -223,15 +244,28 @@ export function deleteMcpRow(patchText: string, id: string): string {
   return replaceMcpRows(patchText, next)
 }
 
-/** 原子写 + 备份：写 .bak-<ts>，临时文件 rename 落盘 */
+/** 原子写 + 备份：写 .bak-<ts>，临时文件 rename 落盘。
+ * - 原文件不存在时跳过备份（不再 ENOENT），新文件默认 0600（patch 可能含 token）。
+ * - 原文件存在时备份与临时文件继承原 mode（避免 0600 → 0644 权限漂移）。 */
 export function atomicWriteWithBackup(file: string, content: string, backupsDir?: string): string {
   const dir = backupsDir ?? dirname(file)
   mkdirSync(dir, { recursive: true })
+  let mode: number | null = null
+  try {
+    mode = statSync(file).mode & 0o777
+  } catch {
+    /* 原文件不存在：不备份 */
+  }
   const ts = Date.now()
-  const backup = join(dir, `${file.split('/').pop() ?? file}.bak-${ts}`)
-  copyFileSync(file, backup)
-  const tmp = `${file}.tmp-${ts}`
-  writeFileSync(tmp, content)
+  const name = basename(file)
+  let backup = ''
+  if (mode !== null) {
+    backup = join(dir, `${name}.bak-${ts}`)
+    copyFileSync(file, backup)
+    chmodSync(backup, mode)
+  }
+  const tmp = join(dir, `.${name}.tmp-${ts}`)
+  writeFileSync(tmp, content, { mode: mode ?? 0o600 })
   renameSync(tmp, file)
   return backup
 }

@@ -1,56 +1,443 @@
-import { app, BrowserWindow, ipcMain, Menu } from 'electron'
+// Electron 主进程：窗口安全边界 + IPC（来源校验）+ harness 生命周期 + 插件/MCP/Skills 管理
+import { app, BrowserWindow, ipcMain, Menu, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { startHarness, resolveDshExec, dshHome, listProfiles, type HarnessHandle } from '../core/harness.js'
+import { realpathSync } from 'node:fs'
+import {
+  startHarness,
+  resolveDshExec,
+  dshHome,
+  listProfiles,
+  runtimePathEnv,
+  type HarnessHandle,
+  type DshProfile,
+} from '../core/harness.js'
 import {
   activatePlugin,
-  classifyInstallSpec,
   deactivatePlugin,
   isPluginActive,
   listPlugins,
   runPluginOp,
+  type PluginOpHandle,
 } from '../core/plugins.js'
 import {
   MCP_PLUGIN,
   convertJsonToYaml,
   extractMcpServers,
   replaceMcpRows,
+  mergeMcpRows,
   updateMcpRow,
   deleteMcpRow,
   atomicWriteWithBackup,
   readPatch,
   type McpRow,
 } from '../core/mcp.js'
-import { scanSkills, createSkill, setInvocation, importSkillFromZip, importSkillFromGitHub } from '../core/skills.js'
+import { scanSkills, createSkill, setInvocation, importSkillFromZip, importSkillFromGitHub, type SkillSummary } from '../core/skills.js'
+import { IPC, type PluginOpAction, type HarnessStatus } from '../core/ipc.js'
+import { wireSmoke } from './smoke.js'
 
+const APP_NAME = 'DSH Desktop Hub'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const RENDERER_HTML = join(__dirname, '..', 'renderer', 'index.html')
+const RENDERER_URL = `file://${RENDERER_HTML}`
+const ARTIFACTS_DIR = join(__dirname, '..', '..', 'artifacts')
 
 const argv = process.argv
 const SMOKE = argv.includes('--smoke')
 const HARNESS_SMOKE = argv.includes('--harness-smoke')
 // 默认（无 flag）＝产品行为：加载 harness Web UI + 菜单「管理台」
 
+app.setName(APP_NAME)
+
 let mainWindow: BrowserWindow | null = null
 let harness: HarnessHandle | null = null
+let restarting = false
 
 /** M2 管理的目标 profile（与 harness 启动一致）；M5 将支持切换 */
 const ACTIVE_PROFILE = 'web'
 
-function activeProfile() {
+// ---- 单实例锁：两个实例同时操作同一 profile/patch 会写冲突（P2-11）----
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+}
+
+function activeProfile(): DshProfile | null {
   return listProfiles(dshHome()).find((p) => p.name === ACTIVE_PROFILE) ?? null
 }
 
-async function runPluginMutation(action: 'add' | 'remove' | 'update', args: string[]) {
+// ---- IPC 来源校验（P1-2 / P2-9）：只接受壳层主帧，拒绝 harness iframe / 外部页 ----
+function assertRendererSender(event: IpcMainInvokeEvent): void {
+  const frame = event.senderFrame
+  const isMainFrame = frame === event.sender.mainFrame
+  if (!isMainFrame || frame?.url !== RENDERER_URL) {
+    throw new Error('IPC 来源校验失败：拒绝非壳层主帧调用')
+  }
+}
+
+/** 返回壳层主帧（存在且为我们的 renderer），供 push 事件使用 */
+function shellWebContents(): WebContents | null {
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.getURL() === RENDERER_URL) {
+    return mainWindow.webContents
+  }
+  return null
+}
+
+// ---- profile 写操作串行化：插件 patch 与 MCP patch 都落在同一文件上（P1-5）----
+let mutationChain: Promise<unknown> = Promise.resolve()
+function serializeMutation<T>(task: () => Promise<T> | T): Promise<T> {
+  const next = mutationChain.then(task, task)
+  mutationChain = next.then(
+    () => undefined,
+    () => undefined,
+  )
+  return next
+}
+
+// ---- 插件操作：流式输出 + 可取消 + 有界缓冲（P1-5 / P2-10）----
+const OP_OUTPUT_CAP = 64 * 1024
+const activeOps = new Map<string, PluginOpHandle>()
+let opSeq = 0
+
+function appendCapped(buf: string, chunk: string): string {
+  buf += chunk
+  return buf.length > OP_OUTPUT_CAP ? buf.slice(buf.length - OP_OUTPUT_CAP) : buf
+}
+
+function streamPluginOp(action: PluginOpAction, args: string[]): Promise<{ ok: boolean; token?: string; error?: string }> {
   const exec = resolveDshExec()
-  if (!exec) return { ok: false as const, error: '未找到 dsh 可执行文件', output: '' }
-  const op = runPluginOp({ dsh: exec.exec, node: exec.node, profile: ACTIVE_PROFILE, action, args })
-  let output = ''
-  op.stdout.on('data', (d: Buffer) => (output += String(d)))
-  op.stderr.on('data', (d: Buffer) => (output += String(d)))
-  const res = await op.done
-  return { ok: res.exitCode === 0, exitCode: res.exitCode, output: output.slice(0, 2000) }
+  if (!exec) return Promise.resolve({ ok: false, error: '未找到 dsh 可执行文件' })
+  return serializeMutation(async () => {
+    const token = `op-${++opSeq}`
+    const op = runPluginOp({
+      dsh: exec.exec,
+      node: exec.node,
+      profile: ACTIVE_PROFILE,
+      action,
+      args,
+      env: runtimePathEnv(),
+    })
+    activeOps.set(token, op)
+    const wc = shellWebContents()
+    if (wc) wc.send(IPC.pluginOpChunk, token, `dsh plugin --profile ${ACTIVE_PROFILE} ${action} ${args.join(' ')}\n`)
+    let output = ''
+    const onChunk = (buf: Buffer): void => {
+      const text = String(buf)
+      output = appendCapped(output, text)
+      wc?.send(IPC.pluginOpChunk, token, text)
+    }
+    op.stdout.on('data', onChunk)
+    op.stderr.on('data', onChunk)
+    const res = await op.done
+    activeOps.delete(token)
+    shellWebContents()?.send(IPC.pluginOpDone, token, {
+      token,
+      exitCode: res.exitCode,
+      signal: res.signal,
+      output,
+    })
+    return { ok: true, token }
+  })
+}
+
+// ---- Skills 路径 allowlist（P1-2）：按 ID 重扫 → 取扫描结果路径 → realpath 域校验 ----
+function resolveSkillRoot(source: SkillSummary['source']): string {
+  const home = process.env.HOME ?? ''
+  switch (source) {
+    case 'user-dsh':
+      return join(dshHome(), 'skills')
+    case 'user-agents':
+      return join(home, '.agents', 'skills')
+    default:
+      throw new Error(`skill 来源「${source}」不允许通过壳层修改`)
+  }
+}
+
+function resolveScannedSkill(name: string, source: SkillSummary['source']): SkillSummary {
+  const skills = scanSkills({ dshHome: dshHome() })
+  const skill = skills.find((s) => s.name === name && s.source === source)
+  if (!skill) throw new Error(`skill「${name}」（${source}）不存在或不在允许的扫描根内`)
+  const root = resolveSkillRoot(source)
+  const pathReal = realpathSync(skill.path)
+  const rootReal = realpathSync(root)
+  if (!pathReal.startsWith(rootReal + '/')) {
+    throw new Error(`skill 路径越界: ${skill.path}`)
+  }
+  const base = dirname(pathReal).split('/').pop() ?? ''
+  const isBundle = pathReal.endsWith('/SKILL.md') && base === name
+  const isFlat = pathReal.endsWith(`/${name}.md`)
+  if (!isBundle && !isFlat) throw new Error(`skill 不是扫描到的 SKILL.md 或扁平文件: ${pathReal}`)
+  return skill
+}
+
+// ---- IPC 注册 ----
+function registerIpc(): void {
+  ipcMain.handle(IPC.harnessUrl, (event) => {
+    assertRendererSender(event)
+    return harness?.url ?? null
+  })
+
+  ipcMain.handle(IPC.harnessRestart, async (event) => {
+    assertRendererSender(event)
+    if (restarting) return { ok: false as const, error: 'Harness 正在重启中' }
+    restarting = true
+    const wc = shellWebContents()
+    wc?.send(IPC.harnessStatus, { state: 'restarting' } satisfies HarnessStatus)
+    try {
+      await harness?.stop()
+      harness = null
+      const next = await startHarness({ profile: ACTIVE_PROFILE, readyTimeoutMs: 120_000 })
+      harness = next
+      watchHarness(next.proc)
+      wc?.send(IPC.harnessStatus, { state: 'ready', url: next.url } satisfies HarnessStatus)
+      return { ok: true as const, url: next.url }
+    } catch (err) {
+      wc?.send(IPC.harnessStatus, { state: 'exited', code: -1 } satisfies HarnessStatus)
+      return { ok: false as const, error: (err as Error).message }
+    } finally {
+      restarting = false
+    }
+  })
+
+  ipcMain.handle(IPC.pluginsList, (event) => {
+    assertRendererSender(event)
+    const profile = activeProfile()
+    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, entries: [] }
+    try {
+      const patch = readPatch(profile.dir)
+      const entries = listPlugins(profile, patch)
+      return { ok: true as const, profile: ACTIVE_PROFILE, entries }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, entries: [] }
+    }
+  })
+
+  ipcMain.handle(IPC.pluginsActivate, (event, name: unknown) => {
+    assertRendererSender(event)
+    const profile = activeProfile()
+    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, output: '' }
+    if (typeof name !== 'string' || !name.trim()) return { ok: false as const, error: 'name 无效', output: '' }
+    const packageName = name.trim()
+    try {
+      const entry = listPlugins(profile, readPatch(profile.dir)).find((candidate) => candidate.name === packageName)
+      if (!entry) return { ok: false as const, error: `插件「${packageName}」未安装`, output: '' }
+      if (entry.activationSource === 'bundle') {
+        return { ok: false as const, error: `「${packageName}」由组合包激活，无需单独激活`, output: '' }
+      }
+      if (entry.activationSource === 'patch') {
+        return { ok: true as const, output: '插件已经激活', backup: '' }
+      }
+      return serializeMutation(() => {
+        const patch = readPatch(profile.dir)
+        const result = writePluginPatch(profile, activatePlugin(patch, packageName))
+        return { ...result, output: `插件「${packageName}」已激活；请重启 Harness` }
+      })
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, output: '' }
+    }
+  })
+
+  ipcMain.handle(IPC.pluginsDeactivate, (event, name: unknown) => {
+    assertRendererSender(event)
+    const profile = activeProfile()
+    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, output: '' }
+    if (typeof name !== 'string' || !name.trim()) return { ok: false as const, error: 'name 无效', output: '' }
+    const packageName = name.trim()
+    try {
+      const entry = listPlugins(profile, readPatch(profile.dir)).find((candidate) => candidate.name === packageName)
+      if (!entry) return { ok: false as const, error: `插件「${packageName}」未安装`, output: '' }
+      if (entry.activationSource === 'bundle') {
+        return { ok: false as const, error: `「${packageName}」由组合包激活，不能单独停用（停用只对 patch 手动激活的插件生效）`, output: '' }
+      }
+      if (entry.activationSource === 'none') {
+        return { ok: false as const, error: `插件「${packageName}」未激活`, output: '' }
+      }
+      return serializeMutation(() => {
+        const patch = readPatch(profile.dir)
+        const result = writePluginPatch(profile, deactivatePlugin(patch, packageName))
+        return { ...result, output: `插件「${packageName}」已停用；package 依赖仍保留` }
+      })
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, output: '' }
+    }
+  })
+
+  ipcMain.handle(IPC.pluginsStartOp, (event, action: unknown, args: unknown) => {
+    assertRendererSender(event)
+    if (action !== 'add' && action !== 'remove' && action !== 'update') {
+      return { ok: false as const, error: 'action 无效' }
+    }
+    if (!Array.isArray(args) || args.some((a) => typeof a !== 'string')) {
+      return { ok: false as const, error: 'args 无效' }
+    }
+    if (action === 'add' && args.length !== 1) return { ok: false as const, error: '安装需要 spec 参数' }
+    return streamPluginOp(action, args as string[])
+  })
+
+  ipcMain.handle(IPC.pluginsCancelOp, (event, token: unknown) => {
+    assertRendererSender(event)
+    if (typeof token !== 'string') return { ok: false as const }
+    const op = activeOps.get(token)
+    if (!op) return { ok: false as const }
+    op.cancel()
+    return { ok: true as const }
+  })
+
+  ipcMain.handle(IPC.mcpList, (event) => {
+    assertRendererSender(event)
+    const profile = activeProfile()
+    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, servers: [] }
+    try {
+      const servers = extractMcpServers(readPatch(profile.dir))
+      return { ok: true as const, profile: ACTIVE_PROFILE, servers }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, servers: [] }
+    }
+  })
+
+  ipcMain.handle(IPC.mcpConvert, (event, jsonText: unknown) => {
+    assertRendererSender(event)
+    if (typeof jsonText !== 'string') return { ok: false as const, error: '输入无效', yaml: '', warnings: [] }
+    return convertJsonToYaml(jsonText)
+  })
+
+  ipcMain.handle(IPC.mcpApply, (event, input: unknown) => {
+    assertRendererSender(event)
+    const profile = activeProfile()
+    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, backup: '' }
+    const payload = (input ?? {}) as { rows?: unknown; mode?: unknown }
+    if (!Array.isArray(payload.rows) || payload.rows.length === 0) {
+      return { ok: false as const, error: '没有可写入的服务器', backup: '' }
+    }
+    const mode = payload.mode === 'replace' ? 'replace' : 'merge'
+    const normalized = payload.rows.map(normalizeMcpRow)
+    if (normalized.some((row): row is null => row === null)) {
+      return { ok: false as const, error: 'MCP 服务器格式无效', backup: '' }
+    }
+    try {
+      return serializeMutation(() => {
+        const patch = readPatch(profile.dir)
+        const next = mode === 'replace' ? replaceMcpRows(patch, normalized as McpRow[]) : mergeMcpRows(patch, normalized as McpRow[])
+        return writeMcpPatch(profile, next, extractMcpServers(next).length)
+      })
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, backup: '' }
+    }
+  })
+
+  ipcMain.handle(IPC.mcpUpdate, (event, input: unknown) => {
+    assertRendererSender(event)
+    const profile = activeProfile()
+    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, backup: '' }
+    if (!input || typeof input !== 'object') return { ok: false as const, error: '输入无效', backup: '' }
+    const payload = input as { id?: unknown; row?: unknown }
+    const id = typeof payload.id === 'string' ? payload.id.trim() : ''
+    if (!id) return { ok: false as const, error: 'MCP id 无效', backup: '' }
+    const row = normalizeMcpRow(payload.row)
+    if (!row) return { ok: false as const, error: 'MCP 服务器格式无效', backup: '' }
+    try {
+      return serializeMutation(() => {
+        const next = updateMcpRow(readPatch(profile.dir), { ...row, id })
+        return writeMcpPatch(profile, next, extractMcpServers(next).length)
+      })
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, backup: '' }
+    }
+  })
+
+  ipcMain.handle(IPC.mcpDelete, (event, id: unknown) => {
+    assertRendererSender(event)
+    const profile = activeProfile()
+    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, backup: '' }
+    if (typeof id !== 'string' || !id.trim()) return { ok: false as const, error: 'MCP id 无效', backup: '' }
+    try {
+      return serializeMutation(() => {
+        const next = deleteMcpRow(readPatch(profile.dir), id.trim())
+        return writeMcpPatch(profile, next, extractMcpServers(next).length)
+      })
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, backup: '' }
+    }
+  })
+
+  ipcMain.handle(IPC.skillsList, (event) => {
+    assertRendererSender(event)
+    try {
+      return { ok: true as const, skills: scanSkills({ dshHome: dshHome() }) }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, skills: [] }
+    }
+  })
+
+  ipcMain.handle(IPC.skillsCreate, (event, input: unknown) => {
+    assertRendererSender(event)
+    const payload = input as { name?: unknown; description?: unknown; body?: unknown }
+    if (typeof payload.name !== 'string' || typeof payload.description !== 'string' || typeof payload.body !== 'string') {
+      return { ok: false as const, error: '输入无效', path: '' }
+    }
+    try {
+      const path = createSkill({
+        root: join(dshHome(), 'skills'),
+        name: payload.name,
+        description: payload.description,
+        body: payload.body,
+      })
+      return { ok: true as const, path }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, path: '' }
+    }
+  })
+
+  ipcMain.handle(IPC.skillsToggle, (event, input: unknown) => {
+    assertRendererSender(event)
+    const payload = input as { id?: unknown; source?: unknown; kind?: unknown; value?: unknown }
+    if (typeof payload.id !== 'string' || !payload.id.trim()) return { ok: false as const, error: 'skill id 无效' }
+    if (payload.kind !== 'model' && payload.kind !== 'user') return { ok: false as const, error: 'kind 无效' }
+    if (typeof payload.value !== 'boolean') return { ok: false as const, error: 'value 无效' }
+    try {
+      const skill = resolveScannedSkill(payload.id.trim(), payload.source as SkillSummary['source'])
+      setInvocation(skill.path, payload.kind, payload.value)
+      return { ok: true as const }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle(IPC.skillsImportFile, (event, buffer: unknown, overwrite: unknown) => {
+    assertRendererSender(event)
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) return { ok: false as const, error: '文件无效', result: null }
+    if (buffer.byteLength > 20 * 1024 * 1024) return { ok: false as const, error: '文件超过 20MB 上限', result: null }
+    try {
+      const result = importSkillFromZip(Buffer.from(buffer), { root: join(dshHome(), 'skills'), overwrite: overwrite === true })
+      return { ok: true as const, result }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, result: null }
+    }
+  })
+
+  ipcMain.handle(IPC.skillsImportUrl, async (event, url: unknown, overwrite: unknown) => {
+    assertRendererSender(event)
+    if (typeof url !== 'string' || !url.trim()) return { ok: false as const, error: '链接无效', result: null }
+    try {
+      const result = await importSkillFromGitHub(url, { root: join(dshHome(), 'skills'), overwrite: overwrite === true })
+      return { ok: true as const, result }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, result: null }
+    }
+  })
+}
+
+// ---- patch 写入助手 ----
+function writeMcpPatch(profile: { dir: string }, next: string, rowCount: number) {
+  const patchFile = join(profile.dir, 'cordis.patch.yml')
+  const backup = atomicWriteWithBackup(patchFile, next)
+  return { ok: true as const, backup, rows: rowCount }
+}
+
+function writePluginPatch(profile: { dir: string }, next: string) {
+  const patchFile = join(profile.dir, 'cordis.patch.yml')
+  const backup = atomicWriteWithBackup(patchFile, next)
+  return { ok: true as const, backup }
 }
 
 function normalizeMcpRow(value: unknown): McpRow | null {
@@ -61,188 +448,35 @@ function normalizeMcpRow(value: unknown): McpRow | null {
   return { id: row.id.trim(), name: MCP_PLUGIN, config: row.config as Record<string, unknown> }
 }
 
-function writeMcpPatch(profile: { dir: string }, next: string, rowCount: number) {
-  const patchFile = join(profile.dir, 'cordis.patch.yml')
-  const backup = atomicWriteWithBackup(patchFile, next)
-  return { ok: true as const, backup, rows: rowCount }
+// ---- 窗口与安全 ----
+function isAllowedNavigation(url: string): boolean {
+  if (url === RENDERER_URL) return true
+  if (/^file:\/\/.+?\/dist\/renderer\/index\.html$/.test(url)) return true
+  return /^http:\/\/127\.0\.0\.1:\d+/.test(url)
 }
 
-function writeMcpRows(profile: { dir: string }, rows: McpRow[]) {
-  return writeMcpPatch(profile, replaceMcpRows(readPatch(profile.dir), rows), rows.length)
-}
-function writePluginPatch(profile: { dir: string }, next: string) {
-  const patchFile = join(profile.dir, 'cordis.patch.yml')
-  const backup = atomicWriteWithBackup(patchFile, next)
-  return { ok: true as const, backup }
-}
-
-function registerIpc(): void {
-  ipcMain.handle('harness:url', () => harness?.url ?? null)
-  ipcMain.handle('plugins:list', () => {
-    const profile = activeProfile()
-    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, entries: [] }
-    try {
-      const patch = readPatch(profile.dir)
-      const entries = listPlugins(profile).map((entry) => ({
-        ...entry,
-        active: entry.active || isPluginActive(patch, entry.name),
-      }))
-      return { ok: true as const, profile: ACTIVE_PROFILE, entries }
-    } catch (err) {
-      return { ok: false as const, error: (err as Error).message, entries: [] }
+function hardenWindow(win: BrowserWindow): void {
+  // 拒绝任意 popup：http(s) 外部链接交给系统浏览器，其余一律 deny（P2-9）
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('https://') || url.startsWith('http://')) {
+      void shell.openExternal(url)
     }
+    return { action: 'deny' }
   })
-  ipcMain.handle('plugins:install', (_e, spec: string) => {
-    if (typeof spec !== 'string' || !spec.trim()) return { ok: false as const, error: 'spec 无效', output: '' }
-    const plan = classifyInstallSpec(spec)
-    if (plan.kind === 'routing-suite') {
-      return { ok: false as const, error: plan.message, output: '', code: 'routing-suite-not-a-plugin' as const }
-    }
-    return runPluginMutation('add', [plan.normalized])
+  // 主帧导航白名单：只允许壳层 renderer 与 harness loopback
+  win.webContents.on('will-navigate', (event, url) => {
+    if (!isAllowedNavigation(url)) event.preventDefault()
   })
-  ipcMain.handle('plugins:activate', (_e, name: string) => {
-    const profile = activeProfile()
-    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, output: '' }
-    if (typeof name !== 'string' || !name.trim()) return { ok: false as const, error: 'name 无效', output: '' }
-    const packageName = name.trim()
-    const entry = listPlugins(profile).find((candidate) => candidate.name === packageName)
-    if (!entry) return { ok: false as const, error: `插件「${packageName}」未安装`, output: '' }
-    if (entry.builtin) return { ok: false as const, error: '内置组合包无需单独激活', output: '' }
-    try {
-      const patch = readPatch(profile.dir)
-      if (isPluginActive(patch, packageName)) return { ok: true as const, output: '插件已经激活', backup: '' }
-      const result = writePluginPatch(profile, activatePlugin(patch, packageName))
-      return { ...result, output: `插件「${packageName}」已激活；请重启 Harness` }
-    } catch (err) {
-      return { ok: false as const, error: (err as Error).message, output: '' }
-    }
-  })
-  ipcMain.handle('plugins:deactivate', (_e, name: string) => {
-    const profile = activeProfile()
-    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, output: '' }
-    if (typeof name !== 'string' || !name.trim()) return { ok: false as const, error: 'name 无效', output: '' }
-    try {
-      const patch = readPatch(profile.dir)
-      const result = writePluginPatch(profile, deactivatePlugin(patch, name.trim()))
-      return { ...result, output: `插件「${name.trim()}」已停用；package 依赖仍保留` }
-    } catch (err) {
-      return { ok: false as const, error: (err as Error).message, output: '' }
-    }
-  })
-  ipcMain.handle('plugins:remove', (_e, name: string) => {
-    if (typeof name !== 'string' || !name.trim()) return { ok: false as const, error: 'name 无效', output: '' }
-    return runPluginMutation('remove', [name.trim()])
-  })
-  ipcMain.handle('plugins:update', () => runPluginMutation('update', []))
-  ipcMain.handle('mcp:list', () => {
-    const profile = activeProfile()
-    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, servers: [] }
-    try {
-      const servers = extractMcpServers(readPatch(profile.dir))
-      return { ok: true as const, profile: ACTIVE_PROFILE, servers }
-    } catch (err) {
-      return { ok: false as const, error: (err as Error).message, servers: [] }
-    }
-  })
-  ipcMain.handle('mcp:convert', (_e, jsonText: string) => {
-    if (typeof jsonText !== 'string') return { ok: false as const, error: '输入无效', yaml: '', warnings: [] }
-    return convertJsonToYaml(jsonText)
-  })
-  ipcMain.handle('mcp:apply', (_e, rows: unknown) => {
-    const profile = activeProfile()
-    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, backup: '' }
-    if (!Array.isArray(rows) || rows.length === 0) return { ok: false as const, error: '没有可写入的服务器', backup: '' }
-    const normalized = rows.map(normalizeMcpRow)
-    if (normalized.some((row): row is null => row === null)) {
-      return { ok: false as const, error: 'MCP 服务器格式无效', backup: '' }
-    }
-    try {
-      return writeMcpRows(profile, normalized as McpRow[])
-    } catch (err) {
-      return { ok: false as const, error: (err as Error).message, backup: '' }
-    }
-  })
-  ipcMain.handle('mcp:update', (_e, input: unknown) => {
-    const profile = activeProfile()
-    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, backup: '' }
-    if (!input || typeof input !== 'object') return { ok: false as const, error: '输入无效', backup: '' }
-    const payload = input as { id?: unknown; row?: unknown }
-    if (typeof payload.id !== 'string' || !payload.id.trim()) return { ok: false as const, error: 'MCP id 无效', backup: '' }
-    const row = normalizeMcpRow(payload.row)
-    if (!row) return { ok: false as const, error: 'MCP 服务器格式无效', backup: '' }
-    try {
-      const next = updateMcpRow(readPatch(profile.dir), { ...row, id: payload.id.trim() })
-      return writeMcpPatch(profile, next, extractMcpServers(next).length)
-    } catch (err) {
-      return { ok: false as const, error: (err as Error).message, backup: '' }
-    }
-  })
-  ipcMain.handle('mcp:delete', (_e, id: unknown) => {
-    const profile = activeProfile()
-    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, backup: '' }
-    if (typeof id !== 'string' || !id.trim()) return { ok: false as const, error: 'MCP id 无效', backup: '' }
-    try {
-      const next = deleteMcpRow(readPatch(profile.dir), id.trim())
-      return writeMcpPatch(profile, next, extractMcpServers(next).length)
-    } catch (err) {
-      return { ok: false as const, error: (err as Error).message, backup: '' }
-    }
-  })
-  ipcMain.handle('skills:list', () => {
-    try {
-      return { ok: true as const, skills: scanSkills({ dshHome: dshHome() }) }
-    } catch (err) {
-      return { ok: false as const, error: (err as Error).message, skills: [] }
-    }
-  })
-  ipcMain.handle('skills:create', (_e, input: { name: string; description: string; body: string }) => {
-    if (!input || typeof input.name !== 'string' || typeof input.description !== 'string' || typeof input.body !== 'string') {
-      return { ok: false as const, error: '输入无效', path: '' }
-    }
-    try {
-      const path = createSkill({ root: join(dshHome(), 'skills'), name: input.name, description: input.description, body: input.body })
-      return { ok: true as const, path }
-    } catch (err) {
-      return { ok: false as const, error: (err as Error).message, path: '' }
-    }
-  })
-  ipcMain.handle('skills:toggle', (_e, input: { path: string; kind: 'model' | 'user'; value: boolean }) => {
-    if (!input || typeof input.path !== 'string' || !['model', 'user'].includes(input.kind)) {
-      return { ok: false as const, error: '输入无效' }
-    }
-    try {
-      setInvocation(input.path, input.kind, input.value)
-      return { ok: true as const }
-    } catch (err) {
-      return { ok: false as const, error: (err as Error).message }
-    }
-  })
-  ipcMain.handle('skills:import-file', (_e, buffer: ArrayBuffer, overwrite: boolean) => {
-    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) return { ok: false as const, error: '文件无效', result: null }
-    if (buffer.byteLength > 20 * 1024 * 1024) return { ok: false as const, error: '文件超过 20MB 上限', result: null }
-    try {
-      const result = importSkillFromZip(Buffer.from(buffer), { root: join(dshHome(), 'skills'), overwrite })
-      return { ok: true as const, result }
-    } catch (err) {
-      return { ok: false as const, error: (err as Error).message, result: null }
-    }
-  })
-  ipcMain.handle('skills:import-url', async (_e, url: string, overwrite: boolean) => {
-    if (typeof url !== 'string' || !url.trim()) return { ok: false as const, error: '链接无效', result: null }
-    try {
-      const result = await importSkillFromGitHub(url, { root: join(dshHome(), 'skills'), overwrite })
-      return { ok: true as const, result }
-    } catch (err) {
-      return { ok: false as const, error: (err as Error).message, result: null }
-    }
-  })
+  // 权限请求全拒（摄像头/麦克风/地理位置等与壳无关）
+  win.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false))
+  win.webContents.session.setPermissionCheckHandler(() => false)
 }
 
 function createWindow(url: string): void {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
-    title: 'DSH Desktop',
+    title: APP_NAME,
     show: !(SMOKE || HARNESS_SMOKE),
     webPreferences: {
       preload: join(__dirname, '..', 'preload', 'preload.cjs'),
@@ -251,6 +485,7 @@ function createWindow(url: string): void {
       sandbox: true,
     },
   })
+  hardenWindow(mainWindow)
   void mainWindow.loadURL(url)
   mainWindow.on('closed', () => {
     mainWindow = null
@@ -258,223 +493,35 @@ function createWindow(url: string): void {
 }
 
 function createSkeletonWindow(): void {
-  createWindow(`file://${RENDERER_HTML}`)
+  createWindow(RENDERER_URL)
   // harness iframe 导航完成时推送状态（iframe load 事件对长连接页面不可靠）
   mainWindow?.webContents.on('did-frame-navigate', (_e, frameURL, _code, _status, isMainFrame) => {
     if (!isMainFrame && harness && frameURL.startsWith(harness.url)) {
-      mainWindow?.webContents.send('harness:frame-loaded', frameURL)
+      mainWindow?.webContents.send(IPC.harnessFrameLoaded, frameURL)
+      mainWindow?.webContents.send(IPC.harnessStatus, { state: 'ready', url: harness.url } satisfies HarnessStatus)
     }
   })
 }
 
-async function assertDomAndScreenshot(tag: string, assert: (dom: unknown) => boolean, exitAfter = true): Promise<void> {
-  const dom = (await mainWindow!.webContents.executeJavaScript(`(() => {
-    const tabs = [...document.querySelectorAll('[data-tab]')].map(b => b.dataset.tab)
-    const active = document.querySelector('.tab.active')?.dataset.tab
-    const panels = ['harness','plugin','mcp','skills'].map(t => !!document.getElementById('panel-' + t))
-    const pluginRows = [...document.querySelectorAll('#plugin-rows tr')].map(r => r.textContent ?? '')
-    const mcpRows = [...document.querySelectorAll('#mcp-server-rows tr')].map(r => r.textContent ?? '')
-    return {
-      tabs, active, panels, title: document.title, bodyLen: document.body.innerText.length, pluginRows, mcpRows,
-      apiPresent: !!window.dshDesktop,
-      pluginStatus: document.getElementById('plugin-status')?.textContent ?? '',
-      pluginErr: document.getElementById('plugin-status')?.className ?? '',
-      mcpApply: document.getElementById('mcp-apply')?.textContent ?? '',
-      mcpCancelHidden: document.getElementById('mcp-cancel-edit')?.hidden ?? false,
-    }
-  })()`)) as {
-    tabs?: string[]
-    active?: string
-    panels?: boolean[]
-    title: string
-    bodyLen: number
-    pluginRows?: string[]
-    mcpRows?: string[]
-    apiPresent?: boolean
-    pluginStatus?: string
-    pluginErr?: string
-    mcpApply?: string
-    mcpCancelHidden?: boolean
-  }
-  if (!assert(dom)) {
-    console.error(`SMOKE FAIL: unexpected DOM ${JSON.stringify(dom)}`)
-    app.exit(1)
-  }
-  const image = await mainWindow!.webContents.capturePage()
-  const out = join(__dirname, '..', '..', 'artifacts', `${tag}.png`)
-  mkdirSync(dirname(out), { recursive: true })
-  writeFileSync(out, image.toPNG())
-  console.log(`SMOKE OK: ${tag} DOM ${JSON.stringify({ title: dom.title, bodyLen: dom.bodyLen })} screenshot ${out}`)
-  if (exitAfter) app.exit(0)
-}
-
-function wireSmoke(): void {
-  mainWindow?.webContents.on('did-fail-load', (_e, code, desc) => {
-    console.error(`SMOKE FAIL: load failed (${code} ${desc})`)
-    app.exit(1)
+// ---- harness 生命周期监控（P2-11）：意外退出 → 通知 UI，可一键重启 ----
+function watchHarness(proc: HarnessHandle['proc']): void {
+  proc.on('exit', (code, signal) => {
+    if (restarting) return
+    harness = null
+    mainWindow?.webContents.send(IPC.harnessStatus, { state: 'exited', code, signal } satisfies HarnessStatus)
   })
-  if (SMOKE) {
-    mainWindow?.webContents.once('did-finish-load', () => {
-      void (async () => {
-        // 等待 Plugin 面板通过 IPC 加载真实 profile 插件
-        const deadline = Date.now() + 5000
-        while (Date.now() < deadline) {
-          const ready = await mainWindow!.webContents.executeJavaScript(
-            `document.querySelectorAll('#plugin-rows tr').length > 0 && document.getElementById('mcp-servers').textContent.length > 0 && document.querySelectorAll('#skills-rows tr').length > 0`,
-          )
-          if (ready) break
-          await new Promise((r) => setTimeout(r, 200))
-        }
-        // 驱动 MCP JSON→YAML 转换（只读，不写 profile）
-        await mainWindow!.webContents.executeJavaScript(`(() => {
-          const ta = document.getElementById('mcp-json')
-          ta.value = JSON.stringify({ mcpServers: {
-            github: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], env: { GITHUB_TOKEN: 'x' } },
-            remote: { type: 'http', url: 'https://mcp.example.com/search', headers: { Authorization: 'Bearer t' } }
-          }})
-          document.getElementById('mcp-convert').click()
-        })()`)
-        const convDeadline = Date.now() + 5000
-        while (Date.now() < convDeadline) {
-          const done = await mainWindow!.webContents.executeJavaScript(
-            `document.getElementById('mcp-preview').textContent.length > 0`,
-          )
-          if (done) break
-          await new Promise((r) => setTimeout(r, 200))
-        }
-        await assertDomAndScreenshot('m0-smoke', (dom) => {
-          const d = dom as {
-            tabs?: string[]
-            active?: string
-            panels?: boolean[]
-            title: string
-            pluginRows?: string[]
-            mcpRows?: string[]
-            mcpApply?: string
-            mcpCancelHidden?: boolean
-          }
-          const rows = d.pluginRows ?? []
-          const mcpRows = d.mcpRows ?? []
-          return (
-            JSON.stringify(d.tabs) === JSON.stringify(['harness', 'plugin', 'mcp', 'skills']) &&
-            d.active === 'harness' &&
-            (d.panels?.every(Boolean) ?? false) &&
-            d.title === 'DSH Desktop' &&
-            rows.length >= 4 &&
-            rows.some((r) => r.includes('dsh-base')) &&
-            mcpRows.length >= 1 &&
-            d.mcpApply === '写入 patch' &&
-            d.mcpCancelHidden === true
-          )
-        }, false)
-        // MCP 转换结果单独校验
-        const mcp = (await mainWindow!.webContents.executeJavaScript(`(() => {
-          const preview = document.getElementById('mcp-preview').textContent
-          const warnings = document.getElementById('mcp-warnings').textContent
-          return { preview, warnings, servers: document.getElementById('mcp-servers').textContent }
-        })()`)) as { preview: string; warnings: string; servers: string }
-        if (!mcp.preview.trimStart().startsWith('- insert:') || !mcp.preview.includes('dsh-mcp-client') || !mcp.preview.includes('streamable-http')) {
-          console.error(`SMOKE FAIL: MCP 转换异常 ${JSON.stringify(mcp)}`)
-          app.exit(1)
-        }
-        console.log(`SMOKE OK: MCP convert 端到端通过（${JSON.stringify(mcp.servers)}）`)
-        // Skills 列表校验（真实 ~/.dsh/skills）
-        const skills = (await mainWindow!.webContents.executeJavaScript(`(() => {
-          const rows = [...document.querySelectorAll('#skills-rows tr')].map(r => r.textContent ?? '')
-          const status = document.getElementById('skills-status').textContent
-          return { rows, status }
-        })()`)) as { rows: string[]; status: string }
-        if (!skills.rows.some((r) => r.includes('huashu-design')) || !skills.status.includes('共')) {
-          console.error(`SMOKE FAIL: Skills 加载异常 ${JSON.stringify(skills)}`)
-          app.exit(1)
-        }
-        console.log(`SMOKE OK: Skills 真实数据加载（${JSON.stringify(skills.status)}）`)
-        app.exit(0)
-      })()
-    })
-  } else if (HARNESS_SMOKE) {
-    mainWindow?.webContents.on('console-message', (_e, _level, message) => {
-      if (message.includes('[harness]')) console.log(`[renderer] ${message}`)
-    })
-    let harnessFrameLoaded = false
-    mainWindow?.webContents.on('did-frame-navigate', (_e, frameURL, _code, _status, isMainFrame) => {
-      if (!isMainFrame && frameURL.startsWith('http://127.0.0.1:')) {
-        harnessFrameLoaded = true
-        console.log(`frame loaded: ${frameURL}`)
-      }
-    })
-    mainWindow?.webContents.once('did-finish-load', () => {
-      void (async () => {
-        // 等待 renderer 通过 IPC 拿到 harness URL 并挂载 iframe
-        const deadline = Date.now() + 8000
-        while (Date.now() < deadline) {
-          const src = await mainWindow!.webContents.executeJavaScript(
-            `document.getElementById('harness-frame').src`,
-          )
-          if (src && src.startsWith('http://127.0.0.1:')) break
-          await new Promise((r) => setTimeout(r, 250))
-        }
-        await assertDomAndScreenshot('m1-harness', (dom) => {
-          const d = dom as { title: string; bodyLen: number }
-          return d.title === 'DSH Desktop' && d.bodyLen > 0
-        }, false)
-        const src = (await mainWindow!.webContents.executeJavaScript(
-          `document.getElementById('harness-frame').src`,
-        )) as string
-        if (!src.startsWith('http://127.0.0.1:')) {
-          console.error(`SMOKE FAIL: harness iframe 未挂载 (${src})`)
-          app.exit(1)
-        }
-        const status = (await mainWindow!.webContents.executeJavaScript(
-          `document.getElementById('harness-status').textContent`,
-        )) as string
-        const loaded = harnessFrameLoaded || status.includes('已连接')
-        let finalStatus = status
-        if (!loaded) {
-          const waitDeadline = Date.now() + 5000
-          while (Date.now() < waitDeadline) {
-            finalStatus = (await mainWindow!.webContents.executeJavaScript(
-              `document.getElementById('harness-status').textContent`,
-            )) as string
-            if (finalStatus.includes('已连接') || harnessFrameLoaded) break
-            await new Promise((r) => setTimeout(r, 400))
-          }
-        }
-        if (!harnessFrameLoaded && !finalStatus.includes('已连接')) {
-          console.error(`SMOKE FAIL: harness iframe 页面未加载（${finalStatus}）`)
-          app.exit(1)
-        }
-        console.log(`SMOKE OK: harness 内嵌成功（iframe ${src}，状态「${finalStatus}」）`)
-        app.exit(0)
-      })()
-    })
-  }
 }
 
-app.whenReady().then(async () => {
-  registerIpc()
-  if (SMOKE) {
-    createSkeletonWindow()
-    wireSmoke()
-    return
-  }
-  if (HARNESS_SMOKE) {
-    try {
-      harness = await startHarness({ profile: 'web', readyTimeoutMs: 120_000 })
-      console.log(`harness ready: ${harness.url}`)
-    } catch (err) {
-      console.error(`harness 启动失败: ${String(err)}`)
-      app.exit(1)
-      return
-    }
-    createSkeletonWindow()
-    wireSmoke()
-    return
-  }
-  // 默认产品行为：主窗口＝四 Tab 壳，Harness Tab 内嵌官方 Web UI
+async function startHarnessAndWatch(): Promise<void> {
+  harness = await startHarness({ profile: ACTIVE_PROFILE, readyTimeoutMs: 120_000 })
+  watchHarness(harness.proc)
+  console.log(`harness ready: ${harness.url}`)
+}
+
+function buildMenu(): void {
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
-      { label: 'DSH Desktop', submenu: [{ role: 'quit', label: '退出' }] },
+      { label: APP_NAME, submenu: [{ role: 'quit', label: '退出' }] },
       {
         label: '编辑',
         submenu: [
@@ -489,15 +536,42 @@ app.whenReady().then(async () => {
       },
       {
         label: '窗口',
-        submenu: [
-          { role: 'togglefullscreen', label: '全屏' },
-        ],
+        submenu: [{ role: 'togglefullscreen', label: '全屏' }],
       },
     ]),
   )
+}
+
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+  }
+})
+
+app.whenReady().then(async () => {
+  registerIpc()
+  if (SMOKE) {
+    createSkeletonWindow()
+    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: false })
+    return
+  }
+  if (HARNESS_SMOKE) {
+    try {
+      await startHarnessAndWatch()
+    } catch (err) {
+      console.error(`harness 启动失败: ${String(err)}`)
+      app.exit(1)
+      return
+    }
+    createSkeletonWindow()
+    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: true })
+    return
+  }
+  // 默认产品行为：主窗口＝四 Tab 壳，Harness Tab 内嵌官方 Web UI
+  buildMenu()
   try {
-    harness = await startHarness({ profile: 'web', readyTimeoutMs: 120_000 })
-    console.log(`harness ready: ${harness.url}`)
+    await startHarnessAndWatch()
   } catch (err) {
     console.error(`harness 启动失败: ${String(err)}`)
     app.exit(1)

@@ -2,7 +2,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 
 export interface DshProfile {
   name: string
@@ -36,6 +36,25 @@ export function resolveDshExec(): DshExec | null {
   }
   const dsh = findDsh()
   return dsh ? { exec: dsh } : null
+}
+
+/**
+ * 构造统一 runtime PATH：捆绑 node/bin（node/npm/npx）+ dsh-runtime node_modules/.bin（dsh/pnpm）
+ * + 原 PATH。`dsh plugin` 内部 spawnSync("pnpm") 依赖 PATH，npx MCP 也依赖 PATH 中的捆绑 npx；
+ * 必须显式传给 Harness 与 Plugin 子进程（仅捆绑 node 存在时）。
+ */
+export function runtimePathEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  const exec = resolveDshExec()
+  if (!exec?.node) return env
+  const extra = [
+    dirname(exec.node),
+    // bin.js 在 dsh-runtime/node_modules/@deepseek-ai/dsh/lib/ → 上三级到 node_modules/.bin
+    resolve(dirname(exec.exec), '..', '..', '..', '.bin'),
+  ].filter((p) => existsSync(p))
+  const pathKey = process.platform === 'win32' ? 'Path' : 'PATH'
+  env[pathKey] = [...extra, env[pathKey] ?? ''].filter(Boolean).join(process.platform === 'win32' ? ';' : ':')
+  return env
 }
 
 /** 从 PATH 解析 dsh 可执行文件 */
@@ -112,11 +131,17 @@ export function startHarness(opts: {
   const args = ['web', '--port', String(opts.port ?? 0)]
   // M1 统一走官方 web profile；port 0 = 由 dsh 自选
   const spawnArgs = exec.node ? [exec.exec, ...args] : args
-  const proc = spawn(exec.node ?? exec.exec, spawnArgs, { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  const proc = spawn(exec.node ?? exec.exec, spawnArgs, {
+    cwd,
+    detached: true,
+    env: runtimePathEnv(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
 
   return new Promise((resolve, reject) => {
     let url: string | null = null
     let settled = false
+    let polling = false
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true
@@ -130,9 +155,12 @@ export function startHarness(opts: {
         if (!line.trim()) continue
         opts.onLog?.(line)
         url ??= parseHarnessUrl(line)
-        if (url && !settled) {
+        // 只允许一个 HTTP 轮询在飞，避免每个日志块都新起轮询
+        if (url && !settled && !polling) {
+          polling = true
           void (async () => {
             const ok = await waitForHttp(url!)
+            polling = false
             if (ok && !settled) {
               settled = true
               clearTimeout(timer)

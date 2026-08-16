@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-src http://127.0.0.1:*; connect-src 'self' http://127.0.0.1:*" />
-    <title>DSH Desktop</title>
+    <title>DSH Desktop Hub</title>
     <style>
       :root {
         color-scheme: light;
@@ -431,6 +431,44 @@
       .harness-fullscreen-toggle:hover { background: var(--brand-soft); border-color: #cbd5ff; color: var(--brand-dark); }
       .harness-fullscreen-toggle svg { fill: none; height: 17px; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; width: 17px; }
       .harness-fullscreen-toggle .fullscreen-exit { display: none; }
+      .harness-overlay {
+        align-items: center;
+        background: rgb(255 255 255 / 94%);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        bottom: 14px;
+        box-shadow: 0 4px 14px rgb(31 41 55 / 12%);
+        display: flex;
+        gap: 8px;
+        left: 16px;
+        padding: 5px 6px 5px 12px;
+        position: absolute;
+        z-index: 10;
+      }
+      .harness-status {
+        color: var(--ink-soft);
+        font-size: 12px;
+        max-width: 340px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .harness-status.ok { color: var(--success); }
+      .harness-status.error { color: var(--danger); }
+      .harness-restart {
+        min-height: 26px;
+        padding: 4px 10px;
+        font-size: 12px;
+      }
+      .checkbox-label {
+        align-items: center;
+        color: var(--ink-soft);
+        display: inline-flex;
+        font-size: 12px;
+        gap: 6px;
+        margin-right: 4px;
+        white-space: nowrap;
+      }
       body.harness-fullscreen { display: block; }
       body.harness-fullscreen .sidebar { display: none; }
       body.harness-fullscreen .app-shell,
@@ -506,10 +544,14 @@
         <section class="panel active" id="panel-harness" role="tabpanel" aria-labelledby="tab-harness">
           <div class="harness-wrap">
             <iframe id="harness-frame" title="DeepSeek Harness"></iframe>
-            <button id="harness-fullscreen" class="harness-fullscreen-toggle" type="button" aria-pressed="false" aria-label="全屏显示 Harness" title="全屏显示 Harness">
-              <svg class="fullscreen-enter" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M20 16v4h-4M4 16v4h4"></path></svg>
-              <svg class="fullscreen-exit" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 4-5 5M15 4l5 5M20 15l-5 5M4 15l5 5"></path></svg>
-            </button>
+            <div class="harness-overlay">
+              <span id="harness-status" class="harness-status" aria-live="polite">连接中…</span>
+              <button id="harness-restart" class="harness-restart" type="button">重启 Harness</button>
+              <button id="harness-fullscreen" class="harness-fullscreen-toggle" type="button" aria-pressed="false" aria-label="全屏显示 Harness" title="全屏显示 Harness">
+                <svg class="fullscreen-enter" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M20 16v4h-4M4 16v4h4"></path></svg>
+                <svg class="fullscreen-exit" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 4-5 5M15 4l5 5M20 15l-5 5M4 15l5 5"></path></svg>
+              </button>
+            </div>
           </div>
         </section>
         <section class="panel" id="panel-plugin" role="tabpanel" aria-labelledby="tab-plugin">
@@ -528,6 +570,8 @@
                   <p class="surface-caption">安装依赖与激活插件是两步；内置组合包只读，第三方包可单独激活或移除。</p>
                 </div>
                 <div class="surface-actions">
+                  <button id="plugin-update-all" type="button">更新全部</button>
+                  <button id="plugin-cancel" class="quiet" type="button" hidden>取消操作</button>
                   <button id="plugin-refresh" class="quiet" type="button">刷新列表</button>
                 </div>
               </div>
@@ -585,6 +629,10 @@
   }
 }'></textarea>
                   <div class="surface-actions">
+                    <label class="checkbox-label" for="mcp-replace">
+                      <input id="mcp-replace" type="checkbox" />
+                      全量替换（清除现有服务器）
+                    </label>
                     <button id="mcp-convert" class="primary" type="button">转换预览</button>
                     <button id="mcp-apply" type="button">写入 patch</button>
                     <button id="mcp-cancel-edit" class="quiet" type="button" hidden>取消编辑</button>

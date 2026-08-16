@@ -3,13 +3,75 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { crc32 } from 'node:zlib'
 import AdmZip from 'adm-zip'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const mod = await import(join(root, 'dist', 'core', 'skills.js'))
 const { scanSkills, parseSkillFile, renderSkillFile, createSkill, setInvocation, importSkillFromZip, parseGitHubSkillUrl } = mod
+
+/**
+ * 构建原始 ZIP（store 方法，不做任何路径规整）。
+ * AdmZip.addFile() 会提前清洗 `..` 路径，无法覆盖目录穿越回归；必须手工拼 central directory。
+ */
+function rawZip(files) {
+  const enc = new TextEncoder()
+  const bufs = []
+  const central = []
+  let offset = 0
+  for (const { name, data } of files) {
+    const nameBuf = Buffer.from(name, 'utf8')
+    const dataBuf = Buffer.from(data, 'utf8')
+    const crc = crc32(dataBuf) >>> 0
+    const size = dataBuf.length
+    const local = Buffer.alloc(30)
+    local.writeUInt32LE(0x04034b50, 0)
+    local.writeUInt16LE(20, 4) // version needed
+    local.writeUInt16LE(0, 6) // flags
+    local.writeUInt16LE(0, 8) // method: store
+    local.writeUInt16LE(0, 10) // time
+    local.writeUInt16LE(0x21, 12) // date 1980-01-01
+    local.writeUInt32LE(crc, 14)
+    local.writeUInt32LE(size, 18)
+    local.writeUInt32LE(size, 22)
+    local.writeUInt16LE(nameBuf.length, 26)
+    local.writeUInt16LE(0, 28) // extra len
+    bufs.push(local, nameBuf, dataBuf)
+    const cd = Buffer.alloc(46)
+    cd.writeUInt32LE(0x02014b50, 0)
+    cd.writeUInt16LE(20, 4) // version made by
+    cd.writeUInt16LE(20, 6) // version needed
+    cd.writeUInt16LE(0, 8)
+    cd.writeUInt16LE(0, 10)
+    cd.writeUInt16LE(0, 12)
+    cd.writeUInt16LE(0x21, 14)
+    cd.writeUInt32LE(crc, 16)
+    cd.writeUInt32LE(size, 20)
+    cd.writeUInt32LE(size, 24)
+    cd.writeUInt16LE(nameBuf.length, 28)
+    cd.writeUInt16LE(0, 30) // extra
+    cd.writeUInt16LE(0, 32) // comment
+    cd.writeUInt16LE(0, 34) // disk
+    cd.writeUInt16LE(0, 36) // internal attrs
+    cd.writeUInt32LE(0, 38) // external attrs
+    cd.writeUInt32LE(offset, 42) // local header offset
+    central.push(cd, nameBuf)
+    offset += 30 + nameBuf.length + size
+  }
+  const cdSize = central.reduce((n, b) => n + b.length, 0)
+  const eocd = Buffer.alloc(22)
+  eocd.writeUInt32LE(0x06054b50, 0)
+  eocd.writeUInt16LE(0, 4)
+  eocd.writeUInt16LE(0, 6)
+  eocd.writeUInt16LE(files.length, 8)
+  eocd.writeUInt16LE(files.length, 10)
+  eocd.writeUInt32LE(cdSize, 12)
+  eocd.writeUInt32LE(offset, 16)
+  eocd.writeUInt16LE(0, 20)
+  return Buffer.concat([...bufs, ...central, eocd])
+}
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'skills-'))
@@ -140,4 +202,86 @@ test('parseGitHubSkillUrl 解析仓库根与 tree 路径', () => {
     owner: 'owner', repo: 'skill-repo', branch: 'main', subPath: 'skills/foo',
   })
   assert.throws(() => parseGitHubSkillUrl('https://example.com/x'), /GitHub/)
+})
+
+test('importSkillFromZip 拒绝原始 ZIP 目录穿越（..）且不越界写', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    const buf = rawZip([
+      { name: 'safe-skill/SKILL.md', data: '---\nname: safe-skill\ndescription: d\n---\nb\n' },
+      { name: 'safe-skill/../../escaped.txt', data: 'pwned' },
+    ])
+    assert.throws(() => importSkillFromZip(buf, { root: join(dir, 'skills') }), /非法路径/)
+    assert.ok(!existsSync(join(dir, 'escaped.txt')), '不得越界写文件')
+    assert.ok(!existsSync(join(dir, 'skills', 'safe-skill')), '失败时不应留下半安装目录')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('importSkillFromZip 拒绝绝对路径条目与单文件体积上限', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    const abs = rawZip([
+      { name: 'ok-skill/SKILL.md', data: '---\nname: ok-skill\ndescription: d\n---\nb\n' },
+      { name: '/etc/evil.txt', data: 'x' },
+    ])
+    assert.throws(() => importSkillFromZip(abs, { root: join(dir, 'skills') }), /非法路径/)
+    // 单文件超过 10MB 上限
+    const big = rawZip([
+      { name: 'ok-skill/SKILL.md', data: '---\nname: ok-skill\ndescription: d\n---\nb\n' },
+      { name: 'ok-skill/big.bin', data: 'x'.repeat(11 * 1024 * 1024) },
+    ])
+    assert.throws(() => importSkillFromZip(big, { root: join(dir, 'skills') }), /单文件上限/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('setInvocation 保留未知 frontmatter 字段与正文', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    const file = join(dir, 'skills', 'meta-skill', 'SKILL.md')
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(
+      file,
+      '---\nname: meta-skill\ndescription: d\nlicense: MIT\nallowed-tools:\n  - bash\n---\n正文第一行\n',
+    )
+    setInvocation(file, 'model', false)
+    const text = readFileSync(file, 'utf8')
+    assert.ok(text.includes('license: MIT'), 'license 应保留')
+    assert.ok(text.includes('allowed-tools'), 'allowed-tools 应保留')
+    assert.ok(text.includes('disable-model-invocation: true'))
+    assert.ok(text.includes('正文第一行'), '正文应保留')
+    setInvocation(file, 'model', true)
+    const text2 = readFileSync(file, 'utf8')
+    assert.ok(text2.includes('license: MIT'), '再次切换后未知字段仍应保留')
+    assert.ok(!text2.includes('disable-model-invocation'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('覆盖导入清理旧资源且为事务性', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    const root = join(dir, 'skills')
+    const zip1 = new AdmZip()
+    zip1.addFile('demo/SKILL.md', Buffer.from('---\nname: demo\ndescription: v1\n---\nb1\n'))
+    zip1.addFile('demo/legacy.txt', Buffer.from('old'))
+    importSkillFromZip(zip1.toBuffer(), { root })
+    assert.ok(existsSync(join(root, 'demo', 'legacy.txt')))
+    const zip2 = new AdmZip()
+    zip2.addFile('demo/SKILL.md', Buffer.from('---\nname: demo\ndescription: v2\n---\nb2\n'))
+    const res = importSkillFromZip(zip2.toBuffer(), { root, overwrite: true })
+    assert.equal(res.name, 'demo')
+    assert.ok(existsSync(join(root, 'demo', 'SKILL.md')))
+    assert.ok(!existsSync(join(root, 'demo', 'legacy.txt')), '覆盖后旧资源不应残留')
+    assert.equal(readFileSync(join(root, 'demo', 'SKILL.md'), 'utf8').includes('v2'), true)
+    // 临时目录应被清理
+    const residue = readdirSync(dir).filter((n) => n.startsWith('.dsh-skill-import-'))
+    assert.deepEqual(residue, [], '不应残留临时解压目录')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

@@ -1,8 +1,8 @@
-# DSH Desktop — 产品需求文档（PRD）
+# DSH Desktop Hub — 产品需求文档（PRD）
 
-> 状态：**已实现**（§2 调研结论为实施依据；M0-M5 已按 plan.md 全部落地并通过验证，见 §5）
+> 状态：**已实现（审计修复完成）**（§2 调研结论为实施依据；M0-M5 已按 plan.md 全部落地并通过验证，见 §5；AUDIT_REPORT.md 的 P0-P3 全部修复）
 > 版本：v0.1 · 日期：2026-08-16
-> 应用名：暂定「DSH Desktop」（与社区项目 `myYangyunfan/dsh_desktop` 撞名，命名风险见 §6）
+> 应用名：**DSH Desktop Hub**（已定名并落实，规避社区 `dsh-desktop` / `dsh_desktop` 撞名）
 
 ---
 
@@ -237,7 +237,7 @@ dsh plugin --profile <name> update
 
 ### 3.1 定位
 
-**DSH Desktop 管理控制台**：一个桌面应用，内置完整 DSH harness（无需安装 Node.js/pnpm 等任何运行环境，双击即进入），并在原生/集成 UI 中以多 Tab 提供三个管理系统：
+**DSH Desktop Hub 管理控制台**：一个桌面应用，内置完整 DSH harness（无需安装 Node.js/pnpm 等任何运行环境，双击即进入），并在原生/集成 UI 中以多 Tab 提供三个管理系统：
 
 1. **Plugin 系统** — 管理、安装、移除本机 DSH 所有插件
 2. **MCP 系统** — 把普通 JSON 格式的 MCP 配置转换为 DeepSeek 所需的 YAML 并接入 harness
@@ -267,7 +267,7 @@ dsh plugin --profile <name> update
 | **Settings（壳级）** | API Key、模型、profile、更新 | 本期未实现（预留；API Key/模型配置复用官方 Web UI 内能力） |
 | **第四系统（占位）** | 预留入口 | 本期未实现（§0 原始需求：暂不做） |
 
-UI 风格：深色主题（`color-scheme: dark` + 面板底色/强调色），与官方 Harness Web UI 视觉基调一致；四个系统 Tab 与官方会话界面并列切换。
+UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四个系统 Tab 与官方会话界面并列切换。
 
 ### 3.4 平台与范围
 
@@ -282,7 +282,7 @@ UI 风格：深色主题（`color-scheme: dark` + 面板底色/强调色），�
 
 | 决策点 | 选择（已落地） | 理由 |
 |---|---|---|
-| 壳 | **Electron 37 + TypeScript 5.8**，三套 tsc 配置：main+core（NodeNext）/ preload（CommonJS → `preload.cjs`）/ renderer（纯脚本，无模块） | DSH 是 Node 应用，Electron 自带 Node；Tauri 需另捆绑 Node 二进制，复杂度更高 |
+| 壳 | **Electron 43.4.0 + TypeScript 5.8**，三套 tsc 配置：main+core（NodeNext）/ preload（CommonJS → `preload.cjs`）/ renderer（纯脚本，无模块） | DSH 是 Node 应用，Electron 自带 Node；Tauri 需另捆绑 Node 二进制，复杂度更高 |
 | 内置 DSH | **`@deepseek-ai/dsh@0.1.0-rc.6` npm 包**（方案 A 已落地）：`scripts/bundle-runtime.mjs` 下载 Node v24.10.0 到 `resources/node`、npm 安装 dsh 到 `resources/dsh-runtime` | 与官方发布同步、打包体积可控；`--ignore-scripts` 安装规避未知副作用 |
 | 运行时解析 | `resolveDshExec()`：**优先打包内 runtime**（`resources/dsh-runtime/node_modules/@deepseek-ai/dsh/lib/bin.js` + `resources/node/bin/node`，兼容 `app.asar.unpacked/resources` 布局），回退系统 PATH（`$DSH_BIN` / Homebrew / `/usr/local` / `/usr` / PATH） | 打包应用不依赖用户安装 Node/dsh（双击即用） |
 | 插件操作通道 | 主进程 spawn `dsh plugin --profile web add|remove|update`（进程树托管、输出流回 UI、支持取消） | 与 anywhere-labs `desktopPnpm.runPlugin()` 同构；`dsh` 是 bundle reconcile 的权威 |
@@ -330,7 +330,7 @@ UI 风格：深色主题（`color-scheme: dark` + 面板底色/强调色），�
 | M2 Plugin Tab | profile 发现 + 插件列表（`dsh.profile.bundles` ∪ dependencies）；封装 `dsh plugin --profile web add|remove|update`（支持 npm 包名 / `github:owner/repo#commit` / 本地路径 / 直接粘贴 GitHub 链接） | ✅ 已完成：单测 6 例（分类/排序/命令形态/链接归一化/聚合仓库拦截/退出码+取消）；冒烟断言真实 web profile ≥4 项含 dsh-base |
 | M3 MCP Tab | JSON→YAML 转换器 + profile `cordis.patch.yml` 事务读写（备份/回滚）+ 服务器列表 | ✅ 已完成：单测 11 例（混合输入/sse 警告/格式拒绝/YAML 同构/提取/替换/编辑/删除保留注释/空 patch 新建/备份事务）；UI 支持读取、编辑、删除已有 MCP 行 |
 | M4 Skills Tab | rank 100-600 目录扫描；SKILL.md/扁平 md 解析 + frontmatter；新建（kebab-case 校验）；模型/用户可见性切换 | ✅ 已完成：单测 4 例（rank 合并/shadowed/往返一致/创建校验/可见性切换）；冒烟真实数据 huashu-design + media-use |
-| M5 桌面整合与打包 | 四 Tab 主窗口整合（Harness iframe 内嵌官方 Web UI）+ electron-builder 出 DMG | ✅ 已完成：默认模式＝启动 harness + 四 Tab 壳；`release/DSH-Desktop-0.1.0-arm64.dmg` 产物存在；打包 app 在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）下用捆绑运行时启动，HTTP 200；TERM 退出无孤儿 |
+| M5 桌面整合与打包 | 四 Tab 主窗口整合（Harness iframe 内嵌官方 Web UI）+ electron-builder 出 DMG | ✅ 已完成：默认模式＝启动 harness + 四 Tab 壳；`release/DSH-Desktop-Hub-0.1.0-arm64.dmg` 产物存在；打包 app 在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）下用捆绑运行时启动，HTTP 200；TERM 退出无孤儿 |
 
 > 后续演进（未在本期范围）：Settings Tab（API Key/模型/更新）、profile 切换、插件 `allowBuilds` 授权向导、MCP/Skills 文件导入、Windows/Linux 打包、自动更新 —— 详见 plan.md「下一步」。
 

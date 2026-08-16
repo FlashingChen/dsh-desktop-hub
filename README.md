@@ -3,7 +3,6 @@
 ![GitHub release](https://img.shields.io/github/v/release/FlashingChen/dsh-desktop-hub)
 ![License](https://img.shields.io/github/license/FlashingChen/dsh-desktop-hub)
 ![CI](https://github.com/FlashingChen/dsh-desktop-hub/actions/workflows/release.yml/badge.svg)
-
 DSH Desktop Hub — DeepSeek Harness 桌面管理控制台（Electron + TypeScript）。
 
 双击启动即进入 DSH harness 对话界面，无需安装 Node.js / pnpm 等任何运行环境（打包内置 Node v24.10.0 + `@deepseek-ai/dsh@0.1.0-rc.6`）；内置多 Tab 管理系统：**Harness（官方 Web UI）/ Plugin / MCP / Skills**。
@@ -66,7 +65,7 @@ flowchart LR
 ## 目录结构
 
 ```
-dsh-desktop/
+dsh-desktop-hub/
 ├── src/
 │   ├── main/main.ts            # Electron 主进程：窗口 + IPC + harness 进程生命周期
 │   ├── preload/preload.ts      # contextBridge 白名单 API（sandbox，编译为 preload.cjs）
@@ -102,7 +101,7 @@ dsh-desktop/
 | `npm run smoke` | 骨架冒烟（不启 harness）：四 Tab DOM + 真实插件/MCP/skills 数据断言，截屏 `artifacts/m0-smoke.png` |
 | `npm run smoke:harness` | 真实 harness 冒烟：iframe 挂载 + 状态「已连接」，截屏 `artifacts/m1-harness.png` |
 | `npm run verify:m1` | M1 实机验证：真实启动 dsh web → HTTP 200 → 优雅停止 → 端口关闭无孤儿 |
-| `npm run verify` | 一键门禁：骨架契约 + 构建产物 + typecheck×2 + 单测全绿 |
+| `npm run verify` | 一键门禁：骨架契约 + 构建产物 + typecheck×2 + 单测全绿（`npm test` 已改为先 build） |
 
 ## 打包命令
 
@@ -110,7 +109,7 @@ dsh-desktop/
 npm run build                          # 1. 构建 dist/
 node scripts/bundle-runtime.mjs        # 2. 捆绑运行时（首次/更新）：下载 Node v24.10.0 +
                                       #    安装 @deepseek-ai/dsh@0.1.0-rc.6 到 resources/
-npx electron-builder                   # 3. 读 electron-builder.yml → release/DSH-Desktop-0.1.0-arm64.dmg
+npx electron-builder                   # 3. 读 electron-builder.yml → release/DSH-Desktop-Hub-0.1.0-arm64.dmg
 ```
 
 - `bundle-runtime.mjs`：下载官方 Node v24.10.0（darwin/linux × arm64/x64）到 `resources/node`，用捆绑 npm 以 `--ignore-scripts` 安装锁定版本 `@deepseek-ai/dsh@0.1.0-rc.6` 到 `resources/dsh-runtime`。
@@ -139,22 +138,22 @@ git push origin v0.1.0
 
 | 层级 | 内容 |
 |---|---|
-| 契约测试 `tests/skeleton.test.mjs`（5 例） | 骨架文件齐全；package.json 脚本与 devDependencies；四 Tab 契约；contextIsolation + sandbox + nodeIntegration:false；tsconfig strict |
-| Harness `tests/harness.test.mjs`（5 例） | `findDsh` 可解析；`dshHome` 默认/覆盖；真实 web profile 发现（首个 bundle = dsh-base）；忽略非 profile 目录；`parseHarnessUrl` |
-| Plugin `tests/plugins.test.mjs`（6 例） | bundles ∪ dependencies 分类；排序稳定；`buildPluginCommand` 命令形态；`normalizeInstallSpec` GitHub 链接归一化；聚合仓库识别/拦截；`runPluginOp` 退出码 + 取消 |
-| MCP `tests/mcp.test.mjs`（11 例） | 混合 stdio+http 解析；sse / 非法 serverName 警告；格式拒绝；YAML 与官方示例同构；`${VAR}` → `!!js process.env.VAR`；patch 提取 / 替换 / 编辑 / 删除保留注释；空 patch 新建 / 备份事务 |
-| Skills `tests/skills.test.mjs`（7 例） | rank 合并 + shadowed；frontmatter 往返一致；kebab-case 校验落盘；可见性切换；zip/.skill 导入（含资源文件、包裹目录剥离、拒绝无 SKILL.md）；GitHub URL 解析 |
-| `npm run smoke` | 四 Tab 就绪；真实 web profile 插件 ≥4 含 dsh-base；MCP 转换端到端（preview 含 `dsh-mcp-client` / `streamable-http`）；真实 skills（huashu-design + media-use） |
-| `npm run smoke:harness` | harness 就绪；iframe 挂载 `http://127.0.0.1:PORT`；状态「已连接」 |
+| 契约测试 `tests/skeleton.test.mjs`（9 例） | 骨架文件齐全；package.json 脚本与 devDependencies；四 Tab 契约；contextIsolation + sandbox + nodeIntegration:false；tsconfig strict |
+| Harness `tests/harness.test.mjs`（5 例，不依赖真实 dsh） | `findDsh` 可解析；`dshHome` 默认/覆盖；真实 web profile 发现（首个 bundle = dsh-base）；忽略非 profile 目录；`parseHarnessUrl` |
+| Plugin `tests/plugins.test.mjs`（7 例） | bundles ∪ dependencies 分类；排序稳定；`buildPluginCommand` 命令形态；`normalizeInstallSpec` GitHub 链接归一化；聚合仓库识别/拦截；`runPluginOp` 退出码 + 取消 |
+| MCP `tests/mcp.test.mjs`（14 例） | 混合 stdio+http 解析；sse / 非法 serverName 警告；格式拒绝；YAML 与官方示例同构；`${VAR}` → `!!js process.env.VAR`；patch 提取 / 替换 / 编辑 / 删除保留注释；空 patch 新建 / 备份事务 |
+| Skills `tests/skills.test.mjs`（11 例） | rank 合并 + shadowed；frontmatter 往返一致；kebab-case 校验落盘；可见性切换；zip/.skill 导入（含资源文件、包裹目录剥离、拒绝无 SKILL.md）；GitHub URL 解析 |
+| `npm run smoke` | 四 Tab 就绪；Plugin/Skills 面板加载完成；MCP 转换端到端（preview 含 `dsh-mcp-client` / `streamable-http`）；不依赖特定 profile 数据 |
+| `npm run smoke:harness` | harness 就绪；iframe 挂载 `http://127.0.0.1:PORT`；状态条「已连接」（`#harness-status`） |
 | `npm run verify:m1` | 真实 dsh web 启动并 HTTP 200（页面 ≥100B）；优雅停止后端口关闭、无孤儿进程 |
 
 ## 已知限制
 
-- **profile 固定**：`ACTIVE_PROFILE` 常量 = `'web'`（main.ts 注释：M5 将支持切换），暂无 UI 切换。
+- **profile 固定**：`ACTIVE_PROFILE` 常量 = `'web'`，暂无 UI 切换。
 - **Routing Suite 聚合仓库**：`https://github.com/yjh051108/dsh-routing-suite` 不是单一 DSH bundle，根目录缺 `package.json/dsh.bundle`；Plugin Tab 会拒绝直接安装。应按仓库说明分别装配 injector、router-standard preset 与可选 mode-boost。
 - **无 Settings / 第四系统**：Settings（API Key / 模型 / 更新）与第四系统占位本期未实现，API Key/模型配置请使用官方 Web UI 内能力。
-- **MCP 无文件导入**：MCP 面板仅支持粘贴 JSON（`${VAR}` 自动转 `!!js process.env.VAR`），暂无 `.mcp.json` 文件选择器。
-- **退出边界**：正常退出走 SIGTERM 进程组清理；强杀（timeout / group-kill）可能遗留 dsh 子进程。
-- **打包范围**：仅 macOS DMG（arm64），未签名（`identity: null`）；Windows / Linux 打包待做；应用图标为 Electron 默认；无自动更新。
+- **MCP 无文件导入**：MCP 面板支持粘贴 JSON（`${VAR}` 自动转 `!!js process.env.VAR`；默认合并写入，可选全量替换），暂无 `.mcp.json` 文件选择器。
+- **退出边界**：正常退出走 SIGTERM 进程组清理 + 单实例锁；Harness 意外退出可在 UI 一键重启；强杀（timeout / group-kill）仍可能遗留 dsh 子进程。
+- **打包范围**：仅 macOS DMG（arm64），未签名（`identity: null`）；Windows / Linux 打包待做；应用图标为品牌定制（`build/icon.png`）；无自动更新。
 - **体积**：`resources/` 捆绑运行时约 586MB（gitignore），首包体积较大。
 - **写操作落真实 profile**：MCP「写入 patch」真实修改 `~/.dsh/profiles/web/cordis.patch.yml`（写入前自动 `.bak-<ts>` 备份）；插件安装/移除真实执行 `dsh plugin`。

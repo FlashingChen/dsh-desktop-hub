@@ -1,13 +1,14 @@
 {
-  "name": "dsh-desktop",
+  "name": "dsh-desktop-hub",
   "version": "0.1.0",
-  "description": "DSH Desktop — DeepSeek Harness 桌面管理控制台（多 Tab：Harness / Plugin / MCP / Skills）",
+  "productName": "DSH Desktop Hub",
+  "description": "DSH Desktop Hub — DeepSeek Harness 桌面管理控制台（多 Tab：Harness / Plugin / MCP / Skills）",
   "private": true,
   "type": "module",
   "main": "dist/main/main.js",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"tests/*.test.mjs\"",
+    "test": "npm run build && node --test \"tests/*.test.mjs\"",
     "build": "tsc -p tsconfig.json && node scripts/build-preload.mjs && tsc -p tsconfig.renderer.json && node scripts/copy-renderer.mjs",
     "start": "electron .",
     "smoke": "electron . --smoke",
@@ -17,7 +18,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "electron": "^37.0.0",
+    "electron": "43.4.0",
     "electron-builder": "^26.15.3",
     "typescript": "^5.8.0"
   },

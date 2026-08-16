@@ -11,8 +11,10 @@ export interface PluginEntry {
   spec: string
   /** 是否在 dsh.profile.bundles（作为组合包激活） */
   inBundles: boolean
-  /** 是否已经在 profile patch 中激活 */
+  /** 当前是否处于激活状态（bundle 或 patch 任一来源） */
   active: boolean
+  /** 激活来源：bundle = 组合包自带；patch = 用户 patch 手动激活；none = 未激活 */
+  activationSource: 'bundle' | 'patch' | 'none'
   /** @deepseek-ai/* 内置包 */
   builtin: boolean
   source: 'builtin-bundle' | 'bundle' | 'dependency'
@@ -26,8 +28,9 @@ export interface InstallSpecPlan {
   message?: string
 }
 
-/** 从 profile package.json 解析插件清单：bundles ∪ dependencies */
-export function listPlugins(profile: DshProfile): PluginEntry[] {
+/** 从 profile package.json 解析插件清单：bundles ∪ dependencies。
+ * 传入 patch 文本时计算真实激活来源（bundle / patch / none）。 */
+export function listPlugins(profile: DshProfile, patchText?: string): PluginEntry[] {
   const pkg = JSON.parse(readFileSync(join(profile.dir, 'package.json'), 'utf8'))
   const deps: Record<string, string> = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) }
   const bundles = new Set(profile.bundles)
@@ -38,7 +41,13 @@ export function listPlugins(profile: DshProfile): PluginEntry[] {
       const inBundles = bundles.has(name)
       const builtin = name.startsWith('@deepseek-ai/')
       const source: PluginEntry['source'] = inBundles ? (builtin ? 'builtin-bundle' : 'bundle') : 'dependency'
-      return { name, spec, inBundles, active: inBundles, builtin, source }
+      const patchActive = patchText !== undefined && isPluginActive(patchText, name)
+      const activationSource: PluginEntry['activationSource'] = inBundles
+        ? 'bundle'
+        : patchActive
+          ? 'patch'
+          : 'none'
+      return { name, spec, inBundles, active: activationSource !== 'none', activationSource, builtin, source }
     })
     .sort((a, b) => a.name.localeCompare(b.name))
 }
@@ -186,10 +195,15 @@ export function runPluginOp(opts: {
   args?: string[]
   cwd?: string
   signal?: AbortSignal
+  env?: NodeJS.ProcessEnv
 }): PluginOpHandle {
   const cmd = buildPluginCommand(opts.profile, opts.action, opts.args ?? [])
   const spawnArgs = opts.node ? [opts.dsh, ...cmd] : cmd
-  const child = spawn(opts.node ?? opts.dsh, spawnArgs, { cwd: opts.cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(opts.node ?? opts.dsh, spawnArgs, {
+    cwd: opts.cwd,
+    env: opts.env ?? process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
   const { promise, resolve } = Promise.withResolvers<{
     exitCode: number | null
     signal: NodeJS.Signals | null

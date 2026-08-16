@@ -47,3 +47,44 @@ test('tsconfig 开启严格模式', () => {
   const ts = JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf8'))
   assert.equal(ts.compilerOptions.strict, true)
 })
+
+test('package.json 已重命名为 dsh-desktop-hub 并锁定 Electron 43.4.0', () => {
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+  assert.equal(pkg.name, 'dsh-desktop-hub')
+  assert.equal(pkg.productName, 'DSH Desktop Hub')
+  assert.equal(pkg.devDependencies?.electron, '43.4.0', 'Electron 必须锁定到审计给出的修复版本')
+  assert.ok(!pkg.devDependencies.electron.includes('^'), 'electron 不得使用 semver range')
+})
+
+test('preload channel 与 src/core/ipc.ts 契约逐字符一致', () => {
+  const ipcSrc = readFileSync(join(root, 'src/core/ipc.ts'), 'utf8')
+  const preloadSrc = readFileSync(join(root, 'src/preload/preload.ts'), 'utf8')
+  const ipcValues = [...ipcSrc.matchAll(/^  (\w+): '([^']+)',?$/gm)].map((m) => [m[1], m[2]])
+  const preloadValues = [...preloadSrc.matchAll(/^ {2,4}(\w+): '([^']+)',?$/gm)].map((m) => [m[1], m[2]])
+  const ipcMap = new Map(ipcValues)
+  const preloadMap = new Map(preloadValues)
+  assert.ok(ipcValues.length >= 20, `IPC 契约应有完整 channel 集，实际 ${ipcValues.length}`)
+  for (const [key, value] of ipcValues) {
+    assert.equal(preloadMap.get(key), value, `channel ${key} 在 preload 中不一致`)
+  }
+  for (const [key] of preloadValues) {
+    assert.ok(ipcMap.has(key), `preload 存在契约外的 channel ${key}`)
+  }
+})
+
+test('主进程具备窗口安全边界与单实例锁', () => {
+  const main = readFileSync(join(root, 'src/main/main.ts'), 'utf8')
+  assert.ok(main.includes('setWindowOpenHandler'), '缺少 popup 拦截')
+  assert.ok(main.includes('will-navigate'), '缺少导航限制')
+  assert.ok(main.includes('setPermissionRequestHandler'), '缺少权限请求拦截')
+  assert.ok(main.includes('requestSingleInstanceLock'), '缺少单实例锁')
+  assert.ok(main.includes('assertRendererSender'), '缺少 IPC sender 校验')
+})
+
+test('渲染层 skills 表格使用 DOM API（textContent）而非 innerHTML 拼接', () => {
+  const renderer = readFileSync(join(root, 'src/renderer/renderer.ts'), 'utf8')
+  assert.ok(renderer.includes('tdName.textContent = s.name'), 'skill 名称必须经 textContent 渲染')
+  assert.ok(renderer.includes('tdDesc.textContent'), 'skill 描述必须经 textContent 渲染')
+  const skillsBlock = renderer.slice(renderer.indexOf('async function refreshSkills'), renderer.indexOf('async function toggleSkill'))
+  assert.ok(!skillsBlock.includes('innerHTML'), 'skills 渲染不得使用 innerHTML')
+})

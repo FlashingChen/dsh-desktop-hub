@@ -3,13 +3,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { parseDocument } from 'yaml'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const mod = await import(join(root, 'dist', 'core', 'mcp.js'))
-const { parseMcpJson, convertToRows, convertJsonToYaml, extractMcpServers, replaceMcpRows, updateMcpRow, deleteMcpRow, atomicWriteWithBackup, MCP_PLUGIN } = mod
+const { parseMcpJson, convertToRows, convertJsonToYaml, renderRowsYaml, extractMcpServers, replaceMcpRows, mergeMcpRows, updateMcpRow, deleteMcpRow, atomicWriteWithBackup, MCP_PLUGIN } = mod
 
 const SAMPLE = JSON.stringify({
   mcpServers: {
@@ -183,6 +183,68 @@ test('atomicWriteWithBackup 落盘且保留备份', () => {
     assert.equal(readFileSync(file, 'utf8'), 'new')
     assert.ok(existsSync(backup), '备份文件必须存在')
     assert.equal(readFileSync(backup, 'utf8'), 'old')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('预览与实际写入同源：replaceMcpRows 与 renderRowsYaml 输出一致（含 !!js 标签）', () => {
+  const rows = [
+    { id: 'mcp-github', name: MCP_PLUGIN, config: { serverName: 'github', transport: 'stdio', command: 'npx', env: { GITHUB_TOKEN: '${GITHUB_TOKEN}' } } },
+    { id: 'mcp-remote', name: MCP_PLUGIN, config: { serverName: 'remote', transport: 'streamable-http', url: 'http://x', headers: { Authorization: 'Bearer ${T}' } } },
+  ]
+  const preview = renderRowsYaml(rows)
+  const written = replaceMcpRows('', rows)
+  assert.equal(written, preview, '预览与落盘必须逐字符一致（所见即所写）')
+  assert.ok(preview.includes('GITHUB_TOKEN: !!js process.env.GITHUB_TOKEN'), `预览应含 !!js 转换: ${preview}`)
+  assert.ok(written.includes('GITHUB_TOKEN: !!js process.env.GITHUB_TOKEN'), `落盘应含 !!js 转换: ${written}`)
+  // 混合字符串（Bearer ${T}）不是纯 ${VAR}，应保持字面（与 DSH 语义一致）
+  assert.ok(written.includes('Authorization: Bearer ${T}'), `混合值应保持字面: ${written}`)
+  assert.ok(!written.includes("'${GITHUB_TOKEN}'"), '不应残留字面 ${GITHUB_TOKEN}')
+  // 从落盘 patch 提取后仍可解析，且 name 正确
+  assert.equal(extractMcpServers(written).length, 2)
+})
+
+test('mergeMcpRows 按 id 覆盖/追加并保留其他插件与既有服务器', () => {
+  const patch = `# 头部注释
+- insert:
+    - id: dsh-mode-boost
+      name: '@dsh-external/dsh-mode-boost'
+      config: {}
+    - id: mcp-existing
+      name: '${MCP_PLUGIN}'
+      config:
+        serverName: existing
+        transport: stdio
+        command: node
+`
+  const next = mergeMcpRows(patch, [
+    { id: 'mcp-existing', name: MCP_PLUGIN, config: { serverName: 'existing-v2', transport: 'streamable-http', url: 'http://new' } },
+    { id: 'mcp-added', name: MCP_PLUGIN, config: { serverName: 'added', transport: 'stdio', command: 'npx' } },
+  ])
+  const rows = extractMcpServers(next)
+  assert.deepEqual(rows.map((r) => r.id).sort(), ['mcp-added', 'mcp-existing'])
+  assert.equal(rows.find((r) => r.id === 'mcp-existing')?.config.serverName, 'existing-v2')
+  assert.ok(next.includes('dsh-mode-boost'), '无关插件行必须保留')
+  assert.ok(next.includes('# 头部注释'), '注释必须保留')
+  const doc = parseDocument(next)
+  assert.equal(doc.errors.length, 0)
+})
+
+test('atomicWriteWithBackup 原文件不存在时跳过备份并按 0600 新建；存在时保留原 mode', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mcp-patch-'))
+  try {
+    const file = join(dir, 'cordis.patch.yml')
+    const backup = atomicWriteWithBackup(file, 'first')
+    assert.equal(backup, '', '原文件不存在时不应产生备份，也不应抛 ENOENT')
+    assert.equal(readFileSync(file, 'utf8'), 'first')
+    const mode = statSync(file).mode & 0o777
+    assert.equal(mode, 0o600, `新文件应为 0600，实际 ${mode.toString(8)}`)
+    chmodSync(file, 0o600)
+    const backup2 = atomicWriteWithBackup(file, 'second')
+    assert.ok(backup2, '已有文件应备份')
+    assert.equal(readFileSync(backup2, 'utf8'), 'first')
+    assert.equal(statSync(file).mode & 0o777, 0o600, `写后应保持 0600，实际 ${(statSync(file).mode & 0o777).toString(8)}`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

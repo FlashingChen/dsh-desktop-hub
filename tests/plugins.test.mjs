@@ -58,6 +58,34 @@ test('listPlugins 排序稳定', () => {
   }
 })
 
+test('listPlugins 按 patch 计算 activationSource（bundle / patch / none）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'profile-'))
+  try {
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({
+        dependencies: { 'bundle-pkg': '1', 'patch-pkg': '1', 'idle-pkg': '1' },
+        dsh: { profile: { bundles: ['bundle-pkg'] } },
+      }),
+    )
+    const profile = { name: 't', dir, bundles: ['bundle-pkg'] }
+    const patch = `- insert:\n    - id: patch-pkg\n      name: patch-pkg\n`
+    const byName = Object.fromEntries(listPlugins(profile, patch).map((e) => [e.name, e]))
+    assert.equal(byName['bundle-pkg'].activationSource, 'bundle')
+    assert.equal(byName['bundle-pkg'].active, true)
+    assert.equal(byName['patch-pkg'].activationSource, 'patch')
+    assert.equal(byName['patch-pkg'].active, true)
+    assert.equal(byName['idle-pkg'].activationSource, 'none')
+    assert.equal(byName['idle-pkg'].active, false)
+    // 无 patch 文本时 bundle 仍为 bundle，依赖不误报 active
+    const bare = Object.fromEntries(listPlugins(profile).map((e) => [e.name, e]))
+    assert.equal(bare['patch-pkg'].activationSource, 'none')
+    assert.equal(bare['bundle-pkg'].activationSource, 'bundle')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('buildPluginCommand 构造官方命令形态', () => {
   assert.deepEqual(buildPluginCommand('web', 'add', ['github:user/repo#abc123']), [
     'plugin', '--profile', 'web', 'add', 'github:user/repo#abc123',

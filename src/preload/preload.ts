@@ -1,37 +1,89 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+// Channel 名与 src/core/ipc.ts 保持一致（preload 是独立 CJS 编译，不能 import 共享模块；
+// tests/skeleton.test.mjs 断言两者字符级一致）。
+const CH = {
+  harnessUrl: 'harness:url',
+  harnessStatus: 'harness:status',
+  harnessFrameLoaded: 'harness:frame-loaded',
+  harnessRestart: 'harness:restart',
+  pluginsList: 'plugins:list',
+  pluginsActivate: 'plugins:activate',
+  pluginsDeactivate: 'plugins:deactivate',
+  pluginsStartOp: 'plugins:start-op',
+  pluginsCancelOp: 'plugins:cancel-op',
+  pluginOpChunk: 'plugin-op:chunk',
+  pluginOpDone: 'plugin-op:done',
+  mcpList: 'mcp:list',
+  mcpConvert: 'mcp:convert',
+  mcpApply: 'mcp:apply',
+  mcpUpdate: 'mcp:update',
+  mcpDelete: 'mcp:delete',
+  skillsList: 'skills:list',
+  skillsCreate: 'skills:create',
+  skillsToggle: 'skills:toggle',
+  skillsImportFile: 'skills:import-file',
+  skillsImportUrl: 'skills:import-url',
+} as const
+
+interface HarnessStatus {
+  state: 'starting' | 'ready' | 'exited' | 'restarting'
+  url?: string
+  code?: number | null
+  signal?: string | null
+}
+
+interface PluginOpStarted {
+  ok: boolean
+  token?: string
+  error?: string
+}
+
+interface PluginOpDone {
+  token: string
+  exitCode: number | null
+  signal: string | null
+  output: string
+}
+
 contextBridge.exposeInMainWorld('dshDesktop', {
-  versions: {
-    electron: process.versions.electron,
-    node: process.versions.node,
-    chrome: process.versions.chrome,
-  },
   harness: {
-    url: () => ipcRenderer.invoke('harness:url'),
-    onFrameLoaded: (cb: (url: string) => void) => {
-      ipcRenderer.on('harness:frame-loaded', (_e, url: string) => cb(url))
+    url: (): Promise<string | null> => ipcRenderer.invoke(CH.harnessUrl),
+    restart: (): Promise<{ ok: boolean; url?: string; error?: string }> => ipcRenderer.invoke(CH.harnessRestart),
+    onFrameLoaded: (cb: (url: string) => void): void => {
+      ipcRenderer.on(CH.harnessFrameLoaded, (_e, url: string) => cb(url))
+    },
+    onStatus: (cb: (status: HarnessStatus) => void): void => {
+      ipcRenderer.on(CH.harnessStatus, (_e, status: HarnessStatus) => cb(status))
     },
   },
   plugins: {
-    list: () => ipcRenderer.invoke('plugins:list'),
-    install: (spec: string) => ipcRenderer.invoke('plugins:install', spec),
-    activate: (name: string) => ipcRenderer.invoke('plugins:activate', name),
-    deactivate: (name: string) => ipcRenderer.invoke('plugins:deactivate', name),
-    remove: (name: string) => ipcRenderer.invoke('plugins:remove', name),
-    update: () => ipcRenderer.invoke('plugins:update'),
+    list: () => ipcRenderer.invoke(CH.pluginsList),
+    activate: (name: string) => ipcRenderer.invoke(CH.pluginsActivate, name),
+    deactivate: (name: string) => ipcRenderer.invoke(CH.pluginsDeactivate, name),
+    startOp: (action: 'add' | 'remove' | 'update', args: string[]): Promise<PluginOpStarted> =>
+      ipcRenderer.invoke(CH.pluginsStartOp, action, args),
+    cancelOp: (token: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(CH.pluginsCancelOp, token),
+    onOpChunk: (cb: (token: string, text: string) => void): void => {
+      ipcRenderer.on(CH.pluginOpChunk, (_e, token: string, text: string) => cb(token, text))
+    },
+    onOpDone: (cb: (done: PluginOpDone) => void): void => {
+      ipcRenderer.on(CH.pluginOpDone, (_e, done: PluginOpDone) => cb(done))
+    },
   },
   mcp: {
-    list: () => ipcRenderer.invoke('mcp:list'),
-    convert: (jsonText: string) => ipcRenderer.invoke('mcp:convert', jsonText),
-    apply: (rows: unknown[]) => ipcRenderer.invoke('mcp:apply', rows),
-    update: (input: unknown) => ipcRenderer.invoke('mcp:update', input),
-    delete: (id: string) => ipcRenderer.invoke('mcp:delete', id),
+    list: () => ipcRenderer.invoke(CH.mcpList),
+    convert: (jsonText: string) => ipcRenderer.invoke(CH.mcpConvert, jsonText),
+    apply: (input: { rows: unknown[]; mode: 'merge' | 'replace' }) => ipcRenderer.invoke(CH.mcpApply, input),
+    update: (input: { id: string; row: unknown }) => ipcRenderer.invoke(CH.mcpUpdate, input),
+    delete: (id: string) => ipcRenderer.invoke(CH.mcpDelete, id),
   },
   skills: {
-    list: () => ipcRenderer.invoke('skills:list'),
-    create: (input: { name: string; description: string; body: string }) => ipcRenderer.invoke('skills:create', input),
-    toggle: (input: { path: string; kind: 'model' | 'user'; value: boolean }) => ipcRenderer.invoke('skills:toggle', input),
-    importFile: (buffer: ArrayBuffer, overwrite: boolean) => ipcRenderer.invoke('skills:import-file', buffer, overwrite),
-    importUrl: (url: string, overwrite: boolean) => ipcRenderer.invoke('skills:import-url', url, overwrite),
+    list: () => ipcRenderer.invoke(CH.skillsList),
+    create: (input: { name: string; description: string; body: string }) => ipcRenderer.invoke(CH.skillsCreate, input),
+    toggle: (input: { id: string; source: string; kind: 'model' | 'user'; value: boolean }) =>
+      ipcRenderer.invoke(CH.skillsToggle, input),
+    importFile: (buffer: ArrayBuffer, overwrite: boolean) => ipcRenderer.invoke(CH.skillsImportFile, buffer, overwrite),
+    importUrl: (url: string, overwrite: boolean) => ipcRenderer.invoke(CH.skillsImportUrl, url, overwrite),
   },
 })
