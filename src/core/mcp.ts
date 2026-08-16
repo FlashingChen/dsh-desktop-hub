@@ -96,7 +96,8 @@ export function convertJsonToYaml(text: string): ConvertResult {
     const { servers, warnings } = parseMcpJson(text)
     if (servers.length === 0) return { ok: false, error: '没有可转换的服务器', warnings }
     const rows = convertToRows(servers)
-    const yamlText = stringify(rows)
+    // 预览必须与 cordis.patch.yml 同构；插件行要包在顶层 insert 操作下。
+    const yamlText = stringify([{ insert: rows }])
     // Claude Code 的 ${VAR} 是客户端环境替换语义；DSH 不展开，需 !!js process.env.VAR 动态求值
     const envRefCount = (yamlText.match(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/g) ?? []).length
     const converted = yamlText.replace(
@@ -203,6 +204,23 @@ export function replaceMcpRows(patchText: string, rows: McpRow[]): string {
     }
   }
   return doc.toString()
+}
+
+/** 更新已有 MCP 行，保留同一 id 以支持 UI 编辑。 */
+export function updateMcpRow(patchText: string, row: McpRow): string {
+  const rows = extractMcpServers(patchText)
+  const index = rows.findIndex((current) => current.id === row.id)
+  if (index < 0) throw new Error(`MCP 服务器不存在: ${row.id}`)
+  rows[index] = row
+  return replaceMcpRows(patchText, rows)
+}
+
+/** 删除已有 MCP 行；允许删除最后一个服务器。 */
+export function deleteMcpRow(patchText: string, id: string): string {
+  const rows = extractMcpServers(patchText)
+  const next = rows.filter((row) => row.id !== id)
+  if (next.length === rows.length) throw new Error(`MCP 服务器不存在: ${id}`)
+  return replaceMcpRows(patchText, next)
 }
 
 /** 原子写 + 备份：写 .bak-<ts>，临时文件 rename 落盘 */

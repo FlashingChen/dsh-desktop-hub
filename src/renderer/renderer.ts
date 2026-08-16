@@ -5,6 +5,7 @@ interface PluginEntry {
   name: string
   spec: string
   inBundles: boolean
+  active: boolean
   builtin: boolean
   source: 'builtin-bundle' | 'bundle' | 'dependency'
 }
@@ -20,6 +21,7 @@ interface PluginOpResult {
   ok: boolean
   exitCode?: number | null
   output?: string
+  backup?: string
   error?: string
 }
 
@@ -32,13 +34,17 @@ interface DesktopApi {
   plugins: {
     list: () => Promise<PluginListResult>
     install: (spec: string) => Promise<PluginOpResult>
+    activate: (name: string) => Promise<PluginOpResult>
+    deactivate: (name: string) => Promise<PluginOpResult>
     remove: (name: string) => Promise<PluginOpResult>
     update: () => Promise<PluginOpResult>
   }
   mcp: {
     list: () => Promise<McpListResult>
     convert: (jsonText: string) => Promise<McpConvertResult>
-    apply: (rows: unknown[]) => Promise<McpApplyResult>
+    apply: (rows: McpRow[]) => Promise<McpApplyResult>
+    update: (input: { id: string; row: McpRow }) => Promise<McpApplyResult>
+    delete: (id: string) => Promise<McpApplyResult>
   }
   skills: {
     list: () => Promise<SkillsListResult>
@@ -77,16 +83,22 @@ interface SkillsOpResult {
   error?: string
 }
 
+interface McpRow {
+  id: string
+  name: string
+  config: Record<string, unknown>
+}
+
 interface McpListResult {
   ok: boolean
   profile?: string
-  servers?: { id: string; config: Record<string, unknown> }[]
+  servers?: McpRow[]
   error?: string
 }
 
 interface McpConvertResult {
   ok: boolean
-  rows?: unknown[]
+  rows?: McpRow[]
   yaml?: string
   warnings?: string[]
   error?: string
@@ -104,15 +116,47 @@ const api = (window as DesktopWindow).dshDesktop
 const TABS = ['harness', 'plugin', 'mcp', 'skills'] as const
 type TabId = (typeof TABS)[number]
 
+const harnessFullscreenButton = document.getElementById('harness-fullscreen')
+
+function setHarnessFullscreen(active: boolean): void {
+  document.body.classList.toggle('harness-fullscreen', active)
+  harnessFullscreenButton?.setAttribute('aria-pressed', String(active))
+  harnessFullscreenButton?.setAttribute('aria-label', active ? '退出 Harness 全屏' : '全屏显示 Harness')
+  harnessFullscreenButton?.setAttribute('title', active ? '退出 Harness 全屏' : '全屏显示 Harness')
+}
+
 function switchTab(id: TabId): void {
+  if (id !== 'harness' && document.body.classList.contains('harness-fullscreen')) setHarnessFullscreen(false)
   for (const t of TABS) {
-    document.querySelector(`[data-tab="${t}"]`)?.classList.toggle('active', t === id)
-    document.getElementById(`panel-${t}`)?.classList.toggle('active', t === id)
+    const tab = document.querySelector(`[data-tab="${t}"]`)
+    const panel = document.getElementById(`panel-${t}`)
+    const active = t === id
+    tab?.classList.toggle('active', active)
+    tab?.setAttribute('aria-selected', String(active))
+    panel?.classList.toggle('active', active)
+    panel?.setAttribute('aria-hidden', String(!active))
   }
 }
 
+harnessFullscreenButton?.addEventListener('click', () => {
+  setHarnessFullscreen(!document.body.classList.contains('harness-fullscreen'))
+})
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && document.body.classList.contains('harness-fullscreen')) setHarnessFullscreen(false)
+})
+
 for (const t of TABS) {
-  document.querySelector(`[data-tab="${t}"]`)?.addEventListener('click', () => switchTab(t))
+  const tab = document.querySelector(`[data-tab="${t}"]`)
+  tab?.addEventListener('click', () => switchTab(t))
+  tab?.addEventListener('keydown', (event) => {
+    if (!(event instanceof KeyboardEvent) || !['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft'].includes(event.key)) return
+    event.preventDefault()
+    const offset = event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1
+    const next = TABS[(TABS.indexOf(t) + offset + TABS.length) % TABS.length]
+    document.querySelector<HTMLElement>(`[data-tab="${next}"]`)?.focus()
+    switchTab(next)
+  })
 }
 
 function setStatus(text: string, kind: 'error' | 'ok' = 'ok'): void {
@@ -121,6 +165,16 @@ function setStatus(text: string, kind: 'error' | 'ok' = 'ok'): void {
   el.textContent = text
   el.className = `status ${kind}`
 }
+
+
+function pluginOutput(res: PluginOpResult): string {
+  return res.output || res.error || ''
+}
+
+function pluginResultText(action: string, res: PluginOpResult): string {
+  return `${action}${res.ok ? '成功' : '失败'}${res.exitCode === undefined ? '' : `（exit=${res.exitCode}）`}\n${pluginOutput(res)}`
+}
+
 
 async function refreshPlugins(): Promise<void> {
   const el = document.getElementById('plugin-rows')
@@ -138,20 +192,46 @@ async function refreshPlugins(): Promise<void> {
     dependency: '普通依赖',
   }
   el.innerHTML = res.entries
-    .map(
-      (p) =>
-        `<tr>
-          <td>${p.name}</td>
-          <td>${sourceLabel[p.source]}</td>
-          <td>${p.spec || '—'}</td>
-          <td>${p.builtin ? '' : `<button data-remove="${p.name}">移除</button>`}</td>
-        </tr>`,
-    )
+    .map((p) => {
+      const action = p.builtin
+        ? ''
+        : `${p.active ? '<span class="status ok">已激活</span><button class="quiet" data-deactivate="' + escapeHtml(p.name) + '">停用</button>' : '<button data-activate="' + escapeHtml(p.name) + '">激活</button>'}<button class="quiet" data-remove="${escapeHtml(p.name)}">移除</button>`
+      return `<tr>
+        <td>${escapeHtml(p.name)}</td>
+        <td>${sourceLabel[p.source]}</td>
+        <td>${escapeHtml(p.spec || '—')}</td>
+        <td>${action}</td>
+      </tr>`
+    })
     .join('')
-  el.querySelectorAll('[data-remove]').forEach((btn) => {
-    btn.addEventListener('click', () => void removePlugin(String((btn as HTMLElement).dataset.remove)))
+  el.querySelectorAll<HTMLElement>('[data-activate]').forEach((btn) => {
+    btn.addEventListener('click', () => void activatePlugin(String(btn.dataset.activate)))
+  })
+  el.querySelectorAll<HTMLElement>('[data-deactivate]').forEach((btn) => {
+    btn.addEventListener('click', () => void deactivatePlugin(String(btn.dataset.deactivate)))
+  })
+  el.querySelectorAll<HTMLElement>('[data-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => void removePlugin(String(btn.dataset.remove)))
   })
   setStatus(`profile「${res.profile}」共 ${res.entries.length} 个包`)
+}
+
+async function activatePlugin(name: string): Promise<void> {
+  if (!api) return
+  if (!confirm(`确认激活插件「${name}」？\n这会把它写入 profile patch，重启 Harness 后加载。`)) return
+  setStatus(`激活中: ${name}`)
+  const res = await api.plugins.activate(name)
+  setStatus(pluginResultText('激活', res), res.ok ? 'ok' : 'error')
+  if (res.ok) await refreshPlugins()
+}
+
+async function deactivatePlugin(name: string): Promise<void> {
+  if (!api) return
+  if (!confirm(`确认停用插件「${name}」？\n只移除 patch 激活行，不卸载 package。`)) return
+  setStatus(`停用中: ${name}`)
+  const res = await api.plugins.deactivate(name)
+  setStatus(pluginResultText('停用', res), res.ok ? 'ok' : 'error')
+  if (res.ok) await refreshPlugins()
 }
 
 async function installPlugin(): Promise<void> {
@@ -165,7 +245,7 @@ async function installPlugin(): Promise<void> {
   if (!confirm(`确认安装插件「${spec}」到 profile「web」？\n插件代码将在本机执行（沙箱之外）。`)) return
   setStatus(`安装中: ${spec}`)
   const res = await api.plugins.install(spec)
-  setStatus(`安装${res.ok ? '成功' : '失败'}（exit=${res.exitCode}）\n${res.output ?? res.error ?? ''}`, res.ok ? 'ok' : 'error')
+  setStatus(pluginResultText('安装', res), res.ok ? 'ok' : 'error')
   if (res.ok) await refreshPlugins()
 }
 
@@ -174,7 +254,7 @@ async function removePlugin(name: string): Promise<void> {
   if (!confirm(`确认移除插件「${name}」？`)) return
   setStatus(`移除中: ${name}`)
   const res = await api.plugins.remove(name)
-  setStatus(`移除${res.ok ? '成功' : '失败'}（exit=${res.exitCode}）\n${res.output ?? res.error ?? ''}`, res.ok ? 'ok' : 'error')
+  setStatus(pluginResultText('移除', res), res.ok ? 'ok' : 'error')
   if (res.ok) await refreshPlugins()
 }
 
@@ -182,7 +262,9 @@ document.getElementById('plugin-install')?.addEventListener('click', () => void 
 document.getElementById('plugin-refresh')?.addEventListener('click', () => void refreshPlugins())
 
 // ---- MCP 面板 ----
-let mcpRows: unknown[] = []
+let mcpDraftRows: McpRow[] = []
+let managedMcpRows: McpRow[] = []
+let editingMcpId: string | null = null
 
 function setMcpStatus(text: string, kind: 'error' | 'ok' = 'ok'): void {
   const el = document.getElementById('mcp-warnings')
@@ -191,13 +273,134 @@ function setMcpStatus(text: string, kind: 'error' | 'ok' = 'ok'): void {
   el.className = `status ${kind}`
 }
 
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+function mcpTransport(row: McpRow): string {
+  return typeof row.config.transport === 'string' ? row.config.transport : '未知'
+}
+
+function mcpTarget(row: McpRow): string {
+  const { config } = row
+  if (config.transport === 'stdio') {
+    const command = typeof config.command === 'string' ? config.command : '—'
+    const args = Array.isArray(config.args) ? config.args.map(String).join(' ') : ''
+    return `${command}${args ? ` ${args}` : ''}`
+  }
+  return typeof config.url === 'string' ? config.url : '—'
+}
+
+function redactMcpTarget(value: string): string {
+  return value.replace(/([?&][^=\s]+)=([^&\s]+)/g, '$1=…')
+}
+
+function mcpRowWarnings(row: McpRow): string[] {
+  const warnings: string[] = []
+  if (row.config.transport === 'stdio') {
+    const command = typeof row.config.command === 'string' ? row.config.command.trim() : ''
+    const args = Array.isArray(row.config.args) ? row.config.args : []
+    if (!command) warnings.push(`「${row.id}」缺少 command`)
+    else if (/\s/.test(command) && args.length === 0) warnings.push(`「${row.id}」的 command 含参数；请将可执行文件保留在 command，其余拆到 args`)
+  }
+  if (row.config.transport === 'streamable-http' && typeof row.config.url !== 'string') {
+    warnings.push(`「${row.id}」缺少 HTTP url`)
+  }
+  return warnings
+}
+
+function setMcpEditorState(): void {
+  const apply = document.getElementById('mcp-apply') as HTMLButtonElement | null
+  const cancel = document.getElementById('mcp-cancel-edit') as HTMLButtonElement | null
+  if (apply) apply.textContent = editingMcpId ? '保存修改' : '写入 patch'
+  if (cancel) cancel.hidden = editingMcpId === null
+}
+
+function renderMcpRows(rows: McpRow[]): void {
+  const el = document.getElementById('mcp-server-rows')
+  if (!el) return
+  if (rows.length === 0) {
+    el.innerHTML = '<tr><td colspan="4">暂无 MCP 服务器</td></tr>'
+    return
+  }
+  el.innerHTML = rows
+    .map((row) => {
+      const name = typeof row.config.serverName === 'string' ? row.config.serverName : row.id
+      const target = redactMcpTarget(mcpTarget(row))
+      return `<tr>
+        <td>${escapeHtml(name)}</td>
+        <td>${escapeHtml(mcpTransport(row))}</td>
+        <td title="${escapeHtml(target)}">${escapeHtml(target)}</td>
+        <td>
+          <button data-mcp-edit="${escapeHtml(row.id)}">编辑</button>
+          <button class="quiet" data-mcp-delete="${escapeHtml(row.id)}">删除</button>
+        </td>
+      </tr>`
+    })
+    .join('')
+  el.querySelectorAll<HTMLElement>('[data-mcp-edit]').forEach((button) => {
+    button.addEventListener('click', () => startMcpEdit(String(button.dataset.mcpEdit)))
+  })
+  el.querySelectorAll<HTMLElement>('[data-mcp-delete]').forEach((button) => {
+    button.addEventListener('click', () => void deleteMcpServer(String(button.dataset.mcpDelete)))
+  })
+}
+
 async function refreshMcpServers(): Promise<void> {
   if (!api) return
-  const el = document.getElementById('mcp-servers')
-  if (!el) return
+  const summary = document.getElementById('mcp-servers')
+  if (summary) {
+    summary.textContent = '读取 profile MCP 配置中…'
+    summary.className = 'status'
+  }
   const res = await api.mcp.list()
-  el.textContent = res.ok ? `profile「${res.profile}」现有 MCP 服务器: ${res.servers?.length ?? 0}` : `加载失败: ${res.error ?? ''}`
-  el.className = `status ${res.ok ? 'ok' : 'error'}`
+  if (!res.ok) {
+    managedMcpRows = []
+    renderMcpRows([])
+    if (summary) {
+      summary.textContent = `加载失败: ${res.error ?? ''}`
+      summary.className = 'status error'
+    }
+    return
+  }
+  managedMcpRows = res.servers ?? []
+  renderMcpRows(managedMcpRows)
+  const warnings = managedMcpRows.flatMap(mcpRowWarnings)
+  if (warnings.length > 0) setMcpStatus(`配置检查：${warnings.join('；')}`, 'error')
+  if (summary) {
+    summary.textContent = `profile「${res.profile}」现有 MCP 服务器: ${managedMcpRows.length}`
+    summary.className = 'status ok'
+  }
+}
+
+function startMcpEdit(id: string): void {
+  const row = managedMcpRows.find((candidate) => candidate.id === id)
+  const input = document.getElementById('mcp-json') as HTMLTextAreaElement | null
+  const preview = document.getElementById('mcp-preview') as HTMLPreElement | null
+  if (!row || !input) return
+  const config = { ...row.config }
+  const transport = config.transport
+  const serverName = typeof config.serverName === 'string' ? config.serverName : row.id
+  delete config.serverName
+  delete config.transport
+  if (transport === 'streamable-http') config.type = 'http'
+  input.value = JSON.stringify({ mcpServers: { [serverName]: config } }, null, 2)
+  if (preview) preview.textContent = ''
+  editingMcpId = row.id
+  mcpDraftRows = [row]
+  setMcpEditorState()
+  setMcpStatus(`正在编辑 MCP「${serverName}」；转换后可保存修改`, 'ok')
+}
+
+function cancelMcpEdit(): void {
+  editingMcpId = null
+  mcpDraftRows = []
+  const input = document.getElementById('mcp-json') as HTMLTextAreaElement | null
+  const preview = document.getElementById('mcp-preview') as HTMLPreElement | null
+  if (input) input.value = ''
+  if (preview) preview.textContent = ''
+  setMcpEditorState()
+  setMcpStatus('已取消编辑', 'ok')
 }
 
 async function convertPreview(): Promise<void> {
@@ -208,36 +411,62 @@ async function convertPreview(): Promise<void> {
   if (!text) {
     setMcpStatus('请先粘贴 JSON', 'error')
     preview.textContent = ''
+    mcpDraftRows = []
     return
   }
   const res = await api.mcp.convert(text)
   if (!res.ok) {
     setMcpStatus(`转换失败: ${res.error ?? ''}`, 'error')
     preview.textContent = ''
-    mcpRows = []
+    mcpDraftRows = []
     return
   }
-  mcpRows = res.rows ?? []
+  mcpDraftRows = res.rows ?? []
   preview.textContent = res.yaml ?? ''
-  setMcpStatus(`转换成功: ${mcpRows.length} 个服务器${res.warnings && res.warnings.length ? `\n警告: ${res.warnings.join('；')}` : ''}`, 'ok')
+  setMcpStatus(`转换成功: ${mcpDraftRows.length} 个服务器${res.warnings && res.warnings.length ? `\n警告: ${res.warnings.join('；')}` : ''}`, 'ok')
 }
 
 async function applyMcp(): Promise<void> {
   if (!api) return
-  if (mcpRows.length === 0) {
+  if (mcpDraftRows.length === 0) {
     setMcpStatus('请先转换得到 YAML 再写入', 'error')
     return
   }
-  if (!confirm(`确认将 ${mcpRows.length} 个 MCP 服务器写入 profile「web」的 cordis.patch.yml？\n服务器命令将在本机执行（沙箱之外），写入前自动备份。`)) return
-  setMcpStatus('写入中…')
-  const res = await api.mcp.apply(mcpRows)
-  setMcpStatus(res.ok ? `写入成功（备份: ${res.backup}），HMR 热生效中` : `写入失败: ${res.error ?? ''}`, res.ok ? 'ok' : 'error')
-  await refreshMcpServers()
+  const editing = editingMcpId !== null
+  const action = editing ? '保存修改' : '写入'
+  if (!confirm(`确认${action} ${mcpDraftRows.length} 个 MCP 服务器到 profile「web」的 cordis.patch.yml？\n服务器命令将在本机执行（沙箱之外），写入前自动备份。`)) return
+  setMcpStatus(`${action}中…`)
+  const res = editing
+    ? await api.mcp.update({ id: editingMcpId!, row: mcpDraftRows[0] })
+    : await api.mcp.apply(mcpDraftRows)
+  setMcpStatus(res.ok ? `${action}成功（备份: ${res.backup}），HMR 热生效中` : `${action}失败: ${res.error ?? ''}`, res.ok ? 'ok' : 'error')
+  if (res.ok) {
+    editingMcpId = null
+    mcpDraftRows = []
+    setMcpEditorState()
+    await refreshMcpServers()
+  }
+}
+
+async function deleteMcpServer(id: string): Promise<void> {
+  if (!api) return
+  const row = managedMcpRows.find((candidate) => candidate.id === id)
+  const name = row && typeof row.config.serverName === 'string' ? row.config.serverName : id
+  if (!confirm(`确认删除 MCP 服务器「${name}」？写入前自动备份。`)) return
+  setMcpStatus(`删除中: ${name}`)
+  const res = await api.mcp.delete(id)
+  setMcpStatus(res.ok ? `删除成功（备份: ${res.backup}）` : `删除失败: ${res.error ?? ''}`, res.ok ? 'ok' : 'error')
+  if (res.ok) {
+    if (editingMcpId === id) cancelMcpEdit()
+    await refreshMcpServers()
+  }
 }
 
 document.getElementById('mcp-convert')?.addEventListener('click', () => void convertPreview())
 document.getElementById('mcp-apply')?.addEventListener('click', () => void applyMcp())
+document.getElementById('mcp-cancel-edit')?.addEventListener('click', cancelMcpEdit)
 document.getElementById('mcp-list')?.addEventListener('click', () => void refreshMcpServers())
+setMcpEditorState()
 
 // ---- Skills 面板 ----
 const SOURCE_LABEL: Record<string, string> = {
@@ -364,27 +593,13 @@ document.getElementById('skill-import-file')?.addEventListener('click', () => vo
 // ---- Harness 面板：内嵌官方 Web UI ----
 async function mountHarness(): Promise<void> {
   const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
-  const status = document.getElementById('harness-status')
-  if (!frame || !status || !api) return
+  if (!frame || !api) return
   const url = await api.harness.url()
-  if (!url) {
-    status.textContent = 'harness 未就绪'
-    status.className = 'status error'
-    return
-  }
-  // iframe 的 load 事件对长连接页面不可靠，改由主进程导航事件推送确认
-  api.harness.onFrameLoaded((frameUrl: string) => {
-    status.textContent = `harness 已连接: ${frameUrl.replace('http://', '')}`
-    status.className = 'status ok'
-  })
+  if (!url) return
   frame.src = url
 }
 
 if (api) {
-  const el = document.getElementById('footer-versions')
-  if (el) {
-    el.textContent = `Electron ${api.versions.electron} · Node ${api.versions.node} · Chromium ${api.versions.chrome}`
-  }
   void refreshPlugins()
   void refreshMcpServers()
   void refreshSkills()

@@ -9,7 +9,7 @@ import { parseDocument } from 'yaml'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const mod = await import(join(root, 'dist', 'core', 'mcp.js'))
-const { parseMcpJson, convertToRows, convertJsonToYaml, extractMcpServers, replaceMcpRows, atomicWriteWithBackup, MCP_PLUGIN } = mod
+const { parseMcpJson, convertToRows, convertJsonToYaml, extractMcpServers, replaceMcpRows, updateMcpRow, deleteMcpRow, atomicWriteWithBackup, MCP_PLUGIN } = mod
 
 const SAMPLE = JSON.stringify({
   mcpServers: {
@@ -61,17 +61,19 @@ test('parseMcpJson 拒绝非 mcpServers 格式', () => {
   assert.throws(() => parseMcpJson('not json'), /JSON 解析失败/)
 })
 
-test('convertJsonToYaml 输出与官方示例同构的 YAML', () => {
+test('convertJsonToYaml 输出带 insert 包装的 profile patch YAML', () => {
   const res = convertJsonToYaml(SAMPLE)
   assert.equal(res.ok, true)
   const parsed = parseDocument(res.yaml ?? '')
   assert.equal(parsed.errors.length, 0)
-  const rows = parsed.toJS()
-  assert.equal(rows.length, 2)
-  assert.equal(rows[0].name, MCP_PLUGIN)
-  assert.equal(rows[0].config.transport, 'stdio')
-  assert.equal(rows[1].config.transport, 'streamable-http')
-  assert.equal(rows[1].config.serverName, 'remote-search')
+  assert.match(res.yaml ?? '', /^- insert:/)
+  const patch = parsed.toJS()
+  assert.equal(patch.length, 1)
+  assert.equal(patch[0].insert.length, 2)
+  assert.equal(patch[0].insert[0].name, MCP_PLUGIN)
+  assert.equal(patch[0].insert[0].config.transport, 'stdio')
+  assert.equal(patch[0].insert[1].config.transport, 'streamable-http')
+  assert.equal(patch[0].insert[1].config.serverName, 'remote-search')
 })
 
 test('convertJsonToYaml 将 ${VAR} 转为 !!js process.env.VAR（Claude Code 环境替换语义）', () => {
@@ -125,6 +127,44 @@ test('replaceMcpRows 保留无关行、替换 MCP 行、可再解析', () => {
   assert.ok(!next.includes('mcp-old'), '旧 MCP 行必须移除')
   assert.ok(next.includes('mcp-new'), '新 MCP 行必须写入')
   assert.equal(extractMcpServers(next).length, 1)
+})
+
+test('updateMcpRow 只更新目标行并保留其他插件', () => {
+  const patch = `- insert:
+    - id: other
+      name: '@dsh-external/example'
+      config: {}
+    - id: mcp-old
+      name: '${MCP_PLUGIN}'
+      config:
+        serverName: old
+        transport: stdio
+        command: npx
+`
+  const next = updateMcpRow(patch, {
+    id: 'mcp-old',
+    name: MCP_PLUGIN,
+    config: { serverName: 'new', transport: 'streamable-http', url: 'http://localhost/mcp' },
+  })
+  const rows = extractMcpServers(next)
+  assert.deepEqual(rows.map((row) => row.id), ['mcp-old'])
+  assert.equal(rows[0].config.serverName, 'new')
+  assert.ok(next.includes('id: other'))
+  assert.throws(() => updateMcpRow(patch, { id: 'missing', name: MCP_PLUGIN, config: {} }), /不存在/)
+})
+
+test('deleteMcpRow 支持删除最后一行并拒绝未知 id', () => {
+  const patch = `- insert:
+    - id: mcp-only
+      name: '${MCP_PLUGIN}'
+      config:
+        serverName: only
+        transport: stdio
+        command: node
+`
+  const next = deleteMcpRow(patch, 'mcp-only')
+  assert.deepEqual(extractMcpServers(next), [])
+  assert.throws(() => deleteMcpRow(patch, 'missing'), /不存在/)
 })
 
 test('replaceMcpRows 空 patch 可新建 insert 块', () => {

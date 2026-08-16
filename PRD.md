@@ -193,26 +193,27 @@ dsh plugin --profile <name> update
 }
 ```
 
-输出（DSH `cordis.yml` 插件行，追加到选中 profile 的 `cordis.patch.yml`）：
+输出（可直接写入选中 profile 的 `cordis.patch.yml`，顶层必须是 patch 操作 `insert`）：
 
 ```yaml
-- id: mcp-github
-  name: '@deepseek-ai/dsh-mcp-client'
-  config:
-    serverName: github
-    transport: stdio
-    command: npx
-    args: ['-y', '@modelcontextprotocol/server-github']
-    env:
-      GITHUB_TOKEN: '${GITHUB_TOKEN}'
-- id: mcp-remote-search
-  name: '@deepseek-ai/dsh-mcp-client'
-  config:
-    serverName: remote-search
-    transport: streamable-http
-    url: https://mcp.example.com/search
-    headers:
-      Authorization: 'Bearer ${MCP_TOKEN}'
+- insert:
+    - id: mcp-github
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: github
+        transport: stdio
+        command: npx
+        args: ['-y', '@modelcontextprotocol/server-github']
+        env:
+          GITHUB_TOKEN: '${GITHUB_TOKEN}'
+    - id: mcp-remote-search
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: remote-search
+        transport: streamable-http
+        url: https://mcp.example.com/search
+        headers:
+          Authorization: 'Bearer ${MCP_TOKEN}'
 ```
 
 转换规则要点：`serverName` 必须匹配 `[A-Za-z0-9_-]{1,32}`（做 kebab 化清洗 + 冲突检测）；`type: sse` 需人工确认（DSH 仅支持 `streamable-http`）；环境变量 `${VAR}` 作为字面字符串透传，`!!js process.env.X` 语法仅在需要动态求值时使用。
@@ -260,7 +261,7 @@ dsh plugin --profile <name> update
 | Tab | 功能 | 关键交互（已实现） |
 |---|---|---|
 | **Harness（主）** | 官方 Web UI（会话、模型、工具） | iframe 内嵌 loopback Web UI；`harness:frame-loaded` 状态推送 |
-| **Plugin** | profile「web」插件管理 | 列表（名称 / 来源：内置组合包、第三方组合包、普通依赖 / spec）；安装框支持 **npm 包名、`github:owner/repo#commit`、本地路径，并已升级为支持直接粘贴 GitHub 链接**（spec 透传给 `dsh plugin --profile web add`）；移除（第三方包）、更新；写操作前确认，变更后提示「重启 harness 生效」 |
+| **Plugin** | profile「web」插件管理 | 列表（名称 / 来源：内置组合包、第三方组合包、普通依赖 / spec）；安装框支持 **npm 包名、`github:owner/repo#commit`、本地路径，并已升级为支持直接粘贴 GitHub 链接**（spec 透传给 `dsh plugin --profile web add`）；对 `dsh-routing-suite` 这类无 `package.json/dsh.bundle` 的聚合仓库拒绝直装，改为显示 injector/preset 的真实识别状态；移除（第三方包）、更新；写操作前确认，变更后提示「重启 harness 生效」 |
 | **MCP** | JSON → YAML 转换器 + 服务器管理 | 粘贴 Claude Code / Cursor 风格 JSON → 转换预览（含警告：`type: sse` 仅按 HTTP 处理、非法 serverName 跳过）→ 确认后写入 profile「web」的 `cordis.patch.yml`（**写入前自动 `.bak-<ts>` 备份**，原子写，官方 HMR 热生效）；显示现有服务器数 |
 | **Skills** | skills 目录管理 | 按 rank 100-600 扫描（项目 `.dsh`/`.agents` → 自定义 → 用户 `~/.dsh/skills` / `~/.agents/skills` → bundled）；列表按来源标注，同名低 rank 生效、高 rank 标「被遮蔽」；**新建**（kebab-case 名称校验 + 描述 + 正文表单，落盘 `~/.dsh/skills/<name>/SKILL.md`）；模型可见 / 用户可见切换（写 frontmatter `disable-model-invocation` / `user-invocable`），改动即时生效 |
 | **Settings（壳级）** | API Key、模型、profile、更新 | 本期未实现（预留；API Key/模型配置复用官方 Web UI 内能力） |
@@ -326,8 +327,8 @@ UI 风格：深色主题（`color-scheme: dark` + 面板底色/强调色），�
 |---|---|---|
 | M0 壳骨架 | Electron + TypeScript 三端工程（main/preload/renderer）；四 Tab 契约；`typecheck` / `test` / `verify` 脚本 | ✅ 已完成：`npm run verify` 全绿；`npm run smoke` 四 Tab DOM 断言（截屏 `artifacts/m0-smoke.png`） |
 | M1 Harness 启动与加载 | `dsh` / `$DSH_HOME` / profiles 检测；spawn `dsh web`（`--port 0`，detached 进程组）；轮询 HTTP 200；Harness Tab iframe 内嵌官方 Web UI（`did-frame-navigate` 状态推送）；退出清理进程树 | ✅ 已完成：`npm run verify:m1`（真实启动 → HTTP 200 → 优雅停止 → 端口关闭无孤儿）；`npm run smoke:harness`（iframe 挂载 + 状态「已连接」，截屏 `artifacts/m1-harness.png`） |
-| M2 Plugin Tab | profile 发现 + 插件列表（`dsh.profile.bundles` ∪ dependencies）；封装 `dsh plugin --profile web add|remove|update`（支持 npm 包名 / `github:owner/repo#commit` / 本地路径 / 直接粘贴 GitHub 链接） | ✅ 已完成：单测 4 例（分类/排序/命令形态/退出码+取消）；冒烟断言真实 web profile ≥4 项含 dsh-base |
-| M3 MCP Tab | JSON→YAML 转换器 + profile `cordis.patch.yml` 事务读写（备份/回滚）+ 服务器列表 | ✅ 已完成：单测 8 例（混合输入/sse 警告/格式拒绝/YAML 同构/提取/替换保留注释/空 patch 新建/备份事务）；冒烟端到端驱动转换（renderer→IPC→core→renderer） |
+| M2 Plugin Tab | profile 发现 + 插件列表（`dsh.profile.bundles` ∪ dependencies）；封装 `dsh plugin --profile web add|remove|update`（支持 npm 包名 / `github:owner/repo#commit` / 本地路径 / 直接粘贴 GitHub 链接） | ✅ 已完成：单测 6 例（分类/排序/命令形态/链接归一化/聚合仓库拦截/退出码+取消）；冒烟断言真实 web profile ≥4 项含 dsh-base |
+| M3 MCP Tab | JSON→YAML 转换器 + profile `cordis.patch.yml` 事务读写（备份/回滚）+ 服务器列表 | ✅ 已完成：单测 11 例（混合输入/sse 警告/格式拒绝/YAML 同构/提取/替换/编辑/删除保留注释/空 patch 新建/备份事务）；UI 支持读取、编辑、删除已有 MCP 行 |
 | M4 Skills Tab | rank 100-600 目录扫描；SKILL.md/扁平 md 解析 + frontmatter；新建（kebab-case 校验）；模型/用户可见性切换 | ✅ 已完成：单测 4 例（rank 合并/shadowed/往返一致/创建校验/可见性切换）；冒烟真实数据 huashu-design + media-use |
 | M5 桌面整合与打包 | 四 Tab 主窗口整合（Harness iframe 内嵌官方 Web UI）+ electron-builder 出 DMG | ✅ 已完成：默认模式＝启动 harness + 四 Tab 壳；`release/DSH-Desktop-0.1.0-arm64.dmg` 产物存在；打包 app 在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）下用捆绑运行时启动，HTTP 200；TERM 退出无孤儿 |
 

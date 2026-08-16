@@ -3,11 +3,21 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { startHarness, resolveDshExec, dshHome, listProfiles, type HarnessHandle } from '../core/harness.js'
-import { listPlugins, runPluginOp, normalizeInstallSpec } from '../core/plugins.js'
 import {
+  activatePlugin,
+  classifyInstallSpec,
+  deactivatePlugin,
+  isPluginActive,
+  listPlugins,
+  runPluginOp,
+} from '../core/plugins.js'
+import {
+  MCP_PLUGIN,
   convertJsonToYaml,
   extractMcpServers,
   replaceMcpRows,
+  updateMcpRow,
+  deleteMcpRow,
   atomicWriteWithBackup,
   readPatch,
   type McpRow,
@@ -43,16 +53,81 @@ async function runPluginMutation(action: 'add' | 'remove' | 'update', args: stri
   return { ok: res.exitCode === 0, exitCode: res.exitCode, output: output.slice(0, 2000) }
 }
 
+function normalizeMcpRow(value: unknown): McpRow | null {
+  if (!value || typeof value !== 'object') return null
+  const row = value as Partial<McpRow>
+  if (!row.config || typeof row.config !== 'object' || Array.isArray(row.config)) return null
+  if (typeof row.id !== 'string' || !row.id.trim()) return null
+  return { id: row.id.trim(), name: MCP_PLUGIN, config: row.config as Record<string, unknown> }
+}
+
+function writeMcpPatch(profile: { dir: string }, next: string, rowCount: number) {
+  const patchFile = join(profile.dir, 'cordis.patch.yml')
+  const backup = atomicWriteWithBackup(patchFile, next)
+  return { ok: true as const, backup, rows: rowCount }
+}
+
+function writeMcpRows(profile: { dir: string }, rows: McpRow[]) {
+  return writeMcpPatch(profile, replaceMcpRows(readPatch(profile.dir), rows), rows.length)
+}
+function writePluginPatch(profile: { dir: string }, next: string) {
+  const patchFile = join(profile.dir, 'cordis.patch.yml')
+  const backup = atomicWriteWithBackup(patchFile, next)
+  return { ok: true as const, backup }
+}
+
 function registerIpc(): void {
   ipcMain.handle('harness:url', () => harness?.url ?? null)
   ipcMain.handle('plugins:list', () => {
     const profile = activeProfile()
     if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, entries: [] }
-    return { ok: true as const, profile: ACTIVE_PROFILE, entries: listPlugins(profile) }
+    try {
+      const patch = readPatch(profile.dir)
+      const entries = listPlugins(profile).map((entry) => ({
+        ...entry,
+        active: entry.active || isPluginActive(patch, entry.name),
+      }))
+      return { ok: true as const, profile: ACTIVE_PROFILE, entries }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, entries: [] }
+    }
   })
   ipcMain.handle('plugins:install', (_e, spec: string) => {
     if (typeof spec !== 'string' || !spec.trim()) return { ok: false as const, error: 'spec 无效', output: '' }
-    return runPluginMutation('add', [normalizeInstallSpec(spec)])
+    const plan = classifyInstallSpec(spec)
+    if (plan.kind === 'routing-suite') {
+      return { ok: false as const, error: plan.message, output: '', code: 'routing-suite-not-a-plugin' as const }
+    }
+    return runPluginMutation('add', [plan.normalized])
+  })
+  ipcMain.handle('plugins:activate', (_e, name: string) => {
+    const profile = activeProfile()
+    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, output: '' }
+    if (typeof name !== 'string' || !name.trim()) return { ok: false as const, error: 'name 无效', output: '' }
+    const packageName = name.trim()
+    const entry = listPlugins(profile).find((candidate) => candidate.name === packageName)
+    if (!entry) return { ok: false as const, error: `插件「${packageName}」未安装`, output: '' }
+    if (entry.builtin) return { ok: false as const, error: '内置组合包无需单独激活', output: '' }
+    try {
+      const patch = readPatch(profile.dir)
+      if (isPluginActive(patch, packageName)) return { ok: true as const, output: '插件已经激活', backup: '' }
+      const result = writePluginPatch(profile, activatePlugin(patch, packageName))
+      return { ...result, output: `插件「${packageName}」已激活；请重启 Harness` }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, output: '' }
+    }
+  })
+  ipcMain.handle('plugins:deactivate', (_e, name: string) => {
+    const profile = activeProfile()
+    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, output: '' }
+    if (typeof name !== 'string' || !name.trim()) return { ok: false as const, error: 'name 无效', output: '' }
+    try {
+      const patch = readPatch(profile.dir)
+      const result = writePluginPatch(profile, deactivatePlugin(patch, name.trim()))
+      return { ...result, output: `插件「${name.trim()}」已停用；package 依赖仍保留` }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, output: '' }
+    }
   })
   ipcMain.handle('plugins:remove', (_e, name: string) => {
     if (typeof name !== 'string' || !name.trim()) return { ok: false as const, error: 'name 无效', output: '' }
@@ -63,10 +138,7 @@ function registerIpc(): void {
     const profile = activeProfile()
     if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, servers: [] }
     try {
-      const servers = extractMcpServers(readPatch(profile.dir)).map((r) => ({
-        id: r.id,
-        config: r.config as Record<string, unknown>,
-      }))
+      const servers = extractMcpServers(readPatch(profile.dir))
       return { ok: true as const, profile: ACTIVE_PROFILE, servers }
     } catch (err) {
       return { ok: false as const, error: (err as Error).message, servers: [] }
@@ -76,15 +148,42 @@ function registerIpc(): void {
     if (typeof jsonText !== 'string') return { ok: false as const, error: '输入无效', yaml: '', warnings: [] }
     return convertJsonToYaml(jsonText)
   })
-  ipcMain.handle('mcp:apply', (_e, rows: McpRow[]) => {
+  ipcMain.handle('mcp:apply', (_e, rows: unknown) => {
     const profile = activeProfile()
     if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, backup: '' }
     if (!Array.isArray(rows) || rows.length === 0) return { ok: false as const, error: '没有可写入的服务器', backup: '' }
+    const normalized = rows.map(normalizeMcpRow)
+    if (normalized.some((row): row is null => row === null)) {
+      return { ok: false as const, error: 'MCP 服务器格式无效', backup: '' }
+    }
     try {
-      const patchFile = join(profile.dir, 'cordis.patch.yml')
-      const next = replaceMcpRows(readPatch(profile.dir), rows)
-      const backup = atomicWriteWithBackup(patchFile, next)
-      return { ok: true as const, backup, rows: rows.length }
+      return writeMcpRows(profile, normalized as McpRow[])
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, backup: '' }
+    }
+  })
+  ipcMain.handle('mcp:update', (_e, input: unknown) => {
+    const profile = activeProfile()
+    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, backup: '' }
+    if (!input || typeof input !== 'object') return { ok: false as const, error: '输入无效', backup: '' }
+    const payload = input as { id?: unknown; row?: unknown }
+    if (typeof payload.id !== 'string' || !payload.id.trim()) return { ok: false as const, error: 'MCP id 无效', backup: '' }
+    const row = normalizeMcpRow(payload.row)
+    if (!row) return { ok: false as const, error: 'MCP 服务器格式无效', backup: '' }
+    try {
+      const next = updateMcpRow(readPatch(profile.dir), { ...row, id: payload.id.trim() })
+      return writeMcpPatch(profile, next, extractMcpServers(next).length)
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, backup: '' }
+    }
+  })
+  ipcMain.handle('mcp:delete', (_e, id: unknown) => {
+    const profile = activeProfile()
+    if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, backup: '' }
+    if (typeof id !== 'string' || !id.trim()) return { ok: false as const, error: 'MCP id 无效', backup: '' }
+    try {
+      const next = deleteMcpRow(readPatch(profile.dir), id.trim())
+      return writeMcpPatch(profile, next, extractMcpServers(next).length)
     } catch (err) {
       return { ok: false as const, error: (err as Error).message, backup: '' }
     }
@@ -174,11 +273,14 @@ async function assertDomAndScreenshot(tag: string, assert: (dom: unknown) => boo
     const active = document.querySelector('.tab.active')?.dataset.tab
     const panels = ['harness','plugin','mcp','skills'].map(t => !!document.getElementById('panel-' + t))
     const pluginRows = [...document.querySelectorAll('#plugin-rows tr')].map(r => r.textContent ?? '')
+    const mcpRows = [...document.querySelectorAll('#mcp-server-rows tr')].map(r => r.textContent ?? '')
     return {
-      tabs, active, panels, title: document.title, bodyLen: document.body.innerText.length, pluginRows,
+      tabs, active, panels, title: document.title, bodyLen: document.body.innerText.length, pluginRows, mcpRows,
       apiPresent: !!window.dshDesktop,
       pluginStatus: document.getElementById('plugin-status')?.textContent ?? '',
       pluginErr: document.getElementById('plugin-status')?.className ?? '',
+      mcpApply: document.getElementById('mcp-apply')?.textContent ?? '',
+      mcpCancelHidden: document.getElementById('mcp-cancel-edit')?.hidden ?? false,
     }
   })()`)) as {
     tabs?: string[]
@@ -187,9 +289,12 @@ async function assertDomAndScreenshot(tag: string, assert: (dom: unknown) => boo
     title: string
     bodyLen: number
     pluginRows?: string[]
+    mcpRows?: string[]
     apiPresent?: boolean
     pluginStatus?: string
     pluginErr?: string
+    mcpApply?: string
+    mcpCancelHidden?: boolean
   }
   if (!assert(dom)) {
     console.error(`SMOKE FAIL: unexpected DOM ${JSON.stringify(dom)}`)
@@ -238,15 +343,28 @@ function wireSmoke(): void {
           await new Promise((r) => setTimeout(r, 200))
         }
         await assertDomAndScreenshot('m0-smoke', (dom) => {
-          const d = dom as { tabs?: string[]; active?: string; panels?: boolean[]; title: string; pluginRows?: string[] }
+          const d = dom as {
+            tabs?: string[]
+            active?: string
+            panels?: boolean[]
+            title: string
+            pluginRows?: string[]
+            mcpRows?: string[]
+            mcpApply?: string
+            mcpCancelHidden?: boolean
+          }
           const rows = d.pluginRows ?? []
+          const mcpRows = d.mcpRows ?? []
           return (
             JSON.stringify(d.tabs) === JSON.stringify(['harness', 'plugin', 'mcp', 'skills']) &&
             d.active === 'harness' &&
             (d.panels?.every(Boolean) ?? false) &&
             d.title === 'DSH Desktop' &&
             rows.length >= 4 &&
-            rows.some((r) => r.includes('dsh-base'))
+            rows.some((r) => r.includes('dsh-base')) &&
+            mcpRows.length >= 1 &&
+            d.mcpApply === '写入 patch' &&
+            d.mcpCancelHidden === true
           )
         }, false)
         // MCP 转换结果单独校验
@@ -255,7 +373,7 @@ function wireSmoke(): void {
           const warnings = document.getElementById('mcp-warnings').textContent
           return { preview, warnings, servers: document.getElementById('mcp-servers').textContent }
         })()`)) as { preview: string; warnings: string; servers: string }
-        if (!mcp.preview.includes('dsh-mcp-client') || !mcp.preview.includes('streamable-http')) {
+        if (!mcp.preview.trimStart().startsWith('- insert:') || !mcp.preview.includes('dsh-mcp-client') || !mcp.preview.includes('streamable-http')) {
           console.error(`SMOKE FAIL: MCP 转换异常 ${JSON.stringify(mcp)}`)
           app.exit(1)
         }
@@ -357,6 +475,18 @@ app.whenReady().then(async () => {
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       { label: 'DSH Desktop', submenu: [{ role: 'quit', label: '退出' }] },
+      {
+        label: '编辑',
+        submenu: [
+          { role: 'undo', label: '撤销' },
+          { role: 'redo', label: '重做' },
+          { type: 'separator' },
+          { role: 'cut', label: '剪切' },
+          { role: 'copy', label: '复制' },
+          { role: 'paste', label: '粘贴' },
+          { role: 'selectAll', label: '全选' },
+        ],
+      },
       {
         label: '窗口',
         submenu: [

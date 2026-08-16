@@ -3,11 +3,21 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const { listPlugins, buildPluginCommand, runPluginOp, normalizeInstallSpec } = await import(join(root, 'dist', 'core', 'plugins.js'))
+const {
+  listPlugins,
+  buildPluginCommand,
+  runPluginOp,
+  normalizeInstallSpec,
+  classifyInstallSpec,
+  pluginPatchId,
+  isPluginActive,
+  activatePlugin,
+  deactivatePlugin,
+} = await import(join(root, 'dist', 'core', 'plugins.js'))
 
 test('listPlugins 从 bundles ∪ dependencies 解析并分类', () => {
   const dir = mkdtempSync(join(tmpdir(), 'profile-'))
@@ -70,6 +80,36 @@ test('normalizeInstallSpec 将 GitHub 链接转为 github:owner/repo#branch', ()
   assert.equal(normalizeInstallSpec('github:owner/repo#main'), 'github:owner/repo#main')
   assert.equal(normalizeInstallSpec('./local/path'), './local/path')
 })
+
+test('classifyInstallSpec 将 Routing Suite 聚合仓库挡在 plugin 命令前', () => {
+  const plan = classifyInstallSpec('https://github.com/yjh051108/dsh-routing-suite/tree/main')
+  assert.equal(plan.kind, 'routing-suite')
+  assert.equal(plan.normalized, 'github:yjh051108/dsh-routing-suite#main')
+  assert.match(plan.message, /不是 DSH bundle/)
+  assert.equal(classifyInstallSpec('github:yjh051108/dsh-super-injector').kind, 'plugin')
+})
+
+test('activatePlugin 为无 dsh.bundle 依赖写入 patch 激活行', () => {
+  const patch = `# keep
+- insert:
+    - id: mcp-github
+      name: '@deepseek-ai/dsh-mcp-client'
+      config: {}
+`
+  const activated = activatePlugin(patch, 'dsh-worktree')
+  assert.equal(pluginPatchId('dsh-worktree'), 'dsh-worktree')
+  assert.equal(isPluginActive(activated, 'dsh-worktree'), true)
+  assert.match(activated, /id: dsh-worktree/)
+  assert.match(activated, /name: dsh-worktree/)
+  assert.match(activated, /mcp-github/)
+  assert.equal(activatePlugin(activated, 'dsh-worktree'), activated)
+  const deactivated = deactivatePlugin(activated, 'dsh-worktree')
+  assert.equal(isPluginActive(deactivated, 'dsh-worktree'), false)
+  assert.match(deactivated, /mcp-github/)
+  assert.throws(() => deactivatePlugin(deactivated, 'dsh-worktree'), /未激活/)
+})
+
+
 
 test('runPluginOp 透传退出码并支持取消', async () => {
   const bin = mkdtempSync(join(tmpdir(), 'dsh-bin-'))

@@ -7,8 +7,8 @@ DSH Desktop — DeepSeek Harness 桌面管理控制台（Electron + TypeScript�
 ## 功能
 
 - **Harness Tab（主）**：`<iframe>` 内嵌官方 Web UI（`dsh web` 启动于 `http://127.0.0.1:PORT`）；主进程通过 `did-frame-navigate` 检测子帧导航并推送 `harness:frame-loaded`，状态条显示「harness 已连接: 127.0.0.1:PORT」。
-- **Plugin Tab**：读取 profile「web」的插件清单（`dsh.profile.bundles` ∪ `dependencies`，分类为内置组合包 / 第三方组合包 / 普通依赖）；安装 / 移除 / 更新真实执行 `dsh plugin --profile web add|remove|update`（写操作前确认，变更后提示重启 harness 生效）。
-- **MCP Tab**：粘贴 Claude Code / Cursor 风格 MCP JSON → 转换预览（DSH `@deepseek-ai/dsh-mcp-client` 插件行 YAML，含 sse / 非法 serverName 警告）→ 确认后写入 profile「web」的 `cordis.patch.yml`（原子写 + `.bak-<ts>` 备份，官方 HMR 热生效）。
+- **Plugin Tab**：读取 profile「web」的插件清单（`dsh.profile.bundles` ∪ `dependencies`，分类为内置组合包 / 第三方组合包 / 普通依赖）；安装 / 移除 / 更新真实执行 `dsh plugin --profile web add|remove|update`（写操作前确认，变更后提示重启 harness 生效）；对没有 `package.json/dsh.bundle` 的聚合仓库拒绝直接安装，避免把仓库根目录误装成插件。
+- **MCP Tab**：粘贴 Claude Code / Cursor 风格 MCP JSON → 转换预览（DSH `@deepseek-ai/dsh-mcp-client` 插件行 YAML，含 sse / 非法 serverName 警告）→ 确认后写入 profile「web」的 `cordis.patch.yml`；列出已写入服务器，支持编辑 / 删除；所有写操作原子落盘并创建 `.bak-<ts>` 备份，官方 HMR 热生效。
 - **Skills Tab**：按 DSH rank 规则扫描（项目 `.dsh`/`.agents` → 用户 `~/.dsh/skills`/`~/.agents/skills` → bundled，rank 100-600）；同名低 rank 生效、高 rank 标「被遮蔽」；导入 `.skill` / `.zip` 文件或 GitHub 链接（`https://github.com/owner/repo[/tree/<branch>/<path>]`）到 `~/.dsh/skills`（自动剥离 zip 包裹目录、保留 SKILL.md 与资源文件）；新建用户级 skill（kebab-case 名称校验 + frontmatter 组装，落盘 `~/.dsh/skills/<name>/SKILL.md`）；模型可见 / 用户可见切换（写 `disable-model-invocation` / `user-invocable`），改动即时生效。
 
 ## 架构
@@ -22,8 +22,9 @@ DSH Desktop — DeepSeek Harness 桌面管理控制台（Electron + TypeScript�
 │ (harness iframe) │◀──│ (CJS, sandbox)   │◀──│   install/remove/    │   │ mcp.ts            │   │  @deepseek-ai/dsh       │
 │                  │   │                  │   │   update             │   │ skills.ts         │   │  (0.1.0-rc.6)           │
 │                  │   │                  │   │ mcp:list/convert/    │   └──────────────────┘   │        │                │
-│                  │   │                  │   │   apply              │            │ spawn(detached) ▼        │                │
-│                  │   │                  │   │ skills:list/create/  │            └──── dsh web --port 0 ─────┘                │
+│                  │   │                  │   │   apply/update/     │            │ spawn(detached) ▼                │
+│                  │   │                  │   │   delete             │            └──── dsh web --port 0 ─────┘                │
+│                  │   │                  │   │ skills:list/create/  │                          │                                │
 │                  │◀──│ harness:frame-   │   │   toggle             │                          │                                │
 │                  │   │   loaded 推送     │   │ harness:frame-loaded │                    http://127.0.0.1:PORT                  │
 └──────────────────┘   └──────────────────┘   └────────────────────┘                          └─────────────────────────────────┘
@@ -67,7 +68,7 @@ dsh-desktop/
 │   ├── preload/preload.ts      # contextBridge 白名单 API（sandbox，编译为 preload.cjs）
 │   ├── renderer/               # 四 Tab 壳：index.html + renderer.ts（纯脚本，无模块）
 │   └── core/                   # 纯逻辑（可单测）：harness.ts / plugins.ts / mcp.ts / skills.ts
-├── tests/                      # node --test 单测 ×26（从 dist/ 导入，需先 build）
+├── tests/                      # node --test 单测 ×33（从 dist/ 导入，需先 build）
 ├── scripts/
 │   ├── build-preload.mjs       # preload 以 CJS 编译并重命名为 .cjs
 │   ├── copy-renderer.mjs       # 拷贝 index.html → dist/renderer
@@ -118,8 +119,8 @@ npx electron-builder                   # 3. 读 electron-builder.yml → release
 |---|---|
 | 契约测试 `tests/skeleton.test.mjs`（5 例） | 骨架文件齐全；package.json 脚本与 devDependencies；四 Tab 契约；contextIsolation + sandbox + nodeIntegration:false；tsconfig strict |
 | Harness `tests/harness.test.mjs`（5 例） | `findDsh` 可解析；`dshHome` 默认/覆盖；真实 web profile 发现（首个 bundle = dsh-base）；忽略非 profile 目录；`parseHarnessUrl` |
-| Plugin `tests/plugins.test.mjs`（5 例） | bundles ∪ dependencies 分类；排序稳定；`buildPluginCommand` 命令形态；`normalizeInstallSpec` GitHub 链接归一化；`runPluginOp` 退出码 + 取消 |
-| MCP `tests/mcp.test.mjs`（9 例） | 混合 stdio+http 解析；sse / 非法 serverName 警告；格式拒绝；YAML 与官方示例同构；`${VAR}` → `!!js process.env.VAR`；patch 提取 / 替换保留注释 / 空 patch 新建 / 备份事务 |
+| Plugin `tests/plugins.test.mjs`（6 例） | bundles ∪ dependencies 分类；排序稳定；`buildPluginCommand` 命令形态；`normalizeInstallSpec` GitHub 链接归一化；聚合仓库识别/拦截；`runPluginOp` 退出码 + 取消 |
+| MCP `tests/mcp.test.mjs`（11 例） | 混合 stdio+http 解析；sse / 非法 serverName 警告；格式拒绝；YAML 与官方示例同构；`${VAR}` → `!!js process.env.VAR`；patch 提取 / 替换 / 编辑 / 删除保留注释；空 patch 新建 / 备份事务 |
 | Skills `tests/skills.test.mjs`（7 例） | rank 合并 + shadowed；frontmatter 往返一致；kebab-case 校验落盘；可见性切换；zip/.skill 导入（含资源文件、包裹目录剥离、拒绝无 SKILL.md）；GitHub URL 解析 |
 | `npm run smoke` | 四 Tab 就绪；真实 web profile 插件 ≥4 含 dsh-base；MCP 转换端到端（preview 含 `dsh-mcp-client` / `streamable-http`）；真实 skills（huashu-design + media-use） |
 | `npm run smoke:harness` | harness 就绪；iframe 挂载 `http://127.0.0.1:PORT`；状态「已连接」 |
@@ -128,10 +129,9 @@ npx electron-builder                   # 3. 读 electron-builder.yml → release
 ## 已知限制
 
 - **profile 固定**：`ACTIVE_PROFILE` 常量 = `'web'`（main.ts 注释：M5 将支持切换），暂无 UI 切换。
-- **插件变更需重启**：安装/移除 bundle 改变依赖图，必须重启 harness 生效（UI 已提示）；git 来源插件可能还需 profile 内 `pnpm-workspace.yaml` 的 `allowBuilds` 授权（沙箱外代码，写操作均有确认）。
+- **Routing Suite 聚合仓库**：`https://github.com/yjh051108/dsh-routing-suite` 不是单一 DSH bundle，根目录缺 `package.json/dsh.bundle`；Plugin Tab 会拒绝直接安装。应按仓库说明分别装配 injector、router-standard preset 与可选 mode-boost。
 - **无 Settings / 第四系统**：Settings（API Key / 模型 / 更新）与第四系统占位本期未实现，API Key/模型配置请使用官方 Web UI 内能力。
 - **MCP 无文件导入**：MCP 面板仅支持粘贴 JSON（`${VAR}` 自动转 `!!js process.env.VAR`），暂无 `.mcp.json` 文件选择器。
-- **Skills 导入支持上传与链接**：`.skill` / `.zip` 文件上传或 GitHub 链接（`https://github.com/owner/repo[/tree/<branch>/<path>]`）导入到 `~/.dsh/skills`，自动剥离 zip 包裹目录、保留 SKILL.md 与资源文件；同名冲突需确认覆盖。
 - **退出边界**：正常退出走 SIGTERM 进程组清理；强杀（timeout / group-kill）可能遗留 dsh 子进程。
 - **打包范围**：仅 macOS DMG（arm64），未签名（`identity: null`）；Windows / Linux 打包待做；应用图标为 Electron 默认；无自动更新。
 - **体积**：`resources/` 捆绑运行时约 586MB（gitignore），首包体积较大。

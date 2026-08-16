@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('dshDesktop', {
   plugins: {
     list: () => ipcRenderer.invoke('plugins:list'),
     install: (spec: string) => ipcRenderer.invoke('plugins:install', spec),
+    activate: (name: string) => ipcRenderer.invoke('plugins:activate', name),
+    deactivate: (name: string) => ipcRenderer.invoke('plugins:deactivate', name),
     remove: (name: string) => ipcRenderer.invoke('plugins:remove', name),
     update: () => ipcRenderer.invoke('plugins:update'),
   },
@@ -22,6 +24,8 @@ contextBridge.exposeInMainWorld('dshDesktop', {
     list: () => ipcRenderer.invoke('mcp:list'),
     convert: (jsonText: string) => ipcRenderer.invoke('mcp:convert', jsonText),
     apply: (rows: unknown[]) => ipcRenderer.invoke('mcp:apply', rows),
+    update: (input: unknown) => ipcRenderer.invoke('mcp:update', input),
+    delete: (id: string) => ipcRenderer.invoke('mcp:delete', id),
   },
   skills: {
     list: () => ipcRenderer.invoke('skills:list'),

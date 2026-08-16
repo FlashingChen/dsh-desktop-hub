@@ -5,205 +5,577 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-src http://127.0.0.1:*; connect-src 'self' http://127.0.0.1:*" />
     <title>DSH Desktop</title>
     <style>
-      /* DSH Desktop UI — 设计语言对齐 DeepSeek Harness 深色主题
-         token 来源：官方 web UI（#0f1115 底 / 品牌蓝 #3964fe / 浅蓝 #99c8ff / 状态色系） */
       :root {
-        color-scheme: dark;
-        --bg: #0f1115;
-        --surface: #14161c;
-        --surface-2: #191c23;
-        --line: rgb(255 255 255 / 8%);
-        --line-strong: rgb(255 255 255 / 14%);
-        --text: #e9ecf1;
-        --text-dim: #8b93a3;
-        --text-faint: #5c6472;
-        --brand: #3964fe;
-        --brand-hover: #5580ff;
-        --brand-soft: rgb(57 100 254 / 14%);
-        --accent-text: #99c8ff;
-        --success: #69db7c;
-        --danger: #ff6b6b;
-        --warn: #ffa94d;
-        --radius: 8px;
+        color-scheme: light;
+        --canvas: #f3f5f8;
+        --canvas-deep: #edf0f5;
+        --surface: #ffffff;
+        --surface-subtle: #f8f9fb;
+        --surface-blue: #f5f7ff;
+        --ink: #202938;
+        --ink-soft: #677184;
+        --ink-faint: #98a1b1;
+        --line: #e3e7ee;
+        --line-strong: #d5dbe5;
+        --brand: #4d6bfe;
+        --brand-dark: #3957dc;
+        --brand-soft: #edf1ff;
+        --brand-wash: #f7f8ff;
+        --success: #218b61;
+        --success-bg: #eaf7f0;
+        --danger: #b83a49;
+        --danger-bg: #fff1f3;
+        --warn: #9b651d;
+        --warn-bg: #fff7e8;
+        --shadow-sm: 0 1px 2px rgb(31 41 55 / 4%);
+        --shadow-md: 0 12px 30px rgb(31 41 55 / 6%);
+        --radius-sm: 8px;
+        --radius-md: 14px;
+        --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
         --font-code: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       }
       * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { height: 100%; }
       body {
-        font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
-        background: var(--bg);
-        color: var(--text);
-        height: 100vh;
-        display: flex;
-        flex-direction: column;
+        font-family: var(--font-ui);
+        background: var(--canvas);
+        color: var(--ink);
+        display: block;
+        height: 100%;
         overflow: hidden;
+        -webkit-font-smoothing: antialiased;
       }
-      /* 顶栏：半透明玻璃 + 细描边，贴近 harness 头部 */
-      header {
-        display: flex;
-        align-items: center;
-        gap: 2px;
-        padding: 0 14px;
-        height: 44px;
-        flex: none;
-        background: rgb(15 17 21 / 82%);
-        backdrop-filter: blur(12px);
-        border-bottom: 1px solid var(--line);
-        -webkit-app-region: drag;
-      }
-      header .brand {
-        font-weight: 600;
-        font-size: 13px;
-        letter-spacing: 0.2px;
-        margin-right: 18px;
-        color: var(--text);
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        -webkit-app-region: no-drag;
-      }
-      header .brand::before {
-        content: "";
-        width: 8px; height: 8px; border-radius: 50%;
-        background: var(--brand);
-        box-shadow: 0 0 10px var(--brand);
-      }
-      .tab {
-        -webkit-app-region: no-drag;
-        appearance: none;
-        background: transparent;
-        border: none;
-        color: var(--text-dim);
-        font-size: 13px;
-        padding: 6px 14px;
-        border-radius: 6px;
-        cursor: pointer;
-        position: relative;
-        transition: color 0.15s, background 0.15s;
-      }
-      .tab:hover { color: var(--text); background: rgb(255 255 255 / 6%); }
-      .tab.active { color: var(--accent-text); background: var(--brand-soft); }
-      main { flex: 1; overflow: auto; min-height: 0; }
-      .panel { display: none; height: 100%; padding: 20px 24px; overflow: auto; }
-      .panel.active { display: block; }
-      /* Harness 内嵌区 */
-      .harness-wrap { display: flex; flex-direction: column; height: 100%; padding: 0; }
-      .panel#panel-harness { padding: 0; }
-      #harness-frame { flex: 1; width: 100%; border: none; background: var(--bg); }
-      .panel#panel-harness .status {
-        position: absolute; top: 54px; right: 16px; z-index: 10;
-        background: rgb(15 17 21 / 85%); border: 1px solid var(--line);
-        padding: 3px 10px; border-radius: 999px; font-size: 11px;
-        backdrop-filter: blur(8px);
-      }
-      h3 { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
-      .muted { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; line-height: 1.7; }
-      .row { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
-      input[type="text"], input[type="url"] {
-        flex: 1; min-width: 220px; max-width: 460px;
-        padding: 7px 12px; border-radius: var(--radius);
-        border: 1px solid var(--line-strong); background: var(--surface);
-        color: var(--text); font-size: 13px; outline: none;
-        transition: border-color 0.15s, box-shadow 0.15s;
-      }
-      input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
-      input::placeholder { color: var(--text-faint); }
+      button, input, textarea { font: inherit; }
       button {
         appearance: none;
-        padding: 7px 14px; border-radius: var(--radius);
-        border: 1px solid var(--line-strong); background: var(--surface-2);
-        color: var(--text); cursor: pointer; font-size: 13px;
-        transition: background 0.15s, border-color 0.15s;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius-sm);
+        background: var(--surface);
+        color: var(--ink);
+        cursor: pointer;
+        font-size: 13px;
+        line-height: 1.2;
+        min-height: 34px;
+        padding: 8px 13px;
+        transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
       }
-      button:hover { background: rgb(255 255 255 / 9%); }
-      button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
-      button.primary:hover { background: var(--brand-hover); }
-      button:disabled { opacity: 0.5; cursor: not-allowed; }
-      .status { font-size: 12px; color: var(--text-dim); white-space: pre-wrap; line-height: 1.6; }
-      .status.error { color: var(--danger); }
-      .status.ok { color: var(--success); }
-      /* 表格：harness 风格——细线、行 hover、无强边框 */
-      table.list { width: 100%; border-collapse: collapse; font-size: 13px; }
-      table.list th, table.list td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); }
-      table.list th {
-        color: var(--text-faint); font-weight: 500; font-size: 11px;
-        text-transform: uppercase; letter-spacing: 0.4px;
+      button:hover { background: var(--surface-subtle); border-color: #c5ccd8; }
+      button:focus-visible, input:focus-visible, textarea:focus-visible {
+        outline: 3px solid rgb(77 107 254 / 20%);
+        outline-offset: 1px;
+        border-color: var(--brand);
       }
-      table.list tbody tr { transition: background 0.1s; }
-      table.list tbody tr:hover { background: rgb(255 255 255 / 3.5%); }
-      table.list tr.dim { opacity: 0.45; }
-      .tag {
-        font-size: 10px; color: var(--text-dim); border: 1px solid var(--line-strong);
-        border-radius: 4px; padding: 1px 6px; margin-left: 6px; vertical-align: 1px;
+      button.primary {
+        background: var(--brand);
+        border-color: var(--brand);
+        color: #fff;
+        box-shadow: 0 2px 5px rgb(77 107 254 / 18%);
       }
-      textarea {
-        width: 100%; padding: 10px 12px; border-radius: var(--radius);
-        border: 1px solid var(--line-strong); background: var(--surface);
-        color: var(--text); font-family: var(--font-code); font-size: 12px;
-        line-height: 1.6; resize: vertical; outline: none; margin-bottom: 12px;
-        transition: border-color 0.15s, box-shadow 0.15s;
+      button.primary:hover { background: var(--brand-dark); border-color: var(--brand-dark); }
+      button.quiet { background: transparent; border-color: transparent; color: var(--ink-soft); }
+      button.quiet:hover { background: var(--brand-soft); border-color: transparent; color: var(--brand-dark); }
+      button:disabled { cursor: not-allowed; opacity: 0.5; }
+      .surface-actions, .page-context {
+        align-items: center;
+        display: flex;
       }
-      textarea:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
-      pre {
-        background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
-        padding: 12px; font-size: 12px; overflow: auto; max-height: 320px;
-        font-family: var(--font-code); color: var(--accent-text); line-height: 1.6;
+      .signal-dot {
+        background: var(--success);
+        border-radius: 50%;
+        display: inline-block;
+        height: 7px;
+        width: 7px;
       }
-      /* 卡片（MCP 转换/上传区） */
-      .card {
-        background: var(--surface); border: 1px solid var(--line);
-        border-radius: calc(var(--radius) + 2px); padding: 16px; margin-bottom: 14px;
+      .app-shell {
+        display: grid;
+        grid-template-columns: 196px minmax(0, 1fr);
+        height: 100%;
+        min-height: 0;
+        min-width: 0;
       }
-      .card h4 { font-size: 12px; font-weight: 600; color: var(--text-dim); margin-bottom: 10px; }
-      footer {
+      .sidebar {
+        background: #f8f9fb;
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        padding: 16px 10px 10px;
+      }
+      .sidebar-label {
+        color: var(--ink-faint);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        margin: 0 10px 10px;
+        text-transform: uppercase;
+      }
+      #tabbar { display: flex; flex-direction: column; gap: 3px; }
+      .tab {
+        align-items: center;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 10px;
+        color: var(--ink-soft);
+        display: flex;
+        gap: 11px;
+        min-height: 40px;
+        padding: 7px 10px;
+        position: relative;
+        text-align: left;
+        width: 100%;
+      }
+      .tab::before {
+        background: var(--brand);
+        border-radius: 0 3px 3px 0;
+        content: "";
+        height: 18px;
+        left: -10px;
+        opacity: 0;
+        position: absolute;
+        top: 11px;
+        transition: opacity 140ms ease;
+        width: 3px;
+      }
+      .tab:hover { background: #eef1f6; border-color: transparent; color: var(--ink); }
+      .tab.active {
+        background: var(--brand-soft);
+        border-color: #dce3ff;
+        color: var(--brand-dark);
+      }
+      .tab.active::before { opacity: 1; }
+      .tab-icon {
+        align-items: center;
+        color: currentColor;
+        display: inline-flex;
         flex: none;
-        display: flex; gap: 16px; align-items: center;
-        padding: 5px 14px; font-size: 11px; color: var(--text-faint);
-        background: rgb(15 17 21 / 82%); border-top: 1px solid var(--line);
+        height: 18px;
+        justify-content: center;
+        width: 18px;
       }
-      .divider { width: 1px; height: 12px; background: var(--line-strong); }
+      .tab-icon svg { fill: none; height: 17px; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; width: 17px; }
+      .tab-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+      .tab-copy > span { font-size: 13px; font-weight: 620; }
+      .tab-copy > small { color: var(--ink-faint); font-size: 10px; }
+      .tab.active .tab-copy > small { color: #7488dc; }
+      .sidebar-spacer { flex: 1; min-height: 18px; }
+      .sidebar-profile { color: var(--ink-soft); padding: 4px 10px; }
+      .sidebar-profile-label {
+        color: var(--ink-faint);
+        display: block;
+        font-size: 9px;
+        font-weight: 720;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+      .sidebar-profile strong { color: var(--ink); display: block; font-size: 13px; margin-top: 3px; }
+      main { background: var(--canvas); min-height: 0; min-width: 0; overflow: hidden; }
+      .panel { display: none; height: 100%; min-height: 0; overflow: auto; padding: 26px clamp(20px, 3.5vw, 48px) 36px; }
+      .panel.active { display: block; }
+      .page { margin: 0 auto; max-width: 1180px; }
+      .page-header {
+        align-items: flex-start;
+        display: flex;
+        gap: 24px;
+        justify-content: space-between;
+        margin-bottom: 20px;
+      }
+      .eyebrow {
+        color: var(--brand-dark);
+        font-size: 10px;
+        font-weight: 760;
+        letter-spacing: 0.13em;
+        margin-bottom: 9px;
+        text-transform: uppercase;
+      }
+      h1 { color: var(--ink); font-size: 28px; font-weight: 720; letter-spacing: -0.035em; line-height: 1.15; }
+      .page-description { color: var(--ink-soft); font-size: 12px; line-height: 1.6; margin-top: 7px; max-width: 680px; }
+      .page-context {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        color: var(--ink-soft);
+        flex: none;
+        font-size: 11px;
+        gap: 8px;
+        padding: 8px 11px;
+      }
+      .page-context strong { color: var(--ink); font-size: 12px; font-weight: 650; }
+      .surface {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        margin-bottom: 12px;
+        overflow: hidden;
+      }
+      .surface-head {
+        align-items: flex-start;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        gap: 14px;
+        justify-content: space-between;
+        padding: 14px 16px;
+      }
+      .surface-title { color: var(--ink); font-size: 13px; font-weight: 680; }
+      .surface-caption { color: var(--ink-soft); font-size: 10px; line-height: 1.45; margin-top: 3px; }
+      .surface-actions { flex: none; gap: 6px; }
+      .surface-body { padding: 16px; }
+      .field-label {
+        color: var(--ink);
+        display: block;
+        font-size: 12px;
+        font-weight: 650;
+        margin-bottom: 8px;
+      }
+      .field-hint { color: var(--ink-faint); font-size: 10px; line-height: 1.45; margin-top: 6px; }
+      .install-row, .file-row { align-items: flex-end; display: flex; gap: 9px; }
+      .install-row .field, .file-row .field { flex: 1; min-width: 0; }
+      input[type="text"], input[type="url"], input[type="file"] {
+        background: var(--surface-subtle);
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius-sm);
+        color: var(--ink);
+        font-size: 13px;
+        min-height: 34px;
+        outline: none;
+        padding: 7px 10px;
+        width: 100%;
+      }
+      input[type="text"]::placeholder, input[type="url"]::placeholder, textarea::placeholder { color: var(--ink-faint); }
+      input[type="file"] { color: var(--ink-soft); padding: 6px 8px; }
+      input[type="file"]::file-selector-button {
+        background: var(--surface);
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        color: var(--ink-soft);
+        cursor: pointer;
+        font-size: 11px;
+        margin-right: 8px;
+        padding: 5px 8px;
+      }
+      .inline-status { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 9px; }
+      .status { color: var(--ink-soft); font-size: 12px; line-height: 1.6; min-height: 18px; white-space: pre-wrap; }
+      .status.ok { color: var(--success); }
+      .status.error { color: var(--danger); }
+      .status.warn { color: var(--warn); }
+      .status:empty { display: none; }
+      .table-wrap { overflow-x: auto; }
+      .mcp-table-wrap td:nth-child(3) { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mcp-table-wrap td:last-child { white-space: nowrap; }
+      table.list { border-collapse: collapse; font-size: 12px; min-width: 640px; width: 100%; }
+      table.list th, table.list td { border-bottom: 1px solid var(--line); padding: 9px 16px; text-align: left; vertical-align: middle; }
+      table.list th {
+        background: var(--surface-subtle);
+        color: var(--ink-faint);
+        font-size: 10px;
+        font-weight: 720;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      table.list td { color: var(--ink-soft); }
+      table.list td:first-child { color: var(--ink); font-weight: 620; }
+      table.list tbody tr { transition: background-color 140ms ease; }
+      table.list tbody tr:hover { background: var(--brand-wash); }
+      table.list tbody tr:last-child td { border-bottom: 0; }
+      table.list tr.dim { opacity: 0.52; }
+      table.list button { font-size: 11px; min-height: 28px; padding: 5px 9px; }
+      .tag {
+        background: var(--surface-subtle);
+        border: 1px solid var(--line-strong);
+        border-radius: 5px;
+        color: var(--ink-soft);
+        display: inline-block;
+        font-size: 10px;
+        font-weight: 550;
+        margin-left: 5px;
+        padding: 2px 6px;
+        vertical-align: 1px;
+      }
+      .row { align-items: center; display: flex; flex-wrap: wrap; gap: 9px; }
+      .row + .row { margin-top: 10px; }
+      textarea {
+        background: #fbfcfe;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius-sm);
+        color: var(--ink);
+        font-family: var(--font-code);
+        font-size: 12px;
+        line-height: 1.7;
+        min-height: 150px;
+        outline: none;
+        padding: 13px 14px;
+        resize: vertical;
+        width: 100%;
+      }
+      pre {
+        background: #202938;
+        border: 1px solid #202938;
+        border-radius: var(--radius-sm);
+        color: #dbe4ff;
+        font-family: var(--font-code);
+        font-size: 12px;
+        line-height: 1.7;
+        max-height: 360px;
+        min-height: 136px;
+        overflow: auto;
+        padding: 16px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .two-column { display: grid; gap: 12px; grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr); }
+      .two-column > .surface { min-width: 0; }
+      .notice {
+        align-items: flex-start;
+        background: var(--brand-wash);
+        border: 1px solid #dfe5ff;
+        border-radius: 9px;
+        color: var(--ink-soft);
+        display: flex;
+        font-size: 10px;
+        gap: 8px;
+        line-height: 1.5;
+        margin: -4px 0 12px;
+        padding: 8px 11px;
+      }
+      .notice-mark {
+        background: var(--brand);
+        border-radius: 50%;
+        color: #fff;
+        flex: none;
+        font-size: 9px;
+        font-weight: 700;
+        height: 15px;
+        line-height: 15px;
+        text-align: center;
+        width: 15px;
+      }
+      .notice-mark {
+        background: var(--brand);
+        border-radius: 50%;
+        color: #fff;
+        flex: none;
+        font-size: 10px;
+        font-weight: 700;
+        height: 16px;
+        line-height: 16px;
+        text-align: center;
+        width: 16px;
+      }
+      .source-label {
+        align-items: center;
+        color: var(--ink-soft);
+        display: flex;
+        font-size: 11px;
+        gap: 7px;
+        margin-bottom: 10px;
+      }
+      .source-label strong { color: var(--ink); font-weight: 650; }
+      .source-label span {
+        background: var(--surface-blue);
+        border: 1px solid #dfe5ff;
+        border-radius: 5px;
+        color: var(--brand-dark);
+        font-size: 10px;
+        padding: 2px 6px;
+      }
+      .server-summary {
+        align-items: center;
+        background: var(--surface-subtle);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        display: flex;
+        gap: 8px;
+        justify-content: space-between;
+        padding: 9px 10px;
+      }
+      .server-summary .status { min-height: 0; }
+      .server-summary-main { align-items: center; display: flex; gap: 8px; min-width: 0; }
+      .server-summary-main .status { color: var(--ink); font-size: 12px; }
+      .conversion-list { display: none; }
+      .preview-surface .surface-body { padding-top: 16px; }
+      .preview-label { color: var(--ink-soft); font-size: 11px; font-weight: 650; margin-bottom: 8px; }
+      .skills-actions { align-items: stretch; }
+      .skills-actions .surface { margin-bottom: 0; }
+      .skills-actions .surface-body { min-height: 222px; }
+      .skills-actions textarea { min-height: 112px; margin-top: 14px; }
+      .skills-actions .row { align-items: flex-end; }
+      .skills-actions .row > * { flex: 1; min-width: 0; }
+      .skills-actions .row > button { flex: none; }
+      .harness-wrap {
+        background: var(--canvas-deep);
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        min-height: 0;
+        padding: 0;
+        position: relative;
+      }
+      .panel#panel-harness { background: var(--canvas-deep); overflow: hidden; padding: 0; }
+      #harness-frame { background: #fff; border: 0; flex: 1; min-height: 0; width: 100%; }
+      .harness-fullscreen-toggle {
+        align-items: center;
+        background: rgb(255 255 255 / 94%);
+        border: 1px solid var(--line-strong);
+        border-radius: 9px;
+        bottom: 14px;
+        box-shadow: 0 4px 14px rgb(31 41 55 / 12%);
+        display: inline-flex;
+        height: 36px;
+        justify-content: center;
+        min-height: 0;
+        padding: 0;
+        position: absolute;
+        right: 16px;
+        width: 36px;
+        z-index: 10;
+      }
+      .harness-fullscreen-toggle:hover { background: var(--brand-soft); border-color: #cbd5ff; color: var(--brand-dark); }
+      .harness-fullscreen-toggle svg { fill: none; height: 17px; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; width: 17px; }
+      .harness-fullscreen-toggle .fullscreen-exit { display: none; }
+      body.harness-fullscreen { display: block; }
+      body.harness-fullscreen .sidebar { display: none; }
+      body.harness-fullscreen .app-shell,
+      body.harness-fullscreen main { display: block; height: 100%; }
+      body.harness-fullscreen .panel#panel-harness { height: 100%; min-height: 100vh; }
+      body.harness-fullscreen .harness-fullscreen-toggle { bottom: 18px; right: 18px; }
+      body.harness-fullscreen .fullscreen-enter { display: none; }
+      body.harness-fullscreen .harness-fullscreen-toggle .fullscreen-exit { display: block; }
+      @media (max-width: 900px) {
+        .app-shell { grid-template-columns: 74px minmax(0, 1fr); }
+        .sidebar { padding-left: 10px; padding-right: 10px; }
+        .sidebar-label, .tab-copy, .sidebar-profile { display: none; }
+        .tab { justify-content: center; padding: 7px; }
+        .tab::before { left: -10px; }
+        .two-column { grid-template-columns: 1fr; }
+      }
+      @media (max-width: 640px) {
+        .app-shell { display: flex; flex-direction: column; }
+        .sidebar { border-bottom: 1px solid var(--line); border-right: 0; flex: none; padding: 6px 10px; }
+        #tabbar { flex-direction: row; gap: 4px; overflow-x: auto; }
+        .tab { flex: 1 0 68px; min-height: 38px; }
+        .tab::before { bottom: -7px; height: 3px; left: 16px; right: 16px; top: auto; width: auto; }
+        .panel { padding: 20px 14px 28px; }
+        .page-header { flex-direction: column; gap: 12px; margin-bottom: 18px; }
+        .surface-head { padding: 13px 14px; }
+        .surface-body { padding: 14px; }
+        table.list th, table.list td { padding-left: 12px; padding-right: 12px; }
+        .install-row, .file-row { align-items: stretch; flex-direction: column; }
+        .install-row button, .file-row button { width: 100%; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+      }
     </style>
-  </head>
+</head>
   <body>
-    <header id="tabbar">
-      <span class="brand">DSH Desktop</span>
-      <button class="tab active" data-tab="harness">Harness</button>
-      <button class="tab" data-tab="plugin">Plugin</button>
-      <button class="tab" data-tab="mcp">MCP</button>
-      <button class="tab" data-tab="skills">Skills</button>
-    </header>
-    <main>
-      <section class="panel active" id="panel-harness">
-        <div class="harness-wrap">
-          <div id="harness-status" class="status">harness 连接中…</div>
-          <iframe id="harness-frame" title="DeepSeek Harness"></iframe>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="工作区导航">
+        <div class="sidebar-label">Workspace</div>
+        <nav id="tabbar" role="tablist" aria-label="工作区">
+          <button class="tab active" id="tab-harness" type="button" data-tab="harness" role="tab" aria-selected="true" aria-controls="panel-harness">
+            <span class="tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"></rect><path d="M8 9h8M8 13h5M8 17h8"></path></svg>
+            </span>
+            <span class="tab-copy"><span>Harness</span></span>
+          </button>
+          <button class="tab" id="tab-plugin" type="button" data-tab="plugin" role="tab" aria-selected="false" aria-controls="panel-plugin">
+            <span class="tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M8 4v4M16 4v4M5 8h14v11H5z"></path><path d="M8 12h8M8 16h5"></path></svg>
+            </span>
+            <span class="tab-copy"><span>插件</span></span>
+          </button>
+          <button class="tab" id="tab-mcp" type="button" data-tab="mcp" role="tab" aria-selected="false" aria-controls="panel-mcp">
+            <span class="tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><circle cx="7" cy="12" r="3"></circle><circle cx="17" cy="7" r="3"></circle><circle cx="17" cy="17" r="3"></circle><path d="m9.7 10.7 4.6-2.4M9.7 13.3l4.6 2.4"></path></svg>
+            </span>
+            <span class="tab-copy"><span>MCP</span></span>
+          </button>
+          <button class="tab" id="tab-skills" type="button" data-tab="skills" role="tab" aria-selected="false" aria-controls="panel-skills">
+            <span class="tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M5 7.5 12 4l7 3.5v9L12 20l-7-3.5z"></path><path d="m5 7.5 7 3.5 7-3.5M12 11v9"></path></svg>
+            </span>
+            <span class="tab-copy"><span>Skills</span></span>
+          </button>
+        </nav>
+        <div class="sidebar-spacer"></div>
+        <div class="sidebar-profile">
+          <span class="sidebar-profile-label">Profile</span>
+          <strong>web</strong>
         </div>
-      </section>
-      <section class="panel" id="panel-plugin">
-        <h3>Plugin</h3>
-        <p class="muted">管理 profile「web」的插件。安装支持 npm 包名、GitHub 仓库链接或本地路径；变更后需重启 harness 生效。</p>
-        <div class="row">
-          <input id="plugin-spec" type="text" placeholder="npm 包名 · https://github.com/owner/repo · ./本地路径" />
-          <button id="plugin-install" class="primary">安装</button>
-          <button id="plugin-refresh">刷新</button>
-        </div>
-        <div id="plugin-status" class="status"></div>
-        <table class="list">
-          <thead>
-            <tr><th>名称</th><th>来源</th><th>spec</th><th></th></tr>
-          </thead>
-          <tbody id="plugin-rows"></tbody>
-        </table>
-      </section>
-      <section class="panel" id="panel-mcp">
-        <h3>MCP</h3>
-        <p class="muted">将 Claude Code / Cursor 风格的 MCP JSON 转换为 DSH 所需 YAML（写入 profile「web」的 cordis.patch.yml，写入前自动备份，HMR 热生效）。</p>
-        <div class="row">
-          <button id="mcp-list">刷新服务器</button>
-          <span id="mcp-servers" class="status"></span>
-        </div>
-        <div class="card">
-          <h4>输入 JSON</h4>
-          <textarea id="mcp-json" rows="7" placeholder='{
+      </aside>
+      <main>
+        <section class="panel active" id="panel-harness" role="tabpanel" aria-labelledby="tab-harness">
+          <div class="harness-wrap">
+            <iframe id="harness-frame" title="DeepSeek Harness"></iframe>
+            <button id="harness-fullscreen" class="harness-fullscreen-toggle" type="button" aria-pressed="false" aria-label="全屏显示 Harness" title="全屏显示 Harness">
+              <svg class="fullscreen-enter" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M20 16v4h-4M4 16v4h4"></path></svg>
+              <svg class="fullscreen-exit" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 4-5 5M15 4l5 5M20 15l-5 5M4 15l5 5"></path></svg>
+            </button>
+          </div>
+        </section>
+        <section class="panel" id="panel-plugin" role="tabpanel" aria-labelledby="tab-plugin">
+          <div class="page">
+            <div class="page-header">
+              <div>
+                <div class="eyebrow">Packages / Profile web</div>
+                <h1>插件</h1>
+                <p class="page-description">管理 web profile 的组合包与依赖；安装、激活或移除后需重启 Harness。</p>
+              </div>
+            </div>
+            <section class="surface">
+              <div class="surface-head">
+                <div>
+                  <h2 class="surface-title">已安装的包</h2>
+                  <p class="surface-caption">安装依赖与激活插件是两步；内置组合包只读，第三方包可单独激活或移除。</p>
+                </div>
+                <div class="surface-actions">
+                  <button id="plugin-refresh" class="quiet" type="button">刷新列表</button>
+                </div>
+              </div>
+              <div class="surface-body">
+                <label class="field-label" for="plugin-spec">添加插件</label>
+                <div class="install-row">
+                  <div class="field">
+                    <input id="plugin-spec" type="text" placeholder="npm 包名 · github:owner/repo · ./本地路径" />
+                    <p class="field-hint">支持 npm、GitHub、tarball 或本地路径；多组件仓库请按其安装说明操作。</p>
+                  </div>
+                  <button id="plugin-install" class="primary" type="button">安装插件</button>
+                </div>
+                <div id="plugin-status" class="status inline-status" aria-live="polite"></div>
+              </div>
+              <div class="table-wrap">
+                <table class="list">
+                  <thead>
+                    <tr><th>名称</th><th>来源</th><th>Spec</th><th>操作</th></tr>
+                  </thead>
+                  <tbody id="plugin-rows"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        </section>
+        <section class="panel" id="panel-mcp" role="tabpanel" aria-labelledby="tab-mcp">
+          <div class="page">
+            <div class="page-header">
+              <div>
+                <div class="eyebrow">Configuration bridge / Profile web</div>
+                <h1>MCP</h1>
+                <p class="page-description">转换通用 MCP JSON，并写入 web profile 的 patch。</p>
+              </div>
+            </div>
+            <div class="notice">
+              <span class="notice-mark" aria-hidden="true">i</span>
+              <span>写入前会自动备份现有 patch。MCP 服务器命令将在本机、Harness 沙箱之外执行，请只导入可信配置。</span>
+            </div>
+            <div class="two-column">
+              <section class="surface">
+                <div class="surface-head">
+                  <div>
+                    <h2 class="surface-title">输入配置</h2>
+                    <p class="surface-caption">粘贴 Claude Code、Cursor 等工具导出的 JSON。</p>
+                  </div>
+                </div>
+                <div class="surface-body">
+                  <textarea id="mcp-json" rows="8" placeholder='{
   "mcpServers": {
     "github": {
       "command": "npx",
@@ -212,56 +584,135 @@
     }
   }
 }'></textarea>
-          <div class="row">
-            <button id="mcp-convert">转换预览</button>
-            <button id="mcp-apply" class="primary">写入 patch（备份 + 确认）</button>
+                  <div class="surface-actions">
+                    <button id="mcp-convert" class="primary" type="button">转换预览</button>
+                    <button id="mcp-apply" type="button">写入 patch</button>
+                    <button id="mcp-cancel-edit" class="quiet" type="button" hidden>取消编辑</button>
+                  </div>
+                </div>
+              </section>
+              <section class="surface">
+                <div class="surface-head">
+                  <div>
+                    <h2 class="surface-title">当前服务器</h2>
+                    <p class="surface-caption">来自 web profile 的已写入配置。</p>
+                  </div>
+                  <button id="mcp-list" class="quiet" type="button">刷新</button>
+                </div>
+                <div class="surface-body">
+                  <div class="server-summary">
+                    <div class="server-summary-main">
+                      <span class="signal-dot" aria-hidden="true"></span>
+                      <span id="mcp-servers" class="status" aria-live="polite">读取中…</span>
+                    </div>
+                  </div>
+                  <div class="table-wrap mcp-table-wrap">
+                    <table class="list">
+                      <thead>
+                        <tr><th>名称</th><th>传输</th><th>目标</th><th>操作</th></tr>
+                      </thead>
+                      <tbody id="mcp-server-rows"></tbody>
+                    </table>
+                  </div>
+                  <div id="mcp-warnings" class="status" aria-live="polite"></div>
+                </div>
+              </section>
+            </div>
+            <section class="surface preview-surface">
+              <div class="surface-head">
+                <div>
+                  <h2 class="surface-title">转换结果</h2>
+                  <p class="surface-caption">确认内容后，再写入 profile patch。</p>
+                </div>
+              </div>
+              <div class="surface-body">
+                <pre id="mcp-preview">—</pre>
+              </div>
+            </section>
           </div>
-        </div>
-        <div id="mcp-warnings" class="status"></div>
-        <h4 style="margin:10px 0 6px">转换结果（DSH YAML）</h4>
-        <pre id="mcp-preview">—</pre>
-      </section>
-      <section class="panel" id="panel-skills">
-        <h3>Skills</h3>
-        <p class="muted">管理本机可用的 skills（rank: 项目 .dsh/.agents → 用户 ~/.dsh/skills）。支持上传 .skill/.zip 或 GitHub 仓库链接导入，改动即时生效。</p>
-        <div class="row">
-          <button id="skills-refresh">刷新</button>
-          <span id="skills-status" class="status"></span>
-        </div>
-        <div class="card">
-          <h4>导入 skill（.skill / .zip / GitHub 链接）</h4>
-          <div class="row">
-            <input id="skill-import-url" type="url" placeholder="https://github.com/owner/repo 或 https://github.com/owner/repo/tree/main/skills/xxx" />
-            <button id="skill-import-url-btn" class="primary">从链接导入</button>
+        </section>
+        <section class="panel" id="panel-skills" role="tabpanel" aria-labelledby="tab-skills">
+          <div class="page">
+            <div class="page-header">
+              <div>
+                <div class="eyebrow">Capability library / Local</div>
+                <h1>Skills</h1>
+                <p class="page-description">查看、导入和创建本机可用的 skills。</p>
+              </div>
+            </div>
+            <section class="surface">
+              <div class="surface-head">
+                <div>
+                  <h2 class="surface-title">可用 skills</h2>
+                  <p class="surface-caption">按项目、用户与随包来源合并展示；被遮蔽项仍保留用于排查。</p>
+                </div>
+                <div class="surface-actions">
+                  <span id="skills-status" class="status" aria-live="polite"></span>
+                  <button id="skills-refresh" class="quiet" type="button">刷新列表</button>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="list">
+                  <thead>
+                    <tr><th>名称</th><th>描述</th><th>来源</th><th>模型可见</th><th>用户可见</th></tr>
+                  </thead>
+                  <tbody id="skills-rows"></tbody>
+                </table>
+              </div>
+            </section>
+            <div class="two-column skills-actions">
+              <section class="surface">
+                <div class="surface-head">
+                  <div>
+                    <h2 class="surface-title">导入 skill</h2>
+                    <p class="surface-caption">支持 .skill、.zip 或 GitHub 仓库链接。</p>
+                  </div>
+                </div>
+                <div class="surface-body">
+                  <div class="field">
+                    <label class="field-label" for="skill-import-url">GitHub 链接</label>
+                    <input id="skill-import-url" type="url" placeholder="https://github.com/owner/repo/tree/main/skills/xxx" />
+                  </div>
+                  <div class="row" style="margin-top: 10px">
+                    <button id="skill-import-url-btn" class="primary" type="button">从链接导入</button>
+                  </div>
+                  <div class="file-row" style="margin-top: 14px">
+                    <div class="field">
+                      <label class="field-label" for="skill-file">本地文件</label>
+                      <input id="skill-file" type="file" accept=".skill,.zip" />
+                    </div>
+                    <button id="skill-import-file" type="button">上传文件</button>
+                  </div>
+                  <div id="skill-import-status" class="status inline-status" aria-live="polite"></div>
+                </div>
+              </section>
+              <section class="surface">
+                <div class="surface-head">
+                  <div>
+                    <h2 class="surface-title">创建 skill</h2>
+                    <p class="surface-caption">保存到用户级 ~/.dsh/skills。</p>
+                  </div>
+                </div>
+                <div class="surface-body">
+                  <div class="row">
+                    <div class="field">
+                      <label class="field-label" for="skill-name">名称</label>
+                      <input id="skill-name" type="text" placeholder="kebab-case 名称" />
+                    </div>
+                    <div class="field">
+                      <label class="field-label" for="skill-desc">描述</label>
+                      <input id="skill-desc" type="text" placeholder="一句话描述" />
+                    </div>
+                  </div>
+                  <textarea id="skill-body" rows="4" placeholder="skill 正文（Markdown 指令）"></textarea>
+                  <button id="skill-create" class="primary" type="button">创建 skill</button>
+                </div>
+              </section>
+            </div>
           </div>
-          <div class="row">
-            <input id="skill-file" type="file" accept=".skill,.zip" />
-            <button id="skill-import-file">上传文件</button>
-          </div>
-          <div id="skill-import-status" class="status"></div>
-        </div>
-        <table class="list">
-          <thead>
-            <tr><th>名称</th><th>描述</th><th>来源</th><th>模型可见</th><th>用户可见</th></tr>
-          </thead>
-          <tbody id="skills-rows"></tbody>
-        </table>
-        <div class="card" style="margin-top:14px">
-          <h4>从模板创建（用户级 ~/.dsh/skills）</h4>
-          <div class="row">
-            <input id="skill-name" type="text" placeholder="kebab-case 名称" />
-            <input id="skill-desc" type="text" placeholder="描述" />
-          </div>
-          <textarea id="skill-body" rows="4" placeholder="skill 正文（Markdown 指令）"></textarea>
-          <button id="skill-create" class="primary">创建</button>
-        </div>
-      </section>
-    </main>
-    <footer>
-      <span id="footer-versions"></span>
-      <span class="divider"></span>
-      <span>DSH Desktop v0.1</span>
-    </footer>
+        </section>
+      </main>
+    </div>
     <script src="renderer.js"></script>
   </body>
 </html>
