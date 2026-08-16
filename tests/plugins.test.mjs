@@ -1,0 +1,83 @@
+// M2 单元测试：插件清单解析与命令封装（不触发真实 pnpm）
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+const { listPlugins, buildPluginCommand, runPluginOp } = await import(join(root, 'dist', 'core', 'plugins.js'))
+
+test('listPlugins 从 bundles ∪ dependencies 解析并分类', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'profile-'))
+  try {
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({
+        dependencies: {
+          '@deepseek-ai/dsh-base': '0.1.0-rc.6',
+          '@deepseek-ai/dsh-web-app': '0.1.0-rc.6',
+          'third-party-bundle': '^1.0.0',
+          'plain-dep': 'link:/tmp/x',
+        },
+        dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'third-party-bundle'] } },
+      }),
+    )
+    const entries = listPlugins({ name: 'test', dir, bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'third-party-bundle'] })
+    const byName = Object.fromEntries(entries.map((e) => [e.name, e]))
+    assert.equal(byName['@deepseek-ai/dsh-base'].source, 'builtin-bundle')
+    assert.equal(byName['@deepseek-ai/dsh-base'].inBundles, true)
+    assert.equal(byName['third-party-bundle'].source, 'bundle')
+    assert.equal(byName['plain-dep'].source, 'dependency')
+    assert.equal(byName['plain-dep'].inBundles, false)
+    assert.equal(byName['plain-dep'].spec, 'link:/tmp/x')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('listPlugins 排序稳定', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'profile-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ dependencies: { b: '1', a: '1' }, dsh: { profile: { bundles: ['a'] } } }))
+    const names = listPlugins({ name: 't', dir, bundles: ['a'] }).map((e) => e.name)
+    assert.deepEqual(names, ['a', 'b'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('buildPluginCommand 构造官方命令形态', () => {
+  assert.deepEqual(buildPluginCommand('web', 'add', ['github:user/repo#abc123']), [
+    'plugin', '--profile', 'web', 'add', 'github:user/repo#abc123',
+  ])
+  assert.deepEqual(buildPluginCommand('web', 'remove', ['some-plugin']), [
+    'plugin', '--profile', 'web', 'remove', 'some-plugin',
+  ])
+})
+
+test('runPluginOp 透传退出码并支持取消', async () => {
+  const bin = mkdtempSync(join(tmpdir(), 'dsh-bin-'))
+  try {
+    const script = join(bin, 'dsh')
+    writeFileSync(
+      script,
+      '#!/usr/bin/env node\n' +
+        'const action = process.argv.at(-1)\n' +
+        'if (action === "fail") { console.error("boom"); process.exit(3) }\n' +
+        'console.log("ok")\n',
+    )
+    chmodSync(script, 0o755)
+
+    const ok = runPluginOp({ dsh: script, profile: 'web', action: 'add', args: ['x'] })
+    const out = await ok.done
+    assert.equal(out.exitCode, 0)
+
+    const bad = runPluginOp({ dsh: script, profile: 'web', action: 'fail' })
+    const badOut = await bad.done
+    assert.equal(badOut.exitCode, 3)
+  } finally {
+    rmSync(bin, { recursive: true, force: true })
+  }
+})

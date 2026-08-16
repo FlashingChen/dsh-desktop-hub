@@ -1,14 +1,40 @@
-// M0 骨架：Tab 切换 + 版本信息展示。功能面板在 M1-M4 逐项实现。
+// 渲染进程：Tab 切换 + Plugin 面板（M2）
+// 注意：本文件不得包含 import/export（浏览器普通脚本，CSP 禁止模块加载）
+
+interface PluginEntry {
+  name: string
+  spec: string
+  inBundles: boolean
+  builtin: boolean
+  source: 'builtin-bundle' | 'bundle' | 'dependency'
+}
+
+interface PluginListResult {
+  ok: boolean
+  profile?: string
+  entries?: PluginEntry[]
+  error?: string
+}
+
+interface PluginOpResult {
+  ok: boolean
+  exitCode?: number | null
+  output?: string
+  error?: string
+}
 
 interface DesktopApi {
   versions: { electron: string; node: string; chrome: string }
-}
-
-declare global {
-  interface Window {
-    dshDesktop?: DesktopApi
+  plugins: {
+    list: () => Promise<PluginListResult>
+    install: (spec: string) => Promise<PluginOpResult>
+    remove: (name: string) => Promise<PluginOpResult>
+    update: () => Promise<PluginOpResult>
   }
 }
+
+type DesktopWindow = Window & { dshDesktop?: DesktopApi }
+const api = (window as DesktopWindow).dshDesktop
 
 const TABS = ['harness', 'plugin', 'mcp', 'skills'] as const
 type TabId = (typeof TABS)[number]
@@ -24,10 +50,76 @@ for (const t of TABS) {
   document.querySelector(`[data-tab="${t}"]`)?.addEventListener('click', () => switchTab(t))
 }
 
-const api = window.dshDesktop
+function setStatus(text: string, kind: 'error' | 'ok' = 'ok'): void {
+  const el = document.getElementById('plugin-status')
+  if (!el) return
+  el.textContent = text
+  el.className = `status ${kind}`
+}
+
+async function refreshPlugins(): Promise<void> {
+  const el = document.getElementById('plugin-rows')
+  if (!el || !api) return
+  el.innerHTML = '<tr><td colspan="4">加载中…</td></tr>'
+  const res = await api.plugins.list()
+  if (!res.ok || !res.entries) {
+    el.innerHTML = ''
+    setStatus(`加载失败: ${res.error ?? '未知错误'}`, 'error')
+    return
+  }
+  const sourceLabel: Record<PluginEntry['source'], string> = {
+    'builtin-bundle': '内置组合包',
+    bundle: '第三方组合包',
+    dependency: '普通依赖',
+  }
+  el.innerHTML = res.entries
+    .map(
+      (p) =>
+        `<tr>
+          <td>${p.name}</td>
+          <td>${sourceLabel[p.source]}</td>
+          <td>${p.spec || '—'}</td>
+          <td>${p.builtin ? '' : `<button data-remove="${p.name}">移除</button>`}</td>
+        </tr>`,
+    )
+    .join('')
+  el.querySelectorAll('[data-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => void removePlugin(String((btn as HTMLElement).dataset.remove)))
+  })
+  setStatus(`profile「${res.profile}」共 ${res.entries.length} 个包`)
+}
+
+async function installPlugin(): Promise<void> {
+  const input = document.getElementById('plugin-spec') as HTMLInputElement | null
+  if (!input || !api) return
+  const spec = input.value.trim()
+  if (!spec) {
+    setStatus('请输入包名或 github:owner/repo#commit', 'error')
+    return
+  }
+  if (!confirm(`确认安装插件「${spec}」到 profile「web」？\n插件代码将在本机执行（沙箱之外）。`)) return
+  setStatus(`安装中: ${spec}`)
+  const res = await api.plugins.install(spec)
+  setStatus(`安装${res.ok ? '成功' : '失败'}（exit=${res.exitCode}）\n${res.output ?? res.error ?? ''}`, res.ok ? 'ok' : 'error')
+  if (res.ok) await refreshPlugins()
+}
+
+async function removePlugin(name: string): Promise<void> {
+  if (!api) return
+  if (!confirm(`确认移除插件「${name}」？`)) return
+  setStatus(`移除中: ${name}`)
+  const res = await api.plugins.remove(name)
+  setStatus(`移除${res.ok ? '成功' : '失败'}（exit=${res.exitCode}）\n${res.output ?? res.error ?? ''}`, res.ok ? 'ok' : 'error')
+  if (res.ok) await refreshPlugins()
+}
+
+document.getElementById('plugin-install')?.addEventListener('click', () => void installPlugin())
+document.getElementById('plugin-refresh')?.addEventListener('click', () => void refreshPlugins())
+
 if (api) {
   const el = document.getElementById('footer-versions')
   if (el) {
     el.textContent = `Electron ${api.versions.electron} · Node ${api.versions.node} · Chromium ${api.versions.chrome}`
   }
+  void refreshPlugins()
 }

@@ -47,6 +47,24 @@
       .panel { display: none; padding: 24px; height: 100%; }
       .panel.active { display: block; }
       .placeholder { color: var(--muted); font-size: 13px; line-height: 1.8; }
+      h3 { margin-bottom: 8px; font-size: 15px; }
+      .muted { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+      .row { display: flex; gap: 8px; margin-bottom: 10px; }
+      input[type="text"] {
+        flex: 1; max-width: 420px; padding: 6px 10px; border-radius: 6px;
+        border: 1px solid var(--line); background: var(--panel); color: var(--text);
+      }
+      button {
+        padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line);
+        background: #232837; color: var(--text); cursor: pointer; font-size: 13px;
+      }
+      button.primary { background: var(--accent); border-color: var(--accent); }
+      .status { font-size: 12px; color: var(--muted); margin-bottom: 10px; white-space: pre-wrap; }
+      .status.error { color: #ff7b72; }
+      .status.ok { color: #7ee787; }
+      table.list { width: 100%; border-collapse: collapse; font-size: 13px; }
+      table.list th, table.list td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+      table.list th { color: var(--muted); font-weight: 500; }
       footer {
         padding: 6px 12px;
         font-size: 11px;
@@ -71,7 +89,20 @@
         <div class="placeholder">Harness 面板：M1 将在此加载 DSH Web UI。</div>
       </section>
       <section class="panel" id="panel-plugin">
-        <div class="placeholder">Plugin 系统：M2 将在此实现插件管理。</div>
+        <h3>Plugin 系统</h3>
+        <p class="muted">管理 profile「web」的插件。安装/移除会真实执行 <code>dsh plugin</code>，变更后需重启 harness 生效。</p>
+        <div class="row">
+          <input id="plugin-spec" type="text" placeholder="npm 包名 或 github:owner/repo#commit" />
+          <button id="plugin-install" class="primary">安装</button>
+          <button id="plugin-refresh">刷新</button>
+        </div>
+        <div id="plugin-status" class="status"></div>
+        <table class="list">
+          <thead>
+            <tr><th>名称</th><th>来源</th><th>spec</th><th></th></tr>
+          </thead>
+          <tbody id="plugin-rows"></tbody>
+        </table>
       </section>
       <section class="panel" id="panel-mcp">
         <div class="placeholder">MCP 系统：M3 将在此实现 JSON→YAML 转换。</div>

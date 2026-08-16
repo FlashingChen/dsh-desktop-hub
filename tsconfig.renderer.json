@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "legacy",
+    "rootDir": "src/renderer",
+    "outDir": "dist/renderer"
+  },
+  "include": ["src/renderer/renderer.ts"]
+}

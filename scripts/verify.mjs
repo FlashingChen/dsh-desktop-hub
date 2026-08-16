@@ -36,17 +36,17 @@ for (const tab of ['harness', 'plugin', 'mcp', 'skills']) {
   check(`Tab 存在: ${tab}`, html.includes(`data-tab="${tab}"`) && html.includes(`id="panel-${tab}"`))
 }
 
-// 4) 构建（harness 测试依赖 dist）
-const build = spawnSync('npx', ['tsc', '-p', 'tsconfig.json'], { cwd: root, encoding: 'utf8' })
+// 4) 构建（harness/plugins 测试依赖 dist）
+const build = spawnSync('npm', ['run', 'build'], { cwd: root, encoding: 'utf8' })
 check('构建通过', build.status === 0, build.status === 0 ? '' : (build.stderr || build.stdout).slice(0, 400))
-if (build.status === 0) {
-  const cp = spawnSync('node', ['scripts/copy-renderer.mjs'], { cwd: root, encoding: 'utf8' })
-  check('静态资源复制', cp.status === 0)
+for (const f of ['dist/main/main.js', 'dist/core/harness.js', 'dist/preload/preload.cjs', 'dist/renderer/index.html']) {
+  check(`产物存在: ${f}`, existsSync(req(f)))
 }
 
-// 5) typecheck
-const tc = spawnSync('npx', ['tsc', '--noEmit'], { cwd: root, encoding: 'utf8' })
-check('typecheck 通过', tc.status === 0, tc.status === 0 ? '' : (tc.stderr || tc.stdout).slice(0, 400))
+// 5) typecheck（主 + renderer 两套配置）
+const tc = spawnSync('npx', ['tsc', '--noEmit', '-p', 'tsconfig.json'], { cwd: root, encoding: 'utf8' })
+const tcR = spawnSync('npx', ['tsc', '--noEmit', '-p', 'tsconfig.renderer.json'], { cwd: root, encoding: 'utf8' })
+check('typecheck 通过', tc.status === 0 && tcR.status === 0, tc.status !== 0 ? (tc.stderr || tc.stdout).slice(0, 400) : (tcR.stderr || tcR.stdout).slice(0, 400))
 
 // 6) 测试
 const t = spawnSync('node', ['--test', 'tests/*.test.mjs'], { cwd: root, encoding: 'utf8' })

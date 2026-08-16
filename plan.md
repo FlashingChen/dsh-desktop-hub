@@ -13,8 +13,9 @@
 - [ ] **M1 Harness 启动与加载** — 检测 `dsh`/`$DSH_HOME`/profiles；spawn `dsh web`（复用真实环境）；端口轮询 HTTP 200；BrowserWindow 加载 Web UI；退出清理进程树。
   - 验证：本机启动应用 → Web UI 加载成功；退出后无孤儿 dsh 进程。
 
-- [ ] **M2 Plugin 系统** — profile 发现 + 插件列表（`dsh.profile.bundles` + node_modules 依赖）；封装 `dsh plugin --profile <name> add|remove|update`（防呆：目标 profile 显式选择）。
+- [x] **M2 Plugin 系统** — profile 发现 + 插件列表（`dsh.profile.bundles` + node_modules 依赖）；封装 `dsh plugin --profile <name> add|remove|update`（防呆：目标 profile 显式选择）。
   - 验证：单测（临时 profile 模拟 bundle 解析）；真实 `web` profile 只读列表正确。
+  - 实测 2026-08-16：单测 4/4（分类/排序/命令形态/退出码+取消）；Electron 冒烟断言真实列表 ≥4 项含 dsh-base；真实 CLI `dsh plugin --profile web why` 通。
 
 - [ ] **M3 MCP 系统** — JSON→YAML 转换器（PRD §2.4 已验证算法）+ profile `cordis.patch.yml` 事务读写（备份/回滚）+ 服务器列表/增删改。
   - 验证：单测（转换器 + patch 事务，损坏写入可回滚）；真实 `web` profile 的 cordis.patch.yml 只读展示。
