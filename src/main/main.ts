@@ -36,6 +36,7 @@ import {
 } from '../core/mcp.js'
 import { scanSkills, createSkill, setInvocation, importSkillFromZip, importSkillFromGitHub, type SkillSummary } from '../core/skills.js'
 import { IPC, type PluginOpAction, type HarnessStatus } from '../core/ipc.js'
+import { initLog, log } from '../core/log.js'
 import { wireSmoke } from './smoke.js'
 
 const APP_NAME = 'DSH Desktop Hub'
@@ -47,7 +48,11 @@ const ARTIFACTS_DIR = join(__dirname, '..', '..', 'artifacts')
 const argv = process.argv
 const SMOKE = argv.includes('--smoke')
 const HARNESS_SMOKE = argv.includes('--harness-smoke')
-// 默认（无 flag）＝产品行为：加载 harness Web UI + 菜单「管理台」
+// 默认（无 flag）＝产品行为：窗口先行，harness 后台启动，失败自动重试
+
+// 运行日志：任何启动/连接问题都落盘可查（Windows 真机无控制台）
+initLog()
+log(`argv=${JSON.stringify(argv)}`)
 
 app.setName(APP_NAME)
 // Windows 任务栏分组/通知归属（须在 ready 前设置）；其他平台无此概念
@@ -56,6 +61,9 @@ if (process.platform === 'win32') app.setAppUserModelId('com.dshdesktophub.app')
 let mainWindow: BrowserWindow | null = null
 let harness: HarnessHandle | null = null
 let restarting = false
+let stoppingHarness = false
+let autoRestartTimer: NodeJS.Timeout | null = null
+let autoRestartAttempts = 0
 
 /** M2 管理的目标 profile（与 harness 启动一致）；M5 将支持切换 */
 const ACTIVE_PROFILE = 'web'
@@ -194,26 +202,9 @@ function registerIpc(): void {
     return harness?.url ?? null
   })
 
-  ipcMain.handle(IPC.harnessRestart, async (event) => {
+  ipcMain.handle(IPC.harnessRestart, (event) => {
     assertRendererSender(event)
-    if (restarting) return { ok: false as const, error: 'Harness 正在重启中' }
-    restarting = true
-    const wc = shellWebContents()
-    wc?.send(IPC.harnessStatus, { state: 'restarting' } satisfies HarnessStatus)
-    try {
-      await harness?.stop()
-      harness = null
-      const next = await startHarness({ profile: ACTIVE_PROFILE, readyTimeoutMs: 120_000 })
-      harness = next
-      watchHarness(next.proc)
-      wc?.send(IPC.harnessStatus, { state: 'ready', url: next.url } satisfies HarnessStatus)
-      return { ok: true as const, url: next.url }
-    } catch (err) {
-      wc?.send(IPC.harnessStatus, { state: 'exited', code: -1 } satisfies HarnessStatus)
-      return { ok: false as const, error: (err as Error).message }
-    } finally {
-      restarting = false
-    }
+    return restartHarness()
   })
 
   ipcMain.handle(IPC.pluginsList, (event) => {
@@ -537,19 +528,108 @@ function createSkeletonWindow(): void {
   })
 }
 
-// ---- harness 生命周期监控（P2-11）：意外退出 → 通知 UI，可一键重启 ----
+// ---- harness 生命周期监控（P2-11）：意外退出 → 通知 UI + 自动重启 ----
 function watchHarness(proc: HarnessHandle['proc']): void {
   proc.on('exit', (code, signal) => {
-    if (restarting) return
+    if (restarting || stoppingHarness || autoRestartTimer) return
+    log(`harness: 意外退出（code=${code}, signal=${signal ?? ''}），自动重启`)
     harness = null
-    mainWindow?.webContents.send(IPC.harnessStatus, { state: 'exited', code, signal } satisfies HarnessStatus)
+    sendHarnessStatus({ state: 'exited', code, signal, error: 'Harness 意外退出，正在自动重启…' })
+    void startHarnessAndWatch().catch((err) => {
+      scheduleAutoRestart(`意外退出后重启失败（${err instanceof Error ? err.message : String(err)}）`)
+    })
   })
 }
 
+function sendHarnessStatus(status: HarnessStatus): void {
+  try {
+    shellWebContents()?.send(IPC.harnessStatus, status)
+  } catch {
+    /* 窗口未就绪/已销毁：状态仍由日志留痕 */
+  }
+}
+
+/** 同步启动 harness 并等待就绪（冒烟模式 / 手动重启共用；失败抛错且不改窗口状态） */
 async function startHarnessAndWatch(): Promise<void> {
-  harness = await startHarness({ profile: ACTIVE_PROFILE, readyTimeoutMs: 120_000 })
-  watchHarness(harness.proc)
-  console.log(`harness ready: ${harness.url}`)
+  sendHarnessStatus({ state: 'starting' })
+  try {
+    const exec = resolveDshExec()
+    if (!exec) {
+      log('harness: resolveDshExec 返回 null —— 捆绑运行时缺失且系统无 dsh')
+      throw new Error('未找到 dsh 运行时（捆绑运行时缺失且系统未安装 dsh），错误详情见运行日志')
+    }
+    const next = await startHarness({
+      profile: ACTIVE_PROFILE,
+      readyTimeoutMs: 180_000,
+      onLog: (line) => log(`dsh: ${line}`),
+    })
+    harness = next
+    autoRestartAttempts = 0
+    watchHarness(next.proc)
+    log(`harness: 就绪 ${next.url}`)
+    sendHarnessStatus({ state: 'ready', url: next.url })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log(`harness: 启动失败 —— ${msg}`)
+    sendHarnessStatus({ state: 'exited', code: -1, error: msg })
+    throw err
+  }
+}
+
+/** 后台启动（默认产品行为）：失败按指数退避自动重试，最多 5 次后交还 UI 手动重启 */
+function startHarnessBackground(): void {
+  void startHarnessAndWatch().catch((err) => {
+    scheduleAutoRestart(`启动失败（${err instanceof Error ? err.message : String(err)}）`)
+  })
+}
+
+function scheduleAutoRestart(reason: string): void {
+  if (autoRestartAttempts >= 5) {
+    log(`harness: 自动重试已达上限（${autoRestartAttempts} 次），等待手动重启`)
+    return
+  }
+  autoRestartAttempts += 1
+  const delay = Math.min(3_000 * 2 ** (autoRestartAttempts - 1), 60_000)
+  log(`harness: ${reason}（${autoRestartAttempts}/5），${Math.round(delay / 1000)}s 后自动重试`)
+  clearTimeout(autoRestartTimer ?? undefined)
+  autoRestartTimer = setTimeout(() => {
+    autoRestartTimer = null
+    void startHarnessAndWatch().catch((err) => {
+      log(`harness: 自动重试失败 —— ${err instanceof Error ? err.message : String(err)}`)
+      scheduleAutoRestart('自动重试失败')
+    })
+  }, delay)
+}
+
+/** 主动停止（手动重启 / 退出用）：抑制 watchHarness 的自动重启 */
+async function stopHarness(): Promise<void> {
+  stoppingHarness = true
+  try {
+    if (harness) await harness.stop()
+  } finally {
+    harness = null
+    stoppingHarness = false
+  }
+}
+
+/** 手动重启（UI 按钮触发，同步等待结果并回传渲染层） */
+async function restartHarness(): Promise<{ ok: boolean; url?: string; error?: string }> {
+  if (restarting) return { ok: false, error: 'Harness 正在重启中' }
+  restarting = true
+  clearTimeout(autoRestartTimer ?? undefined)
+  autoRestartTimer = null
+  sendHarnessStatus({ state: 'restarting' })
+  try {
+    if (harness) await stopHarness()
+    await startHarnessAndWatch()
+    return { ok: true, url: harness?.url }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    sendHarnessStatus({ state: 'exited', code: -1, error: msg })
+    return { ok: false, error: msg }
+  } finally {
+    restarting = false
+  }
 }
 
 function buildMenu(): void {
@@ -595,7 +675,7 @@ app.whenReady().then(async () => {
     try {
       await startHarnessAndWatch()
     } catch (err) {
-      console.error(`harness 启动失败: ${String(err)}`)
+      log(`harness-smoke: 启动失败 — ${String(err)}`)
       app.exit(1)
       return
     }
@@ -603,16 +683,11 @@ app.whenReady().then(async () => {
     wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: true })
     return
   }
-  // 默认产品行为：主窗口＝四 Tab 壳，Harness Tab 内嵌官方 Web UI
+  // 默认产品行为：窗口先行（立即出现，状态「连接中」，绝不因 harness 慢而空白/退出），
+  // harness 后台启动；失败自动重试（指数退避），最多 5 次后状态条给出原因并等待手动重启
   buildMenu()
-  try {
-    await startHarnessAndWatch()
-  } catch (err) {
-    console.error(`harness 启动失败: ${String(err)}`)
-    app.exit(1)
-    return
-  }
   createSkeletonWindow()
+  startHarnessBackground()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createSkeletonWindow()
   })
@@ -626,7 +701,8 @@ let quitting = false
 app.on('will-quit', (e) => {
   if (harness && !quitting) {
     quitting = true
+    clearTimeout(autoRestartTimer ?? undefined)
     e.preventDefault()
-    void harness.stop().finally(() => app.quit())
+    void stopHarness().finally(() => app.quit())
   }
 })

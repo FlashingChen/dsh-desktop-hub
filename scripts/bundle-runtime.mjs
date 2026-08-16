@@ -164,3 +164,54 @@ const manifest = {
 }
 writeFileSync(join(root, 'resources', 'runtime-manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
 console.log(`[bundle] manifest: resources/runtime-manifest.json`)
+
+// 4) win32 交叉目标瘦身：只保留 win32-x64 运行所需的文件。
+// 收益：安装更小更快、文件数大降（Windows Defender 首扫与 NSIS 安装均随文件数/体积线性变慢）。
+if (TARGET) {
+  trimWin32Runtime(nodeDir, runtimeDir)
+}
+
+function removeSourceMaps(dir) {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name)
+    if (e.isDirectory()) removeSourceMaps(p)
+    else if (e.name.endsWith('.map')) rmSync(p, { force: true })
+  }
+}
+
+function trimWin32Runtime(nodeDir, runtimeDir) {
+  // 1) node 发行残留：zip 缓存（manifest 已锁定 sha）+ corepack + 文档/安装脚本
+  rmSync(join(nodeDir, TARBALL), { force: true })
+  for (const f of ['corepack', 'corepack.cmd', 'corepack.ps1', 'install_tools.bat', 'CHANGELOG.md']) {
+    rmSync(join(nodeDir, f), { recursive: true, force: true })
+  }
+  // 2) node-pty：只留 win32-x64 prebuilds 与 conpty win10-x64（删其余平台）
+  const pty = join(runtimeDir, 'node_modules', 'node-pty')
+  const prebuilds = join(pty, 'prebuilds')
+  if (existsSync(prebuilds)) {
+    for (const d of readdirSync(prebuilds)) {
+      if (d !== 'win32-x64') rmSync(join(prebuilds, d), { recursive: true, force: true })
+    }
+  }
+  const conpty = join(pty, 'third_party', 'conpty')
+  if (existsSync(conpty)) {
+    for (const verDir of readdirSync(conpty)) {
+      const ver = join(conpty, verDir)
+      if (!existsSync(ver)) continue
+      for (const sub of readdirSync(ver)) {
+        const s = sub.toLowerCase()
+        if (s.includes('arm64') || s.includes('x86')) rmSync(join(ver, sub), { recursive: true, force: true })
+      }
+    }
+  }
+  // 3) pnpm：只留 fastlist x64
+  for (const rel of ['dist/vendor/fastlist-0.3.0-x86.exe', 'artifacts/exe/dist/vendor/fastlist-0.3.0-x86.exe']) {
+    rmSync(join(runtimeDir, 'node_modules', 'pnpm', rel), { force: true })
+  }
+  // 4) sharp：x64 目标不需要 wasm 回退
+  rmSync(join(runtimeDir, 'node_modules', '@img', 'sharp-wasm32'), { recursive: true, force: true })
+  // 5) sourcemap 全删（运行时不需要；文件数与体积大头）
+  removeSourceMaps(nodeDir)
+  removeSourceMaps(runtimeDir)
+  console.log('[bundle] 交叉捆绑：已瘦身（zip 缓存/corepack/非 win32-x64 prebuilds/wasm/sourcemap）')
+}

@@ -31,6 +31,7 @@ interface HarnessStatus {
   url?: string
   code?: number | null
   signal?: string | null
+  error?: string
 }
 
 interface PluginOpStarted {
