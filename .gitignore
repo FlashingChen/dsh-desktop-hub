@@ -1,7 +1,8 @@
 node_modules/
 dist/
 release/
-resources/
 artifacts/
+resources/node/
+resources/dsh-runtime/node_modules/
 *.log
 .DS_Store
