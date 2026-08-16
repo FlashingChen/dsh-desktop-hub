@@ -1,8 +1,9 @@
 // Electron 主进程：窗口安全边界 + IPC（来源校验）+ harness 生命周期 + 插件/MCP/Skills 管理
 import { app, BrowserWindow, ipcMain, Menu, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative, isAbsolute, basename } from 'node:path'
 import { realpathSync } from 'node:fs'
+import { homedir } from 'node:os'
 import {
   startHarness,
   resolveDshExec,
@@ -49,6 +50,8 @@ const HARNESS_SMOKE = argv.includes('--harness-smoke')
 // 默认（无 flag）＝产品行为：加载 harness Web UI + 菜单「管理台」
 
 app.setName(APP_NAME)
+// Windows 任务栏分组/通知归属（须在 ready 前设置）；其他平台无此概念
+if (process.platform === 'win32') app.setAppUserModelId('com.dshdesktophub.app')
 
 let mainWindow: BrowserWindow | null = null
 let harness: HarnessHandle | null = null
@@ -153,7 +156,8 @@ function streamPluginOp(
 
 // ---- Skills 路径 allowlist（P1-2）：按 ID 重扫 → 取扫描结果路径 → realpath 域校验 ----
 function resolveSkillRoot(source: SkillSummary['source']): string {
-  const home = process.env.HOME ?? ''
+  // Windows 无 HOME 环境变量（USERPROFILE 才是主目录），必须用 os.homedir()
+  const home = homedir()
   switch (source) {
     case 'user-dsh':
       return join(dshHome(), 'skills')
@@ -171,12 +175,14 @@ function resolveScannedSkill(name: string, source: SkillSummary['source']): Skil
   const root = resolveSkillRoot(source)
   const pathReal = realpathSync(skill.path)
   const rootReal = realpathSync(root)
-  if (!pathReal.startsWith(rootReal + '/')) {
+  // 域校验用 relative 判定，避免平台分隔符/大小写差异（Windows \\ 与不区分大小写）
+  const rel = relative(rootReal, pathReal)
+  if (rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(`skill 路径越界: ${skill.path}`)
   }
-  const base = dirname(pathReal).split('/').pop() ?? ''
-  const isBundle = pathReal.endsWith('/SKILL.md') && base === name
-  const isFlat = pathReal.endsWith(`/${name}.md`)
+  const base = dirname(pathReal).split(/[\\/]/).pop() ?? ''
+  const isBundle = basename(pathReal) === 'SKILL.md' && base === name
+  const isFlat = basename(pathReal) === `${name}.md`
   if (!isBundle && !isFlat) throw new Error(`skill 不是扫描到的 SKILL.md 或扁平文件: ${pathReal}`)
   return skill
 }
@@ -549,7 +555,8 @@ async function startHarnessAndWatch(): Promise<void> {
 function buildMenu(): void {
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
-      { label: APP_NAME, submenu: [{ role: 'quit', label: '退出' }] },
+      // Windows 无 app 菜单（菜单在窗口内），首项用「文件」更符合平台习惯；mac 用 app 名
+      { label: process.platform === 'win32' ? '文件' : APP_NAME, submenu: [{ role: 'quit', label: '退出' }] },
       {
         label: '编辑',
         submenu: [

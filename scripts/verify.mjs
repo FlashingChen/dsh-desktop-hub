@@ -36,16 +36,20 @@ for (const tab of ['harness', 'plugin', 'mcp', 'skills']) {
   check(`Tab 存在: ${tab}`, html.includes(`data-tab="${tab}"`) && html.includes(`id="panel-${tab}"`))
 }
 
+// Windows 下 npm/npx 是 .cmd shim，不能直接 spawn（Node 不会自动解析 .cmd）
+const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx'
+
 // 4) 构建（harness/plugins 测试依赖 dist）
-const build = spawnSync('npm', ['run', 'build'], { cwd: root, encoding: 'utf8' })
+const build = spawnSync(npmCmd, ['run', 'build'], { cwd: root, encoding: 'utf8' })
 check('构建通过', build.status === 0, build.status === 0 ? '' : (build.stderr || build.stdout).slice(0, 400))
 for (const f of ['dist/main/main.js', 'dist/core/harness.js', 'dist/preload/preload.cjs', 'dist/renderer/index.html']) {
   check(`产物存在: ${f}`, existsSync(req(f)))
 }
 
 // 5) typecheck（主 + renderer 两套配置）
-const tc = spawnSync('npx', ['tsc', '--noEmit', '-p', 'tsconfig.json'], { cwd: root, encoding: 'utf8' })
-const tcR = spawnSync('npx', ['tsc', '--noEmit', '-p', 'tsconfig.renderer.json'], { cwd: root, encoding: 'utf8' })
+const tc = spawnSync(npxCmd, ['tsc', '--noEmit', '-p', 'tsconfig.json'], { cwd: root, encoding: 'utf8' })
+const tcR = spawnSync(npxCmd, ['tsc', '--noEmit', '-p', 'tsconfig.renderer.json'], { cwd: root, encoding: 'utf8' })
 check('typecheck 通过', tc.status === 0 && tcR.status === 0, tc.status !== 0 ? (tc.stderr || tc.stdout).slice(0, 400) : (tcR.stderr || tcR.stdout).slice(0, 400))
 
 // 6) 测试

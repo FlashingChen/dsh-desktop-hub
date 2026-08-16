@@ -1,5 +1,5 @@
 // DSH harness 集成核心：环境检测、profile 发现、dsh web 启动与进程清理
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
@@ -31,7 +31,8 @@ export function resolveDshExec(): DshExec | null {
   const roots = process.resourcesPath ? [join(base, 'app.asar.unpacked', 'resources'), base] : [base]
   for (const root of roots) {
     const runtimeBin = join(root, 'dsh-runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
-    const nodeBin = join(root, 'node', 'bin', 'node')
+    // 布局差异：darwin/linux tar.gz → bin/node；Windows zip → 根 node.exe
+    const nodeBin = process.platform === 'win32' ? join(root, 'node', 'node.exe') : join(root, 'node', 'bin', 'node')
     if (existsSync(runtimeBin) && existsSync(nodeBin)) return { exec: runtimeBin, node: nodeBin }
   }
   const dsh = findDsh()
@@ -53,19 +54,25 @@ export function runtimePathEnv(): NodeJS.ProcessEnv {
     resolve(dirname(exec.exec), '..', '..', '..', '.bin'),
   ].filter((p) => existsSync(p))
   const pathKey = process.platform === 'win32' ? 'Path' : 'PATH'
-  env[pathKey] = [...extra, env[pathKey] ?? ''].filter(Boolean).join(process.platform === 'win32' ? ';' : ':')
+  env[pathKey] = [...extra, env[pathKey] ?? env.PATH ?? ''].filter(Boolean).join(process.platform === 'win32' ? ';' : ':')
   return env
 }
 
-/** 从 PATH 解析 dsh 可执行文件 */
+/** 从 PATH 解析 dsh 可执行文件（Windows 下 npm 全局装的是 dsh.cmd shim） */
 export function findDsh(): string | null {
-  const candidates = [process.env.DSH_BIN, '/opt/homebrew/bin/dsh', '/usr/local/bin/dsh', '/usr/bin/dsh'].filter(
-    (p): p is string => !!p,
-  )
-  const pathDirs = (process.env.PATH ?? '').split(':')
+  const isWin = process.platform === 'win32'
+  const candidates = [
+    process.env.DSH_BIN,
+    // POSIX 常见安装路径（Homebrew / 官方脚本）；Windows 无固定安装路径，仅走 PATH
+    ...(isWin ? [] : ['/opt/homebrew/bin/dsh', '/usr/local/bin/dsh', '/usr/bin/dsh']),
+  ].filter((p): p is string => !!p)
+  const pathKey = isWin ? 'Path' : 'PATH'
+  const pathDirs = (process.env[pathKey] ?? process.env.PATH ?? '').split(isWin ? ';' : ':')
   for (const dir of pathDirs) {
-    const p = join(dir, 'dsh')
-    if (existsSync(p)) candidates.push(p)
+    for (const name of isWin ? ['dsh.cmd', 'dsh.exe', 'dsh'] : ['dsh']) {
+      const p = join(dir, name)
+      if (existsSync(p)) candidates.push(p)
+    }
   }
   return candidates.find((p) => existsSync(p)) ?? null
 }
@@ -136,6 +143,7 @@ export function startHarness(opts: {
     detached: true,
     env: runtimePathEnv(),
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
   })
 
   return new Promise((resolve, reject) => {
@@ -189,9 +197,32 @@ export function startHarness(opts: {
   })
 }
 
-/** 终止整个进程树：SIGTERM → 2s 后 SIGKILL */
+/** Windows：taskkill /T 终止整棵树（无 /F 先优雅；有窗口进程发 WM_CLOSE，控制台进程直接终止） */
+function taskkillTree(pid: number, force: boolean): void {
+  try {
+    spawnSync('taskkill', ['/pid', String(pid), '/T', ...(force ? ['/F'] : [])], { windowsHide: true, stdio: 'ignore' })
+  } catch {
+    /* 已退出 */
+  }
+}
+
+/** 终止整个进程树：POSIX SIGTERM 进程组（detached 负 pid）；Windows taskkill /T → 2s 后兜底强杀 */
 async function stopTree(proc: ChildProcess): Promise<void> {
   if (proc.pid === undefined || proc.exitCode !== null || proc.signalCode !== null) return
+  if (process.platform === 'win32') {
+    taskkillTree(proc.pid, false)
+    const { promise, resolve } = Promise.withResolvers<void>()
+    const t = setTimeout(() => {
+      taskkillTree(proc.pid!, true)
+      resolve()
+    }, 2000)
+    proc.once('exit', () => {
+      clearTimeout(t)
+      resolve()
+    })
+    await promise
+    return
+  }
   try {
     process.kill(-proc.pid, 'SIGTERM') // detached 后负 pid = 进程组
   } catch {
