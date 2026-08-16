@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';" />
+    <title>DSH Beacon</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #1e293b;
+        --border: #334155;
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+        --accent: #38bdf8;
+        --ok: #34d399;
+        --warn: #fbbf24;
+        --err: #f87171;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        display: flex;
+        min-height: 100vh;
+      }
+      nav {
+        width: 210px;
+        background: var(--panel);
+        border-right: 1px solid var(--border);
+        padding: 16px 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      nav .brand { font-weight: 700; font-size: 18px; margin-bottom: 16px; color: var(--accent); }
+      nav .meta { font-size: 12px; color: var(--muted); margin-bottom: 16px; }
+      nav a {
+        color: var(--text);
+        text-decoration: none;
+        padding: 8px 12px;
+        border-radius: 8px;
+      }
+      nav a:hover { background: #334155; }
+      nav a.active { background: var(--accent); color: #0f172a; font-weight: 600; }
+      main { flex: 1; padding: 24px; overflow-y: auto; }
+      h1 { margin-top: 0; }
+      h1 small { color: var(--muted); font-weight: 400; }
+      .status { min-height: 20px; margin: 8px 0; color: var(--muted); }
+      .status.error { color: var(--err); }
+      .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+      .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+      .card .num { font-size: 28px; font-weight: 700; color: var(--accent); }
+      .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+      button {
+        background: var(--accent);
+        color: #0f172a;
+        border: 0;
+        border-radius: 8px;
+        padding: 8px 12px;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      button.secondary { background: #334155; color: var(--text); }
+      input, select, textarea {
+        background: #0b1220;
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: 8px;
+        padding: 8px;
+        min-width: 220px;
+      }
+      .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+      table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+      th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 14px; }
+      th { color: var(--muted); font-weight: 600; }
+      .check { padding: 10px; border-radius: 8px; margin: 6px 0; background: var(--panel); border-left: 4px solid var(--muted); }
+      .check.ok { border-left-color: var(--ok); }
+      .check.warning { border-left-color: var(--warn); }
+      .check.error { border-left-color: var(--err); }
+      .warn { color: var(--warn); }
+      .muted { color: var(--muted); font-size: 12px; }
+      pre { white-space: pre-wrap; background: #0b1220; padding: 10px; border-radius: 8px; }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <div class="brand">📡 DSH Beacon</div>
+      <div class="meta"><span id="profile-label">Profile: …</span><br /><span id="version-label">…</span></div>
+      <a href="#overview" data-page="overview">Overview</a>
+      <a href="#plugins" data-page="plugins">Plugins</a>
+      <a href="#skills" data-page="skills">Skills</a>
+      <a href="#mcp" data-page="mcp">MCP</a>
+      <a href="#profiles" data-page="profiles">Profiles</a>
+      <a href="#doctor" data-page="doctor">Doctor</a>
+      <a href="#settings" data-page="settings">Settings</a>
+      <a href="#marketplace" data-page="marketplace">Marketplace</a>
+    </nav>
+    <main>
+      <div id="status" class="status"></div>
+      <div id="view">Loading…</div>
+    </main>
+    <script src="../../dist/renderer/renderer.js"></script>
+  </body>
+</html>
