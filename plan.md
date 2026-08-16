@@ -1,60 +1,32 @@
-# DSH Beacon — 执行计划（PRD → MVP v0.1）
+# DSH Desktop — 执行计划（plan.md）
 
-> 项目目录：`./beacon`
-> 项目名：**DSH Beacon**（信标：一眼看到 DSH 的状态、健康与入口）
-> 理由：创新、易读、与现有 `dsh-desktop` / `DSH-Orbit` 不重叠；短小易输入，适合桌面应用。
+> 依据：PRD.md v0.1（2026-08-16，已含调研结论与实证样例）
+> 开发环境实测：macOS (Apple M5) · Node v25.9.0 · `dsh` 0.1.0-rc.6（Homebrew）· `~/.dsh` 含真实 profiles（web / dsh-tui）、skills（huashu-design）、plugins（dsh-super-injector）
+> 规则：每次只做一件事；每步先写最小可执行方案 + 验证方式；完成打勾；验证脚本一键运行（`npm run verify`）
 
-## 执行规则
+## 里程碑（按 PRD §5 拆分，每步独立可验证）
 
-- 每一步先写最小可执行方案 + 明确验证脚本。
-- 每完成一项任务在下方打勾 `[x]`。
-- 所有验证脚本可一键运行：`npm run verify`。
-- 开发目录为 `beacon/`，根目录只保留 `plan.md`。
+- [x] **M0 壳骨架** — Electron + TypeScript 三端（main/preload/renderer）工程；`typecheck` / `test` / `verify` 脚本。
+  - 验证：`npm run typecheck` 通过；`npm run verify` 全绿（骨架检查 + 测试）。
+  - 实测 2026-08-16：`npm run verify` → VERIFY OK；`npm run smoke` → SMOKE OK，DOM 断言 4 Tab（harness/plugin/mcp/skills）就绪，截屏 `artifacts/m0-smoke.png`。
 
-## 任务清单
+- [ ] **M1 Harness 启动与加载** — 检测 `dsh`/`$DSH_HOME`/profiles；spawn `dsh web`（复用真实环境）；端口轮询 HTTP 200；BrowserWindow 加载 Web UI；退出清理进程树。
+  - 验证：本机启动应用 → Web UI 加载成功；退出后无孤儿 dsh 进程。
 
-- [x] **T1 项目骨架**
-  - 方案：`beacon/` 初始化 npm 包，Electron + TypeScript 主进程/预加载/渲染进程三端分离；提供 `npm run typecheck`、`npm run test`、`npm run verify`。
-  - 验证：`node scripts/verify.mjs --skeleton`；`npm run typecheck` 通过。
+- [ ] **M2 Plugin 系统** — profile 发现 + 插件列表（`dsh.profile.bundles` + node_modules 依赖）；封装 `dsh plugin --profile <name> add|remove|update`（防呆：目标 profile 显式选择）。
+  - 验证：单测（临时 profile 模拟 bundle 解析）；真实 `web` profile 只读列表正确。
 
-- [x] **T2 DSH 环境检测与 Profile 发现**
-  - 方案：`src/core/env.ts` 检测 `dsh` 命令、`~/.dsh`、版本、Profiles；`src/core/profiles.ts` 读取 profile package.json 的 `dsh.profile.bundles` 与插件依赖。
-  - 验证：`npm run test -- --env`；在真实机器上识别 `web`/`dsh-tui`。
+- [ ] **M3 MCP 系统** — JSON→YAML 转换器（PRD §2.4 已验证算法）+ profile `cordis.patch.yml` 事务读写（备份/回滚）+ 服务器列表/增删改。
+  - 验证：单测（转换器 + patch 事务，损坏写入可回滚）；真实 `web` profile 的 cordis.patch.yml 只读展示。
 
-- [x] **T3 安全配置事务 + Snapshot/Rollback**
-  - 方案：`src/core/transaction.ts` 实现 Read→Parse→Backup→Modify→Validate→Atomic Write→Health Check；`src/core/snapshots.ts` 保存最近 10 条，可 Restore。
-  - 验证：`npm run test -- --transaction`；用临时目录模拟损坏写入并验证原文件不被破坏。
+- [ ] **M4 Skills 系统** — rank 100-600 目录扫描；SKILL.md/平铺 md 解析 + frontmatter（name/description/disable-model-invocation/user-invocable）；新建/编辑/可见性切换。
+  - 验证：单测（fixture 目录，含同名 shadow 判定）；真实 `~/.dsh/skills/huashu-design` 展示正确。
 
-- [x] **T4 MCP Manager**
-  - 方案：`src/mcp/` 支持 JSON Import 转换到 DSH `cordis.yml` MCP 实例、Manual Form、Add/Edit/Delete/Enable/Disable、Test Connection、View Tools；每个修改走 T3 事务。
-  - 验证：`npm run test -- --mcp`；临时 profile 写入 MCP 配置后可回滚。
+- [ ] **M5 桌面整合与打包** — 多 Tab UI（Harness / Plugin / MCP / Skills）整合；electron-builder 出 dmg。
+  - 验证：应用启动后各 Tab 功能走通；打包产物存在且可启动。
 
-- [x] **T5 Skills Manager**
-  - 方案：`src/skills/` 按 DSH `skill-filesystem` 规则扫描 `project/.dsh/skills`、`~/.dsh/skills` 等根；解析 `SKILL.md`/平铺 `.md`；识别同名 Shadowed/Effective；Install from GitHub/Local；Enable/Disable/Open。
-  - 验证：`npm run test -- --skills`；构造两个同名 skill 验证 shadow 判定。
+## 约束
 
-- [x] **T6 Plugin Manager**
-  - 方案：`src/plugins/` 封装官方 `dsh plugin --profile <name> ...`，列出 bundle/依赖、安装/移除/更新/启停；不自行实现包管理。
-  - 验证：`npm run test -- --plugins`；用临时 profile 校验依赖/bundle 解析与启停逻辑，安装命令封装留待真实环境手动执行。
-
-- [x] **T7 Doctor**
-  - 方案：`src/doctor/` 实现 DSH/Runtime/Profile/Model/Plugins/Skills/MCP/Config Syntax/Filesystem 检查，返回 `CheckResult[]`。
-  - 验证：`npm run test -- --doctor`；模拟缺失 DSH、坏配置等场景。
-
-- [x] **T8 Plugin Marketplace**
-  - 方案：`src/marketplace/` 抽象 `PluginRegistry`，内置示例 Registry + 搜索/详情/一键安装（安装仍走 T6）。
-  - 验证：`npm run test -- --marketplace`。
-
-- [x] **T9 Electron UI**
-  - 方案：主进程暴露 IPC API，渲染进程实现 Overview/Plugins/Skills/MCP/Profiles/Doctor/Settings/Marketplace 七页 + Snapshot 区。
-  - 验证：`npm run typecheck`；`node scripts/verify.mjs --ui` 校验静态页面与 IPC 合约。
-
-- [x] **T10 端到端验证与收尾**
-  - 方案：运行全部验证脚本，更新 README，确认 `plan.md` 全勾选。
-  - 验证：`npm run verify` 全绿。
-
-## 验证脚本
-
-- `scripts/verify.mjs`：聚合所有最小验证。
-- `scripts/test-runner.mjs`：独立模块验证（`--env`、`--transaction`、`--mcp` 等）。
-- 测试使用临时 `DSH_HOME`（`mkdtemp`），不修改真实 `~/.dsh`（除显式安装/演示操作外）。
+- 只读操作优先走真实环境（`~/.dsh`）；任何写操作（安装插件 / 改 patch / 新建 skill）默认落在**临时 profile / 临时目录**，除非用户显式指向真实 profile。
+- 打包前的「用户无需安装 Node」由 M5 的 electron-builder 内置运行时保证（PRD §4.1 方案 A）。
+- 上游版本锁定：以 `@deepseek-ai/dsh` 实际安装版本为准（本机 0.1.0-rc.6）。

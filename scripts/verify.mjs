@@ -1,0 +1,56 @@
+// M0 验证脚本：一键检查骨架契约（结构 + typecheck + 测试）
+import { spawnSync } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+const req = (p) => join(root, p)
+let failed = false
+
+function check(name, ok, detail = '') {
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  (${detail})` : ''}`)
+  if (!ok) failed = true
+}
+
+// 1) 骨架文件存在
+for (const f of [
+  'src/main/main.ts',
+  'src/preload/preload.ts',
+  'src/renderer/index.html',
+  'src/renderer/renderer.ts',
+  'scripts/verify.mjs',
+]) {
+  check(`文件存在: ${f}`, existsSync(req(f)))
+}
+
+// 2) package.json 契约
+const pkg = JSON.parse(readFileSync(req('package.json'), 'utf8'))
+for (const s of ['typecheck', 'test', 'build', 'start', 'verify']) {
+  check(`脚本存在: ${s}`, typeof pkg.scripts?.[s] === 'string')
+}
+
+// 3) 渲染层四 Tab 契约
+const html = readFileSync(req('src/renderer/index.html'), 'utf8')
+for (const tab of ['harness', 'plugin', 'mcp', 'skills']) {
+  check(`Tab 存在: ${tab}`, html.includes(`data-tab="${tab}"`) && html.includes(`id="panel-${tab}"`))
+}
+
+// 4) 构建（harness 测试依赖 dist）
+const build = spawnSync('npx', ['tsc', '-p', 'tsconfig.json'], { cwd: root, encoding: 'utf8' })
+check('构建通过', build.status === 0, build.status === 0 ? '' : (build.stderr || build.stdout).slice(0, 400))
+if (build.status === 0) {
+  const cp = spawnSync('node', ['scripts/copy-renderer.mjs'], { cwd: root, encoding: 'utf8' })
+  check('静态资源复制', cp.status === 0)
+}
+
+// 5) typecheck
+const tc = spawnSync('npx', ['tsc', '--noEmit'], { cwd: root, encoding: 'utf8' })
+check('typecheck 通过', tc.status === 0, tc.status === 0 ? '' : (tc.stderr || tc.stdout).slice(0, 400))
+
+// 6) 测试
+const t = spawnSync('node', ['--test', 'tests/*.test.mjs'], { cwd: root, encoding: 'utf8' })
+check('测试通过', t.status === 0, t.status === 0 ? '' : (t.stderr || t.stdout).slice(0, 400))
+
+console.log(failed ? '\nVERIFY FAILED' : '\nVERIFY OK')
+process.exit(failed ? 1 : 0)
