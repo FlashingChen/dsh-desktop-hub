@@ -4,6 +4,7 @@ import { parseDocument, stringify } from 'yaml'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import type { DshProfile } from './harness.js'
+import { terminateTree } from './harness.js'
 
 export interface PluginEntry {
   name: string
@@ -220,6 +221,7 @@ export function runPluginOp(opts: {
     cwd: opts.cwd,
     env: opts.env ?? process.env,
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
   })
   const { promise, resolve } = Promise.withResolvers<{
     exitCode: number | null
@@ -227,11 +229,13 @@ export function runPluginOp(opts: {
   }>()
   child.on('close', (code, signal) => resolve({ exitCode: code, signal }))
   child.on('error', () => resolve({ exitCode: -1, signal: null }))
-  opts.signal?.addEventListener('abort', () => child.kill('SIGTERM'))
+  // 取消必须终止整棵进程树（Windows 上 dsh 用 cmd /c pnpm，子进程 pnpm 持有 profile node_modules 锁；
+  // 只杀直接子进程会让 pnpm 残留并锁住后续操作）
+  opts.signal?.addEventListener('abort', () => terminateTree(child.pid))
   return {
     stdout: child.stdout!,
     stderr: child.stderr!,
     done: promise,
-    cancel: () => child.kill('SIGTERM'),
+    cancel: () => terminateTree(child.pid),
   }
 }

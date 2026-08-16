@@ -124,6 +124,9 @@ async function waitForHttp(url: string, timeoutMs = 60_000): Promise<boolean> {
   return false
 }
 
+/** dsh 启动期致命错误的 stderr 标记（installFailLoud 输出，随后 exit 1） */
+const DSK_FATAL_RE = /dsh: fatal load failure: (.+)/
+
 /** 启动 dsh web：spawn 独立进程组，解析端口，轮询就绪 */
 export function startHarness(opts: {
   profile?: string
@@ -131,6 +134,8 @@ export function startHarness(opts: {
   port?: number
   onLog?: (line: string) => void
   readyTimeoutMs?: number
+  /** 子进程 spawn 后的同步回调（供调用方追踪 in-flight 进程，退出清理用） */
+  onSpawn?: (proc: ChildProcess) => void
 }): Promise<HarnessHandle> {
   const exec = resolveDshExec()
   if (!exec) return Promise.reject(new Error('未找到 dsh 可执行文件（请先安装 DeepSeek Harness）'))
@@ -145,6 +150,7 @@ export function startHarness(opts: {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   })
+  opts.onSpawn?.(proc)
 
   return new Promise((resolve, reject) => {
     let url: string | null = null
@@ -162,6 +168,15 @@ export function startHarness(opts: {
       for (const line of buf.toString().split('\n')) {
         if (!line.trim()) continue
         opts.onLog?.(line)
+        // dsh 启动期致命错误：立即失败并携带原因，不等 180s 轮询超时
+        const fatal = line.match(DSK_FATAL_RE)
+        if (fatal && !settled) {
+          settled = true
+          clearTimeout(timer)
+          void stopTree(proc)
+          reject(new Error(`dsh 启动失败：${fatal[1].slice(0, 400)}`))
+          return
+        }
         url ??= parseHarnessUrl(line)
         // 只允许一个 HTTP 轮询在飞，避免每个日志块都新起轮询
         if (url && !settled && !polling) {
@@ -206,8 +221,22 @@ function taskkillTree(pid: number, force: boolean): void {
   }
 }
 
+/** 终止单个进程树：Windows taskkill /T；POSIX SIGTERM（供插件取消/退出清理复用） */
+export function terminateTree(pid: number | undefined): void {
+  if (pid === undefined) return
+  if (process.platform === 'win32') {
+    taskkillTree(pid, false)
+  } else {
+    try {
+      process.kill(pid, 'SIGTERM')
+    } catch {
+      /* 已退出 */
+    }
+  }
+}
+
 /** 终止整个进程树：POSIX SIGTERM 进程组（detached 负 pid）；Windows taskkill /T → 2s 后兜底强杀 */
-async function stopTree(proc: ChildProcess): Promise<void> {
+export async function stopTree(proc: ChildProcess): Promise<void> {
   if (proc.pid === undefined || proc.exitCode !== null || proc.signalCode !== null) return
   if (process.platform === 'win32') {
     taskkillTree(proc.pid, false)

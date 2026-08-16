@@ -86,6 +86,25 @@ jobs:
       - name: Bundle runtime (Node + DSH, win32)
         run: node scripts/bundle-runtime.mjs
 
+      - name: Prepare smoke profile (empty web profile for CI)
+        shell: bash
+        run: |
+          mkdir -p "$USERPROFILE/.dsh/profiles/web"
+          printf '{"dependencies":{},"dsh":{"profile":{"bundles":[]}}}' > "$USERPROFILE/.dsh/profiles/web/package.json"
+
+      - name: Smoke test (Electron renderer + tabs, no harness)
+        # 主帧加载失败（如非法 file:// URL）会让 smoke 非零退出——Windows 渲染回归的守门员
+        timeout-minutes: 5
+        run: npx electron . --smoke
+
+      - name: Upload main log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-main-log
+          path: ${{ env.USERPROFILE }}/.dsh-desktop-hub/logs/*.log
+          if-no-files-found: ignore
+
       - name: Package NSIS installer
         # 显式 --x64：CLI 平台参数下 arch 以 CLI 为准，不依赖 runner 架构
         run: npx electron-builder --win nsis --x64 --publish never

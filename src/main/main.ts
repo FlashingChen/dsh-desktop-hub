@@ -1,6 +1,7 @@
 // Electron 主进程：窗口安全边界 + IPC（来源校验）+ harness 生命周期 + 插件/MCP/Skills 管理
+import { type ChildProcess } from 'node:child_process'
 import { app, BrowserWindow, ipcMain, Menu, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, relative, isAbsolute, basename } from 'node:path'
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -10,6 +11,7 @@ import {
   dshHome,
   listProfiles,
   runtimePathEnv,
+  stopTree,
   type HarnessHandle,
   type DshProfile,
 } from '../core/harness.js'
@@ -42,7 +44,9 @@ import { wireSmoke } from './smoke.js'
 const APP_NAME = 'DSH Desktop Hub'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const RENDERER_HTML = join(__dirname, '..', 'renderer', 'index.html')
-const RENDERER_URL = `file://${RENDERER_HTML}`
+// 必须用 pathToFileURL：Windows 下 `file://${path}` 会产生 file://C:\... 的非法 URL（冒号在 host 位+反斜杠），
+// 主帧 did-fail-load ERR_INVALID_URL → 白屏。pathToFileURL 输出 file:///C:/... 跨平台合法。
+const RENDERER_URL = pathToFileURL(RENDERER_HTML).href
 const ARTIFACTS_DIR = join(__dirname, '..', '..', 'artifacts')
 
 const argv = process.argv
@@ -63,7 +67,26 @@ let harness: HarnessHandle | null = null
 let restarting = false
 let stoppingHarness = false
 let autoRestartTimer: NodeJS.Timeout | null = null
-let autoRestartAttempts = 0
+/** 启动中（尚未就绪）的 dsh 子进程：退出时若仍在途则必须清理，防孤儿 */
+let startingProc: ChildProcess | null = null
+/** 自动重启墙钟限流：10 分钟内最多 8 次（防 crash-after-ready 死循环绕过计数） */
+const autoRestartTimes: number[] = []
+/** dsh 子进程最近输出（环形），失败时拼进 UI 错误信息 */
+const recentDshLog: string[] = []
+
+function canAutoRestart(): boolean {
+  const now = Date.now()
+  const windowMs = 10 * 60_000
+  const recent = autoRestartTimes.filter((t) => now - t < windowMs)
+  autoRestartTimes.length = 0
+  autoRestartTimes.push(...recent)
+  if (recent.length >= 8) {
+    log(`harness: 10 分钟内自动重启已达 ${recent.length} 次，停止自动重启（可手动重启）`)
+    return false
+  }
+  autoRestartTimes.push(now)
+  return true
+}
 
 /** M2 管理的目标 profile（与 harness 启动一致）；M5 将支持切换 */
 const ACTIVE_PROFILE = 'web'
@@ -528,12 +551,16 @@ function createSkeletonWindow(): void {
   })
 }
 
-// ---- harness 生命周期监控（P2-11）：意外退出 → 通知 UI + 自动重启 ----
+// ---- harness 生命周期监控（P2-11）：意外退出 → 通知 UI + 自动重启（墙钟限流） ----
 function watchHarness(proc: HarnessHandle['proc']): void {
   proc.on('exit', (code, signal) => {
     if (restarting || stoppingHarness || autoRestartTimer) return
     log(`harness: 意外退出（code=${code}, signal=${signal ?? ''}），自动重启`)
     harness = null
+    if (!canAutoRestart()) {
+      sendHarnessStatus({ state: 'exited', code, signal, error: 'Harness 反复异常退出，已停止自动重启；请点击重启按钮' })
+      return
+    }
     sendHarnessStatus({ state: 'exited', code, signal, error: 'Harness 意外退出，正在自动重启…' })
     void startHarnessAndWatch().catch((err) => {
       scheduleAutoRestart(`意外退出后重启失败（${err instanceof Error ? err.message : String(err)}）`)
@@ -561,17 +588,29 @@ async function startHarnessAndWatch(): Promise<void> {
     const next = await startHarness({
       profile: ACTIVE_PROFILE,
       readyTimeoutMs: 180_000,
-      onLog: (line) => log(`dsh: ${line}`),
+      onLog: (line) => {
+        log(`dsh: ${line}`)
+        recentDshLog.push(line)
+        if (recentDshLog.length > 10) recentDshLog.shift()
+      },
+      onSpawn: (proc) => {
+        startingProc = proc
+        log(`harness: 子进程已启动（pid=${proc.pid}）`)
+      },
     })
     harness = next
-    autoRestartAttempts = 0
+    startingProc = null
     watchHarness(next.proc)
     log(`harness: 就绪 ${next.url}`)
     sendHarnessStatus({ state: 'ready', url: next.url })
   } catch (err) {
+    startingProc = null
     const msg = err instanceof Error ? err.message : String(err)
-    log(`harness: 启动失败 —— ${msg}`)
-    sendHarnessStatus({ state: 'exited', code: -1, error: msg })
+    // 附上 dsh 最近输出（截断），让 UI 直接显示真实失败原因而不是干等 180s 或笼统报错
+    const tail = recentDshLog.slice(-10).join('\n').slice(0, 800)
+    const withTail = tail ? `${msg}\n--- dsh 最近输出 ---\n${tail}` : msg
+    log(`harness: 启动失败 —— ${withTail}`)
+    sendHarnessStatus({ state: 'exited', code: -1, error: withTail })
     throw err
   }
 }
@@ -584,13 +623,10 @@ function startHarnessBackground(): void {
 }
 
 function scheduleAutoRestart(reason: string): void {
-  if (autoRestartAttempts >= 5) {
-    log(`harness: 自动重试已达上限（${autoRestartAttempts} 次），等待手动重启`)
-    return
-  }
-  autoRestartAttempts += 1
-  const delay = Math.min(3_000 * 2 ** (autoRestartAttempts - 1), 60_000)
-  log(`harness: ${reason}（${autoRestartAttempts}/5），${Math.round(delay / 1000)}s 后自动重试`)
+  if (!canAutoRestart()) return
+  const attempt = autoRestartTimes.length
+  const delay = Math.min(3_000 * 2 ** (attempt - 1), 60_000)
+  log(`harness: ${reason}（${attempt}/8 次/10 分钟），${Math.round(delay / 1000)}s 后自动重试`)
   clearTimeout(autoRestartTimer ?? undefined)
   autoRestartTimer = setTimeout(() => {
     autoRestartTimer = null
@@ -605,6 +641,14 @@ function scheduleAutoRestart(reason: string): void {
 async function stopHarness(): Promise<void> {
   stoppingHarness = true
   try {
+    if (startingProc) {
+      try {
+        await stopTree(startingProc)
+      } catch {
+        /* 已退出 */
+      }
+      startingProc = null
+    }
     if (harness) await harness.stop()
   } finally {
     harness = null
@@ -699,10 +743,23 @@ app.on('window-all-closed', () => {
 
 let quitting = false
 app.on('will-quit', (e) => {
-  if (harness && !quitting) {
+  clearTimeout(autoRestartTimer ?? undefined)
+  autoRestartTimer = null
+  // 启动在途的子进程也要清理（detached 的 dsh web 无主存活会占用 profile 与 watcher）
+  if ((harness || startingProc) && !quitting) {
     quitting = true
-    clearTimeout(autoRestartTimer ?? undefined)
     e.preventDefault()
-    void stopHarness().finally(() => app.quit())
+    void (async () => {
+      if (startingProc) {
+        try {
+          await stopTree(startingProc)
+        } catch {
+          /* 已退出 */
+        }
+        startingProc = null
+      }
+      if (harness) await stopHarness()
+      app.quit()
+    })()
   }
 })

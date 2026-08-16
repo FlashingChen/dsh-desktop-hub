@@ -11,7 +11,13 @@ let logPath: string | null = null
 export function initLog(): string {
   if (logPath) return logPath
   const dir = join(homedir(), '.dsh-desktop-hub', 'logs')
-  mkdirSync(dir, { recursive: true })
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch (err) {
+    // 日志目录不可建（只读/重定向 home/磁盘满）绝不让主进程因此无法启动：仅 stderr 提示
+    console.error(`[log] 日志目录创建失败: ${String(err)}`)
+    return ''
+  }
   logPath = join(dir, `main-${Date.now()}.log`)
   log(`==== DSH Desktop Hub 启动（pid=${process.pid}, platform=${process.platform}, arch=${process.arch}, electron=${process.versions.electron ?? '?'}, node=${process.versions.node ?? '?'}）====`)
   return logPath
