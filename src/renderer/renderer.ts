@@ -783,8 +783,19 @@ async function restartHarness(): Promise<void> {
 }
 
 if (api) {
-  api.harness.onFrameLoaded((url) => setHarnessStatusText({ state: 'ready', url }))
-  api.harness.onStatus(setHarnessStatusText)
+  api.harness.onFrameLoaded((url) => {
+    setHarnessStatusText({ state: 'ready', url })
+    const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
+    if (frame && frame.src !== url) frame.src = url
+  })
+  // 窗口先行：收到 ready 时必须把 iframe 挂到新 URL（首次 mount 时 harness 可能未就绪）
+  api.harness.onStatus((status) => {
+    setHarnessStatusText(status)
+    if (status.state === 'ready' && status.url) {
+      const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
+      if (frame && frame.src !== status.url) frame.src = status.url
+    }
+  })
   document.getElementById('harness-restart')?.addEventListener('click', () => void restartHarness())
   void refreshPlugins()
   void refreshMcpServers()

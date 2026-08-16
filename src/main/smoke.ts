@@ -90,9 +90,12 @@ export function wireSmoke(ctx: SmokeContext): void {
     app.exit(1)
     return
   }
-  win.webContents.on('did-fail-load', (_e, code, desc) => {
-    console.error(`SMOKE FAIL: load failed (${code} ${desc})`)
-    app.exit(1)
+  win.webContents.on('did-fail-load', (_e, code, desc, _url, isMainFrame) => {
+    // 子帧（harness iframe）失败/中止（-3）在重启旧进程时是正常现象，容忍，由后续状态断言把关
+    if (isMainFrame) {
+      console.error(`SMOKE FAIL: main frame load failed (${code} ${desc})`)
+      app.exit(1)
+    }
   })
 
   if (!ctx.harnessSmoke) {
