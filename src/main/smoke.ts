@@ -216,6 +216,35 @@ export function wireSmoke(ctx: SmokeContext): void {
         `document.getElementById('harness-status').textContent`,
       )) as string
       console.log(`SMOKE OK: harness 内嵌成功（iframe ${src}，状态「${finalStatus}」）`)
+      // P1 修复：重启 Harness 后 iframe 必须重挂载到新 URL（--port 0 每次随机端口）
+      const oldSrc = src
+      await win.webContents.executeJavaScript(`document.getElementById('harness-restart').click()`)
+      const remounted = await waitFor(
+        win,
+        async () => {
+          const current = (await win.webContents.executeJavaScript(`document.getElementById('harness-frame').src`)) as string
+          return current !== oldSrc && current.startsWith('http://127.0.0.1:')
+        },
+        30_000,
+      )
+      if (!remounted) {
+        console.error(`SMOKE FAIL: restart 后 iframe 未重挂载（旧 ${oldSrc}）${JSON.stringify(await snapshot(win))}`)
+        app.exit(1)
+      }
+      const newSrc = (await win.webContents.executeJavaScript(`document.getElementById('harness-frame').src`)) as string
+      const reconnected = await waitFor(
+        win,
+        async () => {
+          const status = (await win.webContents.executeJavaScript(`document.getElementById('harness-status').textContent`)) as string
+          return status.includes('已连接')
+        },
+        15_000,
+      )
+      if (!reconnected) {
+        console.error(`SMOKE FAIL: 重启后状态未恢复已连接 ${JSON.stringify(await snapshot(win))}`)
+        app.exit(1)
+      }
+      console.log(`SMOKE OK: harness 重启后 iframe 重挂载（${oldSrc} → ${newSrc}，状态已连接）`)
       app.exit(0)
     })()
   })

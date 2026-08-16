@@ -263,7 +263,7 @@ dsh plugin --profile <name> update
 | **Harness（主）** | 官方 Web UI（会话、模型、工具） | iframe 内嵌 loopback Web UI；`harness:frame-loaded` 状态推送 |
 | **Plugin** | profile「web」插件管理 | 列表（名称 / 来源：内置组合包、第三方组合包、普通依赖 / spec）；安装框支持 **npm 包名、`github:owner/repo#commit`、本地路径，并已升级为支持直接粘贴 GitHub 链接**（spec 透传给 `dsh plugin --profile web add`）；对 `dsh-routing-suite` 这类无 `package.json/dsh.bundle` 的聚合仓库拒绝直装，改为显示 injector/preset 的真实识别状态；移除（第三方包）、更新；写操作前确认，变更后提示「重启 harness 生效」 |
 | **MCP** | JSON → YAML 转换器 + 服务器管理 | 粘贴 Claude Code / Cursor 风格 JSON → 转换预览（含警告：`type: sse` 仅按 HTTP 处理、非法 serverName 跳过）→ 确认后写入 profile「web」的 `cordis.patch.yml`（**写入前自动 `.bak-<ts>` 备份**，原子写，官方 HMR 热生效）；显示现有服务器数 |
-| **Skills** | skills 目录管理 | 按 rank 100-600 扫描（项目 `.dsh`/`.agents` → 自定义 → 用户 `~/.dsh/skills` / `~/.agents/skills` → bundled）；列表按来源标注，同名低 rank 生效、高 rank 标「被遮蔽」；**新建**（kebab-case 名称校验 + 描述 + 正文表单，落盘 `~/.dsh/skills/<name>/SKILL.md`）；模型可见 / 用户可见切换（写 frontmatter `disable-model-invocation` / `user-invocable`），改动即时生效 |
+| **Skills** | skills 目录管理 | 按 DSH rank 规则扫描（用户 `~/.dsh/skills` / `~/.agents/skills` + `$DSH_BUNDLED_SKILL_DIR` 存在时的随包根，rank 400/500/600）；列表按来源标注，同名低 rank 生效、高 rank 标「被遮蔽」；可见性切换仅对用户级生效（项目/自定义/随包只读展示）；**新建**（kebab-case 名称校验 + 描述 + 正文表单，落盘 `~/.dsh/skills/<name>/SKILL.md`）；模型可见 / 用户可见切换（写 frontmatter `disable-model-invocation` / `user-invocable`），改动即时生效 |
 | **Settings（壳级）** | API Key、模型、profile、更新 | 本期未实现（预留；API Key/模型配置复用官方 Web UI 内能力） |
 | **第四系统（占位）** | 预留入口 | 本期未实现（§0 原始需求：暂不做） |
 
@@ -288,7 +288,7 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四�
 | 插件操作通道 | 主进程 spawn `dsh plugin --profile web add|remove|update`（进程树托管、输出流回 UI、支持取消） | 与 anywhere-labs `desktopPnpm.runPlugin()` 同构；`dsh` 是 bundle reconcile 的权威 |
 | 配置写入 | 直接编辑 `$DSH_HOME/profiles/web/cordis.patch.yml`（MCP 行），原子写（tmp + rename）+ `.bak-<ts>` 备份，利用官方 HMR 热生效 | 配置层变更无需重启；bundle 安装仍走 `dsh plugin` + 重启 |
 | 转换器 | 主进程纯逻辑模块（`src/core/mcp.ts`，`yaml` 库）：JSON 解析/校验 → 映射表 → YAML 插件行；兼容 `url`/`baseUrl`，`type: sse` 仅警告 | 可单测；无网络依赖 |
-| Skills 管理 | `src/core/skills.ts`：rank 100-600 多根扫描 + frontmatter 解析 + 创建 + 可见性切换（与官方检测机制同构，§2.2） | 改动即时生效，天然适合 UI 管理 |
+| Skills 管理 | `src/core/skills.ts`：用户级（rank 400/500）+ 随包（`$DSH_BUNDLED_SKILL_DIR`，rank 600）多根扫描 + frontmatter 解析 + 创建 + 可见性切换（与官方检测机制同构，§2.2；项目/自定义根由 DSH 在 workspace 内管理，壳层暂不扫描） | 改动即时生效，天然适合 UI 管理 |
 | 状态文件 | 暂无（`ACTIVE_PROFILE` 常量 = `'web'`；profile 切换为后续工作） | 当前 MVP 单 profile 起步 |
 
 ### 4.2 进程与生命周期
@@ -327,9 +327,9 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四�
 |---|---|---|
 | M0 壳骨架 | Electron + TypeScript 三端工程（main/preload/renderer）；四 Tab 契约；`typecheck` / `test` / `verify` 脚本 | ✅ 已完成：`npm run verify` 全绿；`npm run smoke` 四 Tab DOM 断言（截屏 `artifacts/m0-smoke.png`） |
 | M1 Harness 启动与加载 | `dsh` / `$DSH_HOME` / profiles 检测；spawn `dsh web`（`--port 0`，detached 进程组）；轮询 HTTP 200；Harness Tab iframe 内嵌官方 Web UI（`did-frame-navigate` 状态推送）；退出清理进程树 | ✅ 已完成：`npm run verify:m1`（真实启动 → HTTP 200 → 优雅停止 → 端口关闭无孤儿）；`npm run smoke:harness`（iframe 挂载 + 状态「已连接」，截屏 `artifacts/m1-harness.png`） |
-| M2 Plugin Tab | profile 发现 + 插件列表（`dsh.profile.bundles` ∪ dependencies）；封装 `dsh plugin --profile web add|remove|update`（支持 npm 包名 / `github:owner/repo#commit` / 本地路径 / 直接粘贴 GitHub 链接） | ✅ 已完成：单测 6 例（分类/排序/命令形态/链接归一化/聚合仓库拦截/退出码+取消）；冒烟断言真实 web profile ≥4 项含 dsh-base |
-| M3 MCP Tab | JSON→YAML 转换器 + profile `cordis.patch.yml` 事务读写（备份/回滚）+ 服务器列表 | ✅ 已完成：单测 11 例（混合输入/sse 警告/格式拒绝/YAML 同构/提取/替换/编辑/删除保留注释/空 patch 新建/备份事务）；UI 支持读取、编辑、删除已有 MCP 行 |
-| M4 Skills Tab | rank 100-600 目录扫描；SKILL.md/扁平 md 解析 + frontmatter；新建（kebab-case 校验）；模型/用户可见性切换 | ✅ 已完成：单测 4 例（rank 合并/shadowed/往返一致/创建校验/可见性切换）；冒烟真实数据 huashu-design + media-use |
+| M2 Plugin Tab | profile 发现 + 插件列表（`dsh.profile.bundles` ∪ dependencies）；封装 `dsh plugin --profile web add|remove|update`（支持 npm 包名 / `github:owner/repo#commit` / 本地路径 / 直接粘贴 GitHub 链接） | ✅ 已完成：单测 9 例（分类/排序/命令形态/链接归一化/聚合仓库拦截/退出码+取消/幂等激活行清理）；冒烟断言真实 web profile ≥4 项含 dsh-base |
+| M3 MCP Tab | JSON→YAML 转换器 + profile `cordis.patch.yml` 事务读写（备份/回滚）+ 服务器列表 | ✅ 已完成：单测 18 例（混合输入/sse 警告/格式拒绝/YAML 同构/提取/替换/编辑/删除保留注释/空 patch 新建/备份事务/`!!js` 行级保真）；UI 支持读取、编辑、删除已有 MCP 行 |
+| M4 Skills Tab | rank 400-600 目录扫描（用户级 + 随包）；SKILL.md/扁平 md 解析 + frontmatter；新建（kebab-case 校验）；模型/用户可见性切换 | ✅ 已完成：单测 13 例（rank 合并/shadowed/custom+bundled 根/往返一致/创建校验/可见性切换/扁平名回退/zip 导入与穿越拒绝）；冒烟真实数据 huashu-design + media-use |
 | M5 桌面整合与打包 | 四 Tab 主窗口整合（Harness iframe 内嵌官方 Web UI）+ electron-builder 出 DMG | ✅ 已完成：默认模式＝启动 harness + 四 Tab 壳；`release/DSH-Desktop-Hub-0.1.0-arm64.dmg` 产物存在；打包 app 在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）下用捆绑运行时启动，HTTP 200；TERM 退出无孤儿 |
 
 > 后续演进（未在本期范围）：Settings Tab（API Key/模型/更新）、profile 切换、插件 `allowBuilds` 授权向导、MCP/Skills 文件导入、Windows/Linux 打包、自动更新 —— 详见 plan.md「下一步」。

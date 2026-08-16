@@ -132,6 +132,23 @@ export function deactivatePlugin(patchText: string, name: string): string {
   return parsed.doc.toString()
 }
 
+/** 幂等停用：patch 中存在该插件的激活行则移除，否则原样返回（不 throw）。
+ * 供「dsh plugin remove 成功后清理残留激活行」使用——避免重启后引用不存在的插件。 */
+export function deactivatePluginIfActive(patchText: string, name: string): string {
+  const parsed = parsePluginPatch(patchText)
+  let removed = 0
+  for (const sequence of insertSequences(parsed.entries)) {
+    const keep = sequence.items.filter((row) => {
+      const matches = patchRowField(row, 'name') === name
+      if (matches) removed += 1
+      return !matches
+    })
+    sequence.items.length = 0
+    sequence.items.push(...keep)
+  }
+  return removed === 0 ? patchText : parsed.doc.toString()
+}
+
 /** 构造 dsh plugin 子命令 argv（纯函数，便于单测） */
 export function buildPluginCommand(
   profile: string,

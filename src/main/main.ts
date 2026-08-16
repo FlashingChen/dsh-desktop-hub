@@ -15,6 +15,7 @@ import {
 import {
   activatePlugin,
   deactivatePlugin,
+  deactivatePluginIfActive,
   isPluginActive,
   listPlugins,
   runPluginOp,
@@ -104,7 +105,10 @@ function appendCapped(buf: string, chunk: string): string {
   return buf.length > OP_OUTPUT_CAP ? buf.slice(buf.length - OP_OUTPUT_CAP) : buf
 }
 
-function streamPluginOp(action: PluginOpAction, args: string[]): Promise<{ ok: boolean; token?: string; error?: string }> {
+function streamPluginOp(
+  action: PluginOpAction,
+  args: string[],
+): Promise<{ ok: boolean; token?: string; error?: string; exitCode?: number | null }> {
   const exec = resolveDshExec()
   if (!exec) return Promise.resolve({ ok: false, error: '未找到 dsh 可执行文件' })
   return serializeMutation(async () => {
@@ -118,25 +122,32 @@ function streamPluginOp(action: PluginOpAction, args: string[]): Promise<{ ok: b
       env: runtimePathEnv(),
     })
     activeOps.set(token, op)
-    const wc = shellWebContents()
-    if (wc) wc.send(IPC.pluginOpChunk, token, `dsh plugin --profile ${ACTIVE_PROFILE} ${action} ${args.join(' ')}\n`)
+    // 每次推送取最新 webContents；窗口可能在长操作期间销毁，send 需防御（P3）
+    const sendToShell = (channel: string, ...payload: unknown[]): void => {
+      try {
+        shellWebContents()?.send(channel, ...payload)
+      } catch {
+        /* 窗口已销毁：忽略推送，操作结果仍由有界缓冲保存 */
+      }
+    }
+    sendToShell(IPC.pluginOpChunk, token, `dsh plugin --profile ${ACTIVE_PROFILE} ${action} ${args.join(' ')}\n`)
     let output = ''
     const onChunk = (buf: Buffer): void => {
       const text = String(buf)
       output = appendCapped(output, text)
-      wc?.send(IPC.pluginOpChunk, token, text)
+      sendToShell(IPC.pluginOpChunk, token, text)
     }
     op.stdout.on('data', onChunk)
     op.stderr.on('data', onChunk)
     const res = await op.done
     activeOps.delete(token)
-    shellWebContents()?.send(IPC.pluginOpDone, token, {
+    sendToShell(IPC.pluginOpDone, token, {
       token,
       exitCode: res.exitCode,
       signal: res.signal,
       output,
     })
-    return { ok: true, token }
+    return { ok: true, token, exitCode: res.exitCode }
   })
 }
 
@@ -262,7 +273,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle(IPC.pluginsStartOp, (event, action: unknown, args: unknown) => {
+  ipcMain.handle(IPC.pluginsStartOp, async (event, action: unknown, args: unknown) => {
     assertRendererSender(event)
     if (action !== 'add' && action !== 'remove' && action !== 'update') {
       return { ok: false as const, error: 'action 无效' }
@@ -271,7 +282,22 @@ function registerIpc(): void {
       return { ok: false as const, error: 'args 无效' }
     }
     if (action === 'add' && args.length !== 1) return { ok: false as const, error: '安装需要 spec 参数' }
-    return streamPluginOp(action, args as string[])
+    const res = await streamPluginOp(action, args as string[])
+    // remove 成功后清理残留的 patch 激活行（P1：避免重启后引用不存在的插件）
+    if (action === 'remove' && res.ok && res.exitCode === 0) {
+      try {
+        await serializeMutation(() => {
+          const profile = activeProfile()
+          if (!profile) return
+          const patch = readPatch(profile.dir)
+          const cleaned = deactivatePluginIfActive(patch, (args as string[])[0])
+          if (cleaned !== patch) writePluginPatch(profile, cleaned)
+        })
+      } catch (err) {
+        console.error(`remove 后 patch 激活行清理失败: ${(err as Error).message}`)
+      }
+    }
+    return res
   })
 
   ipcMain.handle(IPC.pluginsCancelOp, (event, token: unknown) => {
@@ -363,7 +389,9 @@ function registerIpc(): void {
   ipcMain.handle(IPC.skillsList, (event) => {
     assertRendererSender(event)
     try {
-      return { ok: true as const, skills: scanSkills({ dshHome: dshHome() }) }
+      // 随包 skills：官方 Config.bundledSkillDir 默认取 $DSH_BUNDLED_SKILL_DIR，存在才扫描
+      const bundledDir = process.env.DSH_BUNDLED_SKILL_DIR || undefined
+      return { ok: true as const, skills: scanSkills({ dshHome: dshHome(), bundledDir }) }
     } catch (err) {
       return { ok: false as const, error: (err as Error).message, skills: [] }
     }

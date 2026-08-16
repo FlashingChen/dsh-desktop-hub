@@ -9,7 +9,7 @@ import {
   renameSync,
   mkdtempSync,
 } from 'node:fs'
-import { join, dirname, resolve } from 'node:path'
+import { join, dirname, resolve, basename } from 'node:path'
 import { parseDocument, stringify } from 'yaml'
 import AdmZip from 'adm-zip'
 
@@ -216,6 +216,14 @@ export function createSkill(opts: {
   return file
 }
 
+/** frontmatter 缺 name 时的回退名：bundle（SKILL.md）取目录名，扁平（<name>.md）取文件名 */
+function fallbackSkillName(path: string): string {
+  const base = basename(path)
+  if (base === 'SKILL.md') return dirname(path).split('/').pop() ?? ''
+  if (base.endsWith('.md')) return base.slice(0, -3)
+  return ''
+}
+
 /** 切换可见性并回写文件（model 可见 = 移除 disable-model-invocation）
  * 只修改 frontmatter 的目标字段（YAML AST 级），保留其余元数据与正文原样。 */
 export function setInvocation(path: string, kind: 'model' | 'user', value: boolean): string {
@@ -225,8 +233,7 @@ export function setInvocation(path: string, kind: 'model' | 'user', value: boole
   const doc = parseDocument(m[1])
   if (doc.errors.length > 0) throw new Error(`frontmatter 解析失败: ${doc.errors[0].message}`)
   const meta = (doc.toJS() ?? {}) as Record<string, unknown>
-  const name =
-    typeof meta.name === 'string' && KEBAB.test(meta.name) ? meta.name : dirname(path).split('/').pop() ?? ''
+  const name = typeof meta.name === 'string' && KEBAB.test(meta.name) ? meta.name : fallbackSkillName(path)
   if (!name) throw new Error('无法确定 skill 名称')
   if (typeof meta.name !== 'string') doc.setIn(['name'], name)
   const key = kind === 'model' ? 'disable-model-invocation' : 'user-invocable'

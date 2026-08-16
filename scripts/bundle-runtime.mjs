@@ -2,6 +2,7 @@
 // 目标：打包应用不依赖系统 Node/dsh/pnpm（PRD 核心承诺：双击即用）
 // 可复现性（P2-13）：Node tarball 校验官方 SHA-256；dsh/pnpm 精确版本；
 // resources/dsh-runtime/package.json + package-lock.json 提交进仓库，安装走 npm ci。
+// 注意：本文件必须保持纯 JS（node 直接执行，不得含 TS 类型标注）。
 import { execFileSync } from 'node:child_process'
 import { createWriteStream, existsSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -15,7 +16,11 @@ const NODE_VER = 'v24.10.0'
 const DSH_VERSION = '0.1.0-rc.6'
 const PNPM_VERSION = '11.22.0'
 const ARCH = process.arch === 'arm64' ? 'arm64' : 'x64'
-const PLAT = process.platform === 'darwin' ? 'darwin' : 'linux' // Windows 打包后续扩展
+if (process.platform === 'win32') {
+  // 不能静默选 linux tarball（旧行为会产出错误平台的运行时）
+  throw new Error('bundle-runtime 暂不支持 Windows 打包（darwin/linux 之外需显式实现后再启用）')
+}
+const PLAT = process.platform === 'darwin' ? 'darwin' : 'linux'
 const TARBALL = `node-${NODE_VER}-${PLAT}-${ARCH}.tar.gz`
 const URL = `https://nodejs.org/dist/${NODE_VER}/${TARBALL}`
 const SHASUMS_URL = `https://nodejs.org/dist/${NODE_VER}/SHASUMS256.txt`
