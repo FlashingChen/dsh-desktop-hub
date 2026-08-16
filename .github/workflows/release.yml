@@ -38,7 +38,7 @@ jobs:
         run: node scripts/bundle-runtime.mjs
 
       - name: Package DMG
-        run: npx electron-builder --mac dmg
+        run: npx electron-builder --mac dmg --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
