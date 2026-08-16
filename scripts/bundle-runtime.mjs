@@ -27,7 +27,7 @@ mkdirSync(nodeDir, { recursive: true })
 
 // 1) 下载并校验 Node 官方 SHA-256（P2-13：供应链校验；已存在的 tarball 也强制复核）
 const tarPath = join(nodeDir, TARBALL)
-async function verifyNodeSha256(file: string): Promise<void> {
+async function verifyNodeSha256(file) {
   const sums = await fetch(SHASUMS_URL)
   if (!sums.ok) throw new Error(`SHASUMS 下载失败: ${sums.status}`)
   const sumsText = await sums.text()
