@@ -1,6 +1,10 @@
-# DSH Desktop
+# DSH Desktop Hub
 
-DSH Desktop — DeepSeek Harness 桌面管理控制台（Electron + TypeScript）。
+![GitHub release](https://img.shields.io/github/v/release/FlashingChen/dsh-desktop-hub)
+![License](https://img.shields.io/github/license/FlashingChen/dsh-desktop-hub)
+![CI](https://github.com/FlashingChen/dsh-desktop-hub/actions/workflows/release.yml/badge.svg)
+
+DSH Desktop Hub — DeepSeek Harness 桌面管理控制台（Electron + TypeScript）。
 
 双击启动即进入 DSH harness 对话界面，无需安装 Node.js / pnpm 等任何运行环境（打包内置 Node v24.10.0 + `@deepseek-ai/dsh@0.1.0-rc.6`）；内置多 Tab 管理系统：**Harness（官方 Web UI）/ Plugin / MCP / Skills**。
 
@@ -112,6 +116,24 @@ npx electron-builder                   # 3. 读 electron-builder.yml → release
 - `bundle-runtime.mjs`：下载官方 Node v24.10.0（darwin/linux × arm64/x64）到 `resources/node`，用捆绑 npm 以 `--ignore-scripts` 安装锁定版本 `@deepseek-ai/dsh@0.1.0-rc.6` 到 `resources/dsh-runtime`。
 - `electron-builder.yml`：`files` 含 `dist/**/*` + `resources/**/*`；`asarUnpack` 展开 `resources/dsh-runtime` 与 `resources/node`（`resolveDshExec` 兼容 `app.asar.unpacked/resources` 布局）；mac 目标 DMG（arm64），`identity: null`（不签名）。
 - 打包后的应用在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）的环境下可用捆绑运行时启动。
+
+## Release
+
+推送 `v*` tag 后，GitHub Actions 会自动完成：
+
+1. `npm ci` 安装依赖
+2. `npm run verify`：类型检查 + 构建 + 测试
+3. `node scripts/bundle-runtime.mjs`：生成捆绑运行时（Node + DSH）
+4. `npx electron-builder --mac dmg`：打包 macOS arm64 DMG
+5. 创建 GitHub Release 并上传 `.dmg` / `.dmg.blockmap`
+
+```sh
+git push origin main
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+> 当前仓库 `resources/` 已被 `.gitignore` 忽略；CI 会通过 `bundle-runtime.mjs` 在打包时重新生成，不需要把大文件提交进仓库。
 
 ## 验证基线
 
