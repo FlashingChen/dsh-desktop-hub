@@ -9,9 +9,8 @@ files:
   - resources/**/*
   - '!resources/node/*.zip'
   - '!**/*.map'
-asarUnpack:
-  - resources/dsh-runtime/**/*
-  - resources/node/**/*
+# asar: false —— 去掉 app.asar.unpacked 层（-29 字符），NSIS 安装路径深度彻底低于 260 上限
+asar: false
 mac:
   category: public.app-category.developer-tools
   icon: build/icon.png

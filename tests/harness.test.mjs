@@ -88,7 +88,7 @@ test('runtimePathEnv 在捆绑 runtime 存在时把 node/bin 与 .bin 加入 PAT
   assert.ok(env && typeof env.PATH === 'string', '应有 PATH')
   if (exec?.node) {
     assert.ok(env.PATH.includes(dirname(exec.node)), `PATH 应包含捆绑 node/bin: ${env.PATH}`)
-    assert.ok(env.PATH.includes(join(root, 'resources', 'dsh-runtime', 'node_modules', '.bin')), `PATH 应包含 dsh-runtime .bin: ${env.PATH}`)
+    assert.ok(env.PATH.includes(join(root, 'resources', 'rt', 'node_modules', '.bin')), `PATH 应包含运行时 .bin: ${env.PATH}`)
   }
   // 不破坏原有 PATH 内容
   assert.ok(env.PATH.includes(process.env.PATH ?? ''), '原 PATH 应保留')

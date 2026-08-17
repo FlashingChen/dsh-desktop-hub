@@ -25,14 +25,25 @@ export interface DshExec {
   node?: string
 }
 
+/** 运行时目录名（缩短以压低 NSIS 安装路径深度；改动须与 scripts/bundle-runtime.mjs 同步） */
+const RUNTIME_DIRNAME = 'rt'
+const NODE_DIRNAME = 'nd'
+
 /** 解析 dsh 执行方式：优先打包内 runtime，回退系统 PATH */
 export function resolveDshExec(): DshExec | null {
   const base = process.resourcesPath ?? join(process.cwd(), 'resources')
-  const roots = process.resourcesPath ? [join(base, 'app.asar.unpacked', 'resources'), base] : [base]
+  // 打包布局（asar:false）：{resources}/app/resources/{rt,nd}；兼容旧 asar 布局与开发模式直下
+  const roots = [
+    ...(process.resourcesPath
+      ? [join(base, 'app', 'resources'), join(base, 'app.asar.unpacked', 'resources'), base]
+      : [base]),
+  ]
   for (const root of roots) {
-    const runtimeBin = join(root, 'dsh-runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    const runtimeBin = join(root, RUNTIME_DIRNAME, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
     // 布局差异：darwin/linux tar.gz → bin/node；Windows zip → 根 node.exe
-    const nodeBin = process.platform === 'win32' ? join(root, 'node', 'node.exe') : join(root, 'node', 'bin', 'node')
+    const nodeBin = process.platform === 'win32'
+      ? join(root, NODE_DIRNAME, 'node.exe')
+      : join(root, NODE_DIRNAME, 'bin', 'node')
     if (existsSync(runtimeBin) && existsSync(nodeBin)) return { exec: runtimeBin, node: nodeBin }
   }
   const dsh = findDsh()

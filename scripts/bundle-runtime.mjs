@@ -30,8 +30,8 @@ const TARBALL = `node-${NODE_VER}-${PLAT}-${ARCH}.${IS_WIN ? 'zip' : 'tar.gz'}`
 const URL = `https://nodejs.org/dist/${NODE_VER}/${TARBALL}`
 const SHASUMS_URL = `https://nodejs.org/dist/${NODE_VER}/SHASUMS256.txt`
 
-const runtimeDir = join(root, 'resources', 'dsh-runtime')
-const nodeDir = join(root, 'resources', 'node')
+const runtimeDir = join(root, 'resources', 'rt')
+const nodeDir = join(root, 'resources', 'nd')
 mkdirSync(runtimeDir, { recursive: true })
 mkdirSync(nodeDir, { recursive: true })
 
