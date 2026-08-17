@@ -1,6 +1,6 @@
 // M0 验证脚本：一键检查骨架契约（结构 + typecheck + 测试）
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -59,7 +59,18 @@ check('typecheck 通过', tcOk, tcOk ? '' : (tc.status !== 0 ? errSummary(tc) : 
 // 6) 测试（node --test 无参数：默认发现规则扫描 tests/ 目录；Windows 下传 glob 会被展开成 d:\... 路径报错）
 const t = spawnSync('node', ['--test'], { cwd: root, encoding: 'utf8' })
 const tOk = t.status === 0
-check('测试通过', tOk, tOk ? '' : String(t.stderr ?? t.stdout ?? '无输出'))
+let tDetail = tOk ? '' : String(t.stderr ?? t.stdout ?? '')
+if (!tOk) {
+  // 失败时完整落盘，便于 CI 工件取回分析（Windows 上输出可能为空或巨大）
+  try {
+    const logPath = join(root, 'dist', 'test-stderr.log')
+    writeFileSync(logPath, `status=${t.status} signal=${t.signal} error=${t.error ?? ''}\n---- stdout ----\n${t.stdout ?? ''}\n---- stderr ----\n${t.stderr ?? ''}`)
+    tDetail = `测试失败（status=${t.status}），完整输出已写入 dist/test-stderr.log`
+  } catch {
+    /* 落盘失败时保留原始摘要 */
+  }
+}
+check('测试通过', tOk, tDetail)
 
 console.log(failed ? '\nVERIFY FAILED' : '\nVERIFY OK')
 process.exit(failed ? 1 : 0)

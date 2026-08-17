@@ -49,5 +49,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-main-log
-          path: ${{ env.USERPROFILE }}/.dsh-desktop-hub/logs/*.log
+          path: |
+            ${{ env.USERPROFILE }}/.dsh-desktop-hub/logs/*.log
+            dist/test-stderr.log
           if-no-files-found: ignore
