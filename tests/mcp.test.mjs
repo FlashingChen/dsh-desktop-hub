@@ -2,13 +2,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { parseDocument } from 'yaml'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const mod = await import(join(root, 'dist', 'core', 'mcp.js'))
+const mod = await import(pathToFileURL(join(root, 'dist', 'core', 'mcp.js')).href)
 const { parseMcpJson, convertToRows, convertJsonToYaml, renderRowsYaml, extractMcpServers, replaceMcpRows, mergeMcpRows, updateMcpRow, deleteMcpRow, atomicWriteWithBackup, MCP_PLUGIN } = mod
 
 const SAMPLE = JSON.stringify({

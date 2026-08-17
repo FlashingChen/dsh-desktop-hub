@@ -3,12 +3,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const mod = await import(join(root, 'dist', 'core', 'harness.js'))
+const mod = await import(pathToFileURL(join(root, 'dist', 'core', 'harness.js')).href)
 const { findDsh, dshHome, listProfiles, parseHarnessUrl, runtimePathEnv, resolveDshExec } = mod
 
 test('findDsh 优先 DSH_BIN，并总能解析到存在的可执行文件', () => {

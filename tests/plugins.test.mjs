@@ -2,7 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
@@ -18,7 +18,7 @@ const {
   activatePlugin,
   deactivatePlugin,
   deactivatePluginIfActive,
-} = await import(join(root, 'dist', 'core', 'plugins.js'))
+} = await import(pathToFileURL(join(root, 'dist', 'core', 'plugins.js')).href)
 
 test('listPlugins 从 bundles ∪ dependencies 解析并分类', () => {
   const dir = mkdtempSync(join(tmpdir(), 'profile-'))

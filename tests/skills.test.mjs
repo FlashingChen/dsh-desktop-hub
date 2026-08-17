@@ -2,14 +2,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { crc32 } from 'node:zlib'
 import AdmZip from 'adm-zip'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const mod = await import(join(root, 'dist', 'core', 'skills.js'))
+const mod = await import(pathToFileURL(join(root, 'dist', 'core', 'skills.js')).href)
 const { scanSkills, parseSkillFile, renderSkillFile, createSkill, setInvocation, importSkillFromZip, parseGitHubSkillUrl } = mod
 
 /**
