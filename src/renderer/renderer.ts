@@ -149,7 +149,9 @@ harnessFullscreenButton?.addEventListener('click', () => {
 })
 
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && document.body.classList.contains('harness-fullscreen')) setHarnessFullscreen(false)
+  if (event.key !== 'Escape') return
+  if (document.body.classList.contains('harness-fullscreen')) setHarnessFullscreen(false)
+  if (harnessMenu && !harnessMenu.hidden) setHarnessMenuOpen(false)
 })
 
 for (const t of TABS) {
@@ -725,33 +727,82 @@ async function importFromFile(): Promise<void> {
 document.getElementById('skill-import-url-btn')?.addEventListener('click', () => void importFromUrl())
 document.getElementById('skill-import-file')?.addEventListener('click', () => void importFromFile())
 
-// ---- Harness 面板：内嵌官方 Web UI + 状态 + 重启 ----
+// ---- Harness 面板：内嵌官方 Web UI + 折叠式状态徽章（点击展开 已连接/重新连接/重新启动）----
+
+const harnessOverlay = document.querySelector<HTMLElement>('.harness-overlay')
+const harnessBadge = document.getElementById('harness-badge')
+const harnessMenu = document.getElementById('harness-menu')
+const harnessLoading = document.getElementById('harness-loading')
+const harnessLoadingText = document.getElementById('harness-loading-text')
+let harnessUrlCurrent: string | null = null
+let currentHarnessState = 'starting'
+let reconnectTimer: number | null = null
+
+/** 状态类驱动徽章指示灯颜色（ready 绿 / 连接中、重启中 黄 / 失败 红） */
+function setHarnessStateClass(state: string): void {
+  harnessOverlay?.classList.remove('state-starting', 'state-ready', 'state-restarting', 'state-exited')
+  if (['starting', 'ready', 'restarting', 'exited'].includes(state)) harnessOverlay?.classList.add(`state-${state}`)
+}
+
+function setHarnessMenuOpen(open: boolean): void {
+  if (!harnessMenu || !harnessBadge) return
+  harnessMenu.hidden = !open
+  harnessBadge.setAttribute('aria-expanded', String(open))
+}
+
+/** WebView 就绪前的加载层：连接中/重启中/重连中显示指示，就绪或故障时隐藏 */
+function setHarnessLoading(state: string): void {
+  if (!harnessLoading) return
+  const active = state === 'starting' || state === 'restarting' || state === 'reconnecting'
+  harnessLoading.hidden = !active
+  if (!harnessLoadingText || !active) return
+  const text =
+    state === 'starting'
+      ? '正在启动 DeepSeek Harness…\n（首次运行或需 1-2 分钟，请稍候）'
+      : state === 'restarting'
+        ? 'Harness 重启中…'
+        : '正在重新连接…'
+  harnessLoadingText.textContent = text
+}
+
 function setHarnessStatusText(status: { state: string; url?: string; code?: number | null; error?: string }): void {
   const el = document.getElementById('harness-status')
   if (!el) return
+  currentHarnessState = status.state
+  if (reconnectTimer !== null) {
+    window.clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  setHarnessStateClass(status.state)
+  setHarnessLoading(status.state)
+  let menuText = '状态未知'
+  let kind: '' | 'ok' | 'error' = ''
   switch (status.state) {
     case 'starting':
-      el.textContent = 'Harness 启动中…（首次运行或需 1-2 分钟，请稍候）'
-      el.className = 'harness-status'
+      menuText = 'Harness 启动中…（首次运行或需 1-2 分钟，请稍候）'
       break
     case 'restarting':
-      el.textContent = 'Harness 重启中…'
-      el.className = 'harness-status'
+      menuText = 'Harness 重启中…'
       break
     case 'ready':
-      el.textContent = `已连接: ${status.url ?? ''}`
-      el.className = 'harness-status ok'
+      menuText = status.url ? `已连接: ${status.url}` : '已连接'
+      kind = 'ok'
+      harnessUrlCurrent = status.url ?? harnessUrlCurrent
       break
     case 'exited':
-      el.textContent = status.error
+      menuText = status.error
         ? `Harness 连接失败：${status.error}`
-        : `Harness 已退出（code=${status.code ?? '?'}），可点击重启`
-      el.className = 'harness-status error'
+        : `Harness 已退出（code=${status.code ?? '?'}），可重新启动`
+      kind = 'error'
       break
-    default:
-      el.textContent = '状态未知'
-      el.className = 'harness-status'
   }
+  // 箭头本身只显示颜色；完整状态放 tooltip 与弹层内，避免占面积
+  if (harnessBadge) harnessBadge.title = menuText
+  el.textContent = menuText
+  el.className = `harness-status${kind ? ` ${kind}` : ''}`
+  // 连接完成后自动缩回左下角徽章，不再遮挡界面；故障时自动展开便于查看原因并操作
+  if (status.state === 'ready' || status.state === 'starting' || status.state === 'restarting') setHarnessMenuOpen(false)
+  else if (status.state === 'exited') setHarnessMenuOpen(true)
 }
 
 async function mountHarness(): Promise<void> {
@@ -769,9 +820,7 @@ async function restartHarness(): Promise<void> {
   setHarnessStatusText({ state: 'restarting' })
   const res = await api.harness.restart()
   if (!res.ok) {
-    setHarnessStatusText({ state: 'exited', code: -1 })
-    const el = document.getElementById('harness-status')
-    if (el) el.textContent = `重启失败: ${res.error ?? ''}`
+    setHarnessStatusText({ state: 'exited', code: -1, error: `重启失败: ${res.error ?? ''}` })
     return
   }
   // 重启后 --port 0 会换新端口：必须把 iframe 重挂到新 URL，否则停留在已死进程的旧端口
@@ -780,6 +829,37 @@ async function restartHarness(): Promise<void> {
     frame.src = res.url
     setHarnessStatusText({ state: 'ready', url: res.url })
   }
+}
+
+/** 重新连接：仅重挂 iframe，不重启后端进程；8s 内无就绪回执则提示超时 */
+async function reconnectHarness(): Promise<void> {
+  const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
+  if (!frame) return
+  if (currentHarnessState === 'starting' || currentHarnessState === 'restarting') return
+  const url = harnessUrlCurrent
+  if (!url) {
+    setHarnessStatusText({ state: 'exited', code: null })
+    return
+  }
+  currentHarnessState = 'reconnecting'
+  setHarnessStateClass('starting')
+  setHarnessMenuOpen(false)
+  setHarnessLoading('reconnecting')
+  if (harnessBadge) harnessBadge.title = '正在重新连接…'
+  const el = document.getElementById('harness-status')
+  if (el) {
+    el.textContent = `正在重新连接 ${url}…`
+    el.className = 'harness-status'
+  }
+  // 置空再挂载，确保同 URL 也会真正重新加载
+  frame.src = 'about:blank'
+  requestAnimationFrame(() => {
+    frame.src = url
+  })
+  reconnectTimer = window.setTimeout(() => {
+    if (currentHarnessState !== 'reconnecting') return
+    setHarnessStatusText({ state: 'exited', code: null, error: '重新连接超时，可点击重新启动' })
+  }, 8000)
 }
 
 if (api) {
@@ -796,7 +876,18 @@ if (api) {
       if (frame && frame.src !== status.url) frame.src = status.url
     }
   })
+  document.getElementById('harness-reconnect')?.addEventListener('click', () => void reconnectHarness())
   document.getElementById('harness-restart')?.addEventListener('click', () => void restartHarness())
+  harnessBadge?.addEventListener('click', () => {
+    setHarnessMenuOpen(harnessMenu ? harnessMenu.hidden : false)
+  })
+  // 点击弹层外空白处收起（自身按钮点击由单独监听处理，这里用 contains 排除）
+  document.addEventListener('click', (event) => {
+    const target = event.target as Node | null
+    if (harnessMenu && !harnessMenu.hidden && harnessOverlay && target && !harnessOverlay.contains(target)) {
+      setHarnessMenuOpen(false)
+    }
+  })
   void refreshPlugins()
   void refreshMcpServers()
   void refreshSkills()
