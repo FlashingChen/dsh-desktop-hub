@@ -165,13 +165,14 @@ test('runPluginOp 透传退出码并支持取消', async () => {
         'if (action === "fail") { console.error("boom"); process.exit(3) }\n' +
         'console.log("ok")\n',
     )
-    chmodSync(script, 0o755)
+    // Windows 不能直跑无扩展名脚本（且 .cmd 需 shell），与生产一致：显式经 node.exe 执行
+    const nodeOpt = { node: process.execPath }
 
-    const ok = runPluginOp({ dsh: script, profile: 'web', action: 'add', args: ['x'] })
+    const ok = runPluginOp({ dsh: script, profile: 'web', action: 'add', args: ['x'], ...nodeOpt })
     const out = await ok.done
     assert.equal(out.exitCode, 0)
 
-    const bad = runPluginOp({ dsh: script, profile: 'web', action: 'fail' })
+    const bad = runPluginOp({ dsh: script, profile: 'web', action: 'fail', ...nodeOpt })
     const badOut = await bad.done
     assert.equal(badOut.exitCode, 3)
   } finally {

@@ -302,12 +302,14 @@ test('atomicWriteWithBackup 原文件不存在时跳过备份并按 0600 新建�
     assert.equal(backup, '', '原文件不存在时不应产生备份，也不应抛 ENOENT')
     assert.equal(readFileSync(file, 'utf8'), 'first')
     const mode = statSync(file).mode & 0o777
-    assert.equal(mode, 0o600, `新文件应为 0600，实际 ${mode.toString(8)}`)
+    // Windows 无 POSIX 权限模型（chmod 仅 readonly 位），0600 语义不可表达，预期 0666
+    const expectedMode = process.platform === 'win32' ? 0o666 : 0o600
+    assert.equal(mode, expectedMode, `新文件应为 ${expectedMode.toString(8)}，实际 ${mode.toString(8)}`)
     chmodSync(file, 0o600)
     const backup2 = atomicWriteWithBackup(file, 'second')
     assert.ok(backup2, '已有文件应备份')
     assert.equal(readFileSync(backup2, 'utf8'), 'first')
-    assert.equal(statSync(file).mode & 0o777, 0o600, `写后应保持 0600，实际 ${(statSync(file).mode & 0o777).toString(8)}`)
+    assert.equal(statSync(file).mode & 0o777, expectedMode, `写后应保持 ${expectedMode.toString(8)}，实际 ${(statSync(file).mode & 0o777).toString(8)}`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
