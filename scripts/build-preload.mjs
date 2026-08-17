@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url'
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const out = join(root, 'dist', 'preload')
 rmSync(out, { recursive: true, force: true })
-execFileSync('npx', ['tsc', '-p', 'tsconfig.preload.json'], { cwd: root, stdio: 'inherit' })
+// Windows 下 npx 是 npx.cmd shim，直接 execFileSync('npx') 会 ENOENT；须用 .cmd 名且经 shell 执行
+const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx'
+execFileSync(npxCmd, ['tsc', '-p', 'tsconfig.preload.json'], { cwd: root, stdio: 'inherit', shell: process.platform === 'win32' })
 renameSync(join(out, 'preload.js'), join(out, 'preload.cjs'))
 console.log('preload -> dist/preload/preload.cjs (CJS)')
