@@ -59,7 +59,7 @@ check('typecheck 通过', tcOk, tcOk ? '' : (tc.status !== 0 ? errSummary(tc) : 
 // 6) 测试（node --test 无参数：默认发现规则扫描 tests/ 目录；Windows 下传 glob 会被展开成 d:\... 路径报错）
 const t = spawnSync('node', ['--test'], { cwd: root, encoding: 'utf8' })
 const tOk = t.status === 0
-check('测试通过', tOk, tOk ? '' : errSummary(t))
+check('测试通过', tOk, tOk ? '' : String(t.stderr ?? t.stdout ?? '无输出'))
 
 console.log(failed ? '\nVERIFY FAILED' : '\nVERIFY OK')
 process.exit(failed ? 1 : 0)
