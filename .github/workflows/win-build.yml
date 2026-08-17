@@ -1,0 +1,73 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: win-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Build Windows installer (NSIS)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify (typecheck + build + tests)
+        run: npm run verify
+
+      - name: Bundle runtime (Node + DSH, win32)
+        run: node scripts/bundle-runtime.mjs
+
+      - name: Prepare smoke profile (empty web profile for CI)
+        shell: bash
+        run: |
+          mkdir -p "$USERPROFILE/.dsh/profiles/web"
+          printf '{"dependencies":{},"dsh":{"profile":{"bundles":[]}}}' > "$USERPROFILE/.dsh/profiles/web/package.json"
+
+      - name: Smoke test (Electron renderer + tabs, no harness)
+        # 主帧加载失败（如非法 file:// URL）会让 smoke 非零退出——渲染回归守门员
+        timeout-minutes: 5
+        run: npx electron . --smoke
+
+      - name: Upload main log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-main-log
+          path: ${{ env.USERPROFILE }}/.dsh-desktop-hub/logs/*.log
+          if-no-files-found: ignore
+
+      - name: Package NSIS installer
+        run: npx electron-builder --win nsis --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            release/DSH-Desktop-Hub-*.exe
+            release/DSH-Desktop-Hub-*.exe.blockmap
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 14
