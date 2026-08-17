@@ -4,3 +4,5 @@ release/
 artifacts/
 *.log
 .DS_Store
+frontend/
+resources/node/

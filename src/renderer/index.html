@@ -431,34 +431,128 @@
       .harness-fullscreen-toggle:hover { background: var(--brand-soft); border-color: #cbd5ff; color: var(--brand-dark); }
       .harness-fullscreen-toggle svg { fill: none; height: 17px; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; width: 17px; }
       .harness-fullscreen-toggle .fullscreen-exit { display: none; }
-      .harness-overlay {
+      /* 状态箭头：缩到 WebView 左侧边缘的极小块（>），点击展开菜单；
+         竖直位置放在左下角「设置」上方留空区，绝不遮挡设置入口 */
+      /* 启动加载层：WebView 就绪前不显示空白页，展示加载指示（z-index 低于状态箭头） */
+      .harness-loading {
         align-items: center;
-        background: rgb(255 255 255 / 94%);
-        border: 1px solid var(--line);
-        border-radius: 9px;
-        bottom: 14px;
-        box-shadow: 0 4px 14px rgb(31 41 55 / 12%);
+        background: var(--surface);
         display: flex;
-        gap: 8px;
-        left: 16px;
-        padding: 5px 6px 5px 12px;
+        inset: 0;
+        justify-content: center;
+        position: absolute;
+        z-index: 5;
+      }
+      .harness-loading[hidden] { display: none; }
+      .harness-loading-card {
+        align-items: center;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .harness-loading-spinner {
+        animation: harness-spin 900ms linear infinite;
+        border: 3px solid var(--line-strong);
+        border-radius: 50%;
+        border-top-color: var(--brand);
+        height: 30px;
+        width: 30px;
+      }
+      .harness-loading-text {
+        color: var(--ink-soft);
+        font-size: 12px;
+        line-height: 1.6;
+        max-width: 420px;
+        text-align: center;
+      }
+      @keyframes harness-spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) {
+        .harness-loading-spinner { animation-duration: 2.5s; }
+      }
+      .harness-overlay {
+        bottom: 150px;
+        left: 0;
         position: absolute;
         z-index: 10;
       }
-      .harness-status {
+      .harness-badge {
+        align-items: center;
+        background: rgb(255 255 255 / 72%);
+        border: 1px solid var(--line-strong);
+        border-left: 0;
+        border-radius: 0 8px 8px 0;
+        box-shadow: 0 2px 8px rgb(31 41 55 / 10%);
+        color: var(--ink-soft);
+        display: inline-flex;
+        height: 30px;
+        justify-content: center;
+        min-height: 0;
+        padding: 0;
+        width: 15px;
+      }
+      .harness-badge svg {
+        fill: none;
+        height: 11px;
+        stroke: currentColor;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-width: 2.2;
+        width: 11px;
+      }
+      .harness-badge:hover { background: rgb(255 255 255 / 96%); color: var(--ink); }
+      .harness-badge-dot {
+        background: var(--ink-faint);
+        border-radius: 50%;
+        flex: none;
+        height: 8px;
+        width: 8px;
+      }
+      /* 箭头颜色兼作状态指示灯：连接成功绿 / 连接中、重启中 黄 / 失败 红 */
+      .harness-overlay.state-ready .harness-badge { color: var(--success); }
+      .harness-overlay.state-starting .harness-badge,
+      .harness-overlay.state-restarting .harness-badge { color: var(--warn); }
+      .harness-overlay.state-exited .harness-badge { color: var(--danger); }
+      /* 弹层内的状态点同步变色 */
+      .harness-overlay.state-ready .harness-menu-status .harness-badge-dot { background: var(--success); }
+      .harness-overlay.state-starting .harness-menu-status .harness-badge-dot,
+      .harness-overlay.state-restarting .harness-menu-status .harness-badge-dot { background: var(--warn); }
+      .harness-overlay.state-exited .harness-menu-status .harness-badge-dot { background: var(--danger); }
+      /* 展开态弹层：点击箭头后从箭头右侧展开，含 已连接/重新连接/重新启动 */
+      .harness-menu {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        bottom: -56px;
+        box-shadow: 0 12px 30px rgb(31 41 55 / 14%);
+        left: 18px;
+        padding: 10px;
+        position: absolute;
+        width: 320px;
+      }
+      .harness-menu[hidden] { display: none; }
+      .harness-menu-status {
+        align-items: flex-start;
+        display: flex;
+        gap: 8px;
+        padding: 2px 6px 11px;
+      }
+      .harness-menu-status .harness-badge-dot { margin-top: 4px; }
+      .harness-menu-status .harness-status {
         color: var(--ink-soft);
         font-size: 12px;
-        max-width: 340px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        line-height: 1.5;
+        max-width: 272px;
+        overflow-wrap: anywhere;
+        white-space: normal;
       }
-      .harness-status.ok { color: var(--success); }
-      .harness-status.error { color: var(--danger); }
-      .harness-restart {
-        min-height: 26px;
-        padding: 4px 10px;
+      .harness-menu-status .harness-status.ok { color: var(--success); }
+      .harness-menu-status .harness-status.error { color: var(--danger); }
+      .harness-menu-actions { display: flex; flex-direction: column; gap: 6px; }
+      .harness-menu-actions .harness-menu-action {
         font-size: 12px;
+        min-height: 32px;
+        padding: 6px 10px;
+        text-align: left;
       }
       .checkbox-label {
         align-items: center;
@@ -544,9 +638,26 @@
         <section class="panel active" id="panel-harness" role="tabpanel" aria-labelledby="tab-harness">
           <div class="harness-wrap">
             <iframe id="harness-frame" title="DeepSeek Harness"></iframe>
+            <div class="harness-loading" id="harness-loading" role="status" aria-live="polite" hidden>
+              <div class="harness-loading-card">
+                <div class="harness-loading-spinner" aria-hidden="true"></div>
+                <p class="harness-loading-text" id="harness-loading-text">正在启动 DeepSeek Harness…</p>
+              </div>
+            </div>
             <div class="harness-overlay">
-              <span id="harness-status" class="harness-status" aria-live="polite">连接中…</span>
-              <button id="harness-restart" class="harness-restart" type="button">重启 Harness</button>
+              <button id="harness-badge" class="harness-badge" type="button" aria-expanded="false" aria-controls="harness-menu" title="连接状态" aria-label="连接状态">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5.5 16 12l-7 6.5" /></svg>
+              </button>
+              <div class="harness-menu" id="harness-menu" role="menu" aria-label="连接状态" hidden>
+                <div class="harness-menu-status">
+                  <span class="harness-badge-dot" aria-hidden="true"></span>
+                  <span id="harness-status" class="harness-status" aria-live="polite">连接中…</span>
+                </div>
+                <div class="harness-menu-actions">
+                  <button id="harness-reconnect" class="harness-menu-action" type="button">重新连接</button>
+                  <button id="harness-restart" class="harness-menu-action" type="button">重新启动</button>
+                </div>
+              </div>
             </div>
             <button id="harness-fullscreen" class="harness-fullscreen-toggle" type="button" aria-pressed="false" aria-label="全屏显示 Harness" title="全屏显示 Harness">
               <svg class="fullscreen-enter" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M20 16v4h-4M4 16v4h4"></path></svg>
