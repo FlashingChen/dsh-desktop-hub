@@ -12,7 +12,7 @@
   "main": "dist/main/main.js",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test \"tests/*.test.mjs\"",
+    "test": "npm run build && node --test",
     "build": "tsc -p tsconfig.json && node scripts/build-preload.mjs && tsc -p tsconfig.renderer.json && node scripts/copy-renderer.mjs",
     "start": "electron .",
     "smoke": "electron . --smoke",

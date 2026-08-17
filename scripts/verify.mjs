@@ -56,8 +56,8 @@ const tcR = spawnSync(npxCmd, ['tsc', '--noEmit', '-p', 'tsconfig.renderer.json'
 const tcOk = tc.status === 0 && tcR.status === 0
 check('typecheck 通过', tcOk, tcOk ? '' : (tc.status !== 0 ? errSummary(tc) : errSummary(tcR)))
 
-// 6) 测试
-const t = spawnSync('node', ['--test', 'tests/*.test.mjs'], { cwd: root, encoding: 'utf8' })
+// 6) 测试（node --test 无参数：默认发现规则扫描 tests/ 目录；Windows 下传 glob 会被展开成 d:\... 路径报错）
+const t = spawnSync('node', ['--test'], { cwd: root, encoding: 'utf8' })
 const tOk = t.status === 0
 check('测试通过', tOk, tOk ? '' : errSummary(t))
 
