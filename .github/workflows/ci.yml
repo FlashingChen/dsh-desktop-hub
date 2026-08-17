@@ -1,22 +1,22 @@
-name: Windows build
+name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
 concurrency:
-  group: win-build-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-windows:
-    name: Build Windows installer (NSIS)
+  # 合并前的快速门禁：验证编译/测试 + Windows 渲染 smoke（不打包，打包走 release.yml）
+  windows-gate:
+    name: Verify + smoke
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -34,9 +34,6 @@ jobs:
       - name: Verify (typecheck + build + tests)
         run: npm run verify
 
-      - name: Bundle runtime (Node + DSH, win32)
-        run: node scripts/bundle-runtime.mjs
-
       - name: Prepare smoke profile (empty web profile for CI)
         shell: bash
         run: |
@@ -44,7 +41,6 @@ jobs:
           printf '{"dependencies":{},"dsh":{"profile":{"bundles":[]}}}' > "$USERPROFILE/.dsh/profiles/web/package.json"
 
       - name: Smoke test (Electron renderer + tabs, no harness)
-        # 主帧加载失败（如非法 file:// URL）会让 smoke 非零退出——渲染回归守门员
         timeout-minutes: 5
         run: npx electron . --smoke
 
@@ -55,19 +51,3 @@ jobs:
           name: windows-main-log
           path: ${{ env.USERPROFILE }}/.dsh-desktop-hub/logs/*.log
           if-no-files-found: ignore
-
-      - name: Package NSIS installer
-        run: npx electron-builder --win nsis --x64 --publish never
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-
-      - name: Upload installer artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installer
-          path: |
-            release/DSH-Desktop-Hub-*.exe
-            release/DSH-Desktop-Hub-*.exe.blockmap
-            release/latest.yml
-          if-no-files-found: error
-          retention-days: 14

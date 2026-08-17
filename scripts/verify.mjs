@@ -36,25 +36,30 @@ for (const tab of ['harness', 'plugin', 'mcp', 'skills']) {
   check(`Tab 存在: ${tab}`, html.includes(`data-tab="${tab}"`) && html.includes(`id="panel-${tab}"`))
 }
 
-// Windows 下 npm/npx 是 .cmd shim，不能直接 spawn（Node 不会自动解析 .cmd）
+// Windows 下 npm/npx 是 .cmd shim，不能直接 spawn（Node 不会自动解析 .cmd）→ 须 shell:true 交给 cmd /c
 const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx'
+const spawnOpts = { cwd: root, encoding: 'utf8', shell: process.platform === 'win32' }
+/** 组装错误摘要：spawn 失败时 stderr/stdout 可能为 null，不得直接 .slice（防空指针掩蔽真实错误） */
+const errSummary = (r) => String((r.stderr || r.stdout || `spawn 失败（status=${r.status} error=${r.error ?? ''}）`).slice(0, 400))
 
 // 4) 构建（harness/plugins 测试依赖 dist）
-const build = spawnSync(npmCmd, ['run', 'build'], { cwd: root, encoding: 'utf8' })
-check('构建通过', build.status === 0, build.status === 0 ? '' : (build.stderr || build.stdout).slice(0, 400))
+const build = spawnSync(npmCmd, ['run', 'build'], spawnOpts)
+check('构建通过', build.status === 0, build.status === 0 ? '' : errSummary(build))
 for (const f of ['dist/main/main.js', 'dist/core/harness.js', 'dist/preload/preload.cjs', 'dist/renderer/index.html']) {
   check(`产物存在: ${f}`, existsSync(req(f)))
 }
 
 // 5) typecheck（主 + renderer 两套配置）
-const tc = spawnSync(npxCmd, ['tsc', '--noEmit', '-p', 'tsconfig.json'], { cwd: root, encoding: 'utf8' })
-const tcR = spawnSync(npxCmd, ['tsc', '--noEmit', '-p', 'tsconfig.renderer.json'], { cwd: root, encoding: 'utf8' })
-check('typecheck 通过', tc.status === 0 && tcR.status === 0, tc.status !== 0 ? (tc.stderr || tc.stdout).slice(0, 400) : (tcR.stderr || tcR.stdout).slice(0, 400))
+const tc = spawnSync(npxCmd, ['tsc', '--noEmit', '-p', 'tsconfig.json'], spawnOpts)
+const tcR = spawnSync(npxCmd, ['tsc', '--noEmit', '-p', 'tsconfig.renderer.json'], spawnOpts)
+const tcOk = tc.status === 0 && tcR.status === 0
+check('typecheck 通过', tcOk, tcOk ? '' : (tc.status !== 0 ? errSummary(tc) : errSummary(tcR)))
 
 // 6) 测试
 const t = spawnSync('node', ['--test', 'tests/*.test.mjs'], { cwd: root, encoding: 'utf8' })
-check('测试通过', t.status === 0, t.status === 0 ? '' : (t.stderr || t.stdout).slice(0, 400))
+const tOk = t.status === 0
+check('测试通过', tOk, tOk ? '' : errSummary(t))
 
 console.log(failed ? '\nVERIFY FAILED' : '\nVERIFY OK')
 process.exit(failed ? 1 : 0)
