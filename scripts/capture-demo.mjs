@@ -4,14 +4,15 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
 const DEMO_HOME = '/tmp/dsh-demo-capture'
 const OUT_DIR = join(root, 'assets', 'demo')
 const RENDERER_HTML = join(root, 'dist', 'renderer', 'index.html')
-const RENDERER_URL = `file://${RENDERER_HTML}`
+// 同 main.ts：Windows 下必须 pathToFileURL（file:// 拼接会产生非法 URL）
+const RENDERER_URL = pathToFileURL(RENDERER_HTML).href
 const WITH_HARNESS = process.argv.includes('--harness')
 
 process.env.DSH_HOME = DEMO_HOME

@@ -726,12 +726,12 @@ document.getElementById('skill-import-url-btn')?.addEventListener('click', () =>
 document.getElementById('skill-import-file')?.addEventListener('click', () => void importFromFile())
 
 // ---- Harness 面板：内嵌官方 Web UI + 状态 + 重启 ----
-function setHarnessStatusText(status: { state: string; url?: string; code?: number | null }): void {
+function setHarnessStatusText(status: { state: string; url?: string; code?: number | null; error?: string }): void {
   const el = document.getElementById('harness-status')
   if (!el) return
   switch (status.state) {
     case 'starting':
-      el.textContent = 'Harness 启动中…'
+      el.textContent = 'Harness 启动中…（首次运行或需 1-2 分钟，请稍候）'
       el.className = 'harness-status'
       break
     case 'restarting':
@@ -743,7 +743,9 @@ function setHarnessStatusText(status: { state: string; url?: string; code?: numb
       el.className = 'harness-status ok'
       break
     case 'exited':
-      el.textContent = `Harness 已退出（code=${status.code ?? '?'}），可点击重启`
+      el.textContent = status.error
+        ? `Harness 连接失败：${status.error}`
+        : `Harness 已退出（code=${status.code ?? '?'}），可点击重启`
       el.className = 'harness-status error'
       break
     default:
@@ -757,10 +759,8 @@ async function mountHarness(): Promise<void> {
   if (!frame || !api) return
   setHarnessStatusText({ state: 'starting' })
   const url = await api.harness.url()
-  if (!url) {
-    setHarnessStatusText({ state: 'exited', code: null })
-    return
-  }
+  // 窗口先行时 harness 可能尚未就绪：保持「连接中…」，等待 onStatus 推送，不误显示已退出
+  if (!url) return
   frame.src = url
 }
 
@@ -783,8 +783,19 @@ async function restartHarness(): Promise<void> {
 }
 
 if (api) {
-  api.harness.onFrameLoaded((url) => setHarnessStatusText({ state: 'ready', url }))
-  api.harness.onStatus(setHarnessStatusText)
+  api.harness.onFrameLoaded((url) => {
+    setHarnessStatusText({ state: 'ready', url })
+    const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
+    if (frame && frame.src !== url) frame.src = url
+  })
+  // 窗口先行：收到 ready 时必须把 iframe 挂到新 URL（首次 mount 时 harness 可能未就绪）
+  api.harness.onStatus((status) => {
+    setHarnessStatusText(status)
+    if (status.state === 'ready' && status.url) {
+      const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
+      if (frame && frame.src !== status.url) frame.src = status.url
+    }
+  })
   document.getElementById('harness-restart')?.addEventListener('click', () => void restartHarness())
   void refreshPlugins()
   void refreshMcpServers()

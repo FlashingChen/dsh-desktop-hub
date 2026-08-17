@@ -1,5 +1,5 @@
 // DSH harness 集成核心：环境检测、profile 发现、dsh web 启动与进程清理
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
@@ -25,13 +25,25 @@ export interface DshExec {
   node?: string
 }
 
+/** 运行时目录名（缩短以压低 NSIS 安装路径深度；改动须与 scripts/bundle-runtime.mjs 同步） */
+const RUNTIME_DIRNAME = 'rt'
+const NODE_DIRNAME = 'nd'
+
 /** 解析 dsh 执行方式：优先打包内 runtime，回退系统 PATH */
 export function resolveDshExec(): DshExec | null {
   const base = process.resourcesPath ?? join(process.cwd(), 'resources')
-  const roots = process.resourcesPath ? [join(base, 'app.asar.unpacked', 'resources'), base] : [base]
+  // 打包布局（asar:false）：{resources}/app/resources/{rt,nd}；兼容旧 asar 布局与开发模式直下
+  const roots = [
+    ...(process.resourcesPath
+      ? [join(base, 'app', 'resources'), join(base, 'app.asar.unpacked', 'resources'), base]
+      : [base]),
+  ]
   for (const root of roots) {
-    const runtimeBin = join(root, 'dsh-runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
-    const nodeBin = join(root, 'node', 'bin', 'node')
+    const runtimeBin = join(root, RUNTIME_DIRNAME, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    // 布局差异：darwin/linux tar.gz → bin/node；Windows zip → 根 node.exe
+    const nodeBin = process.platform === 'win32'
+      ? join(root, NODE_DIRNAME, 'node.exe')
+      : join(root, NODE_DIRNAME, 'bin', 'node')
     if (existsSync(runtimeBin) && existsSync(nodeBin)) return { exec: runtimeBin, node: nodeBin }
   }
   const dsh = findDsh()
@@ -53,19 +65,25 @@ export function runtimePathEnv(): NodeJS.ProcessEnv {
     resolve(dirname(exec.exec), '..', '..', '..', '.bin'),
   ].filter((p) => existsSync(p))
   const pathKey = process.platform === 'win32' ? 'Path' : 'PATH'
-  env[pathKey] = [...extra, env[pathKey] ?? ''].filter(Boolean).join(process.platform === 'win32' ? ';' : ':')
+  env[pathKey] = [...extra, env[pathKey] ?? env.PATH ?? ''].filter(Boolean).join(process.platform === 'win32' ? ';' : ':')
   return env
 }
 
-/** 从 PATH 解析 dsh 可执行文件 */
+/** 从 PATH 解析 dsh 可执行文件（Windows 下 npm 全局装的是 dsh.cmd shim） */
 export function findDsh(): string | null {
-  const candidates = [process.env.DSH_BIN, '/opt/homebrew/bin/dsh', '/usr/local/bin/dsh', '/usr/bin/dsh'].filter(
-    (p): p is string => !!p,
-  )
-  const pathDirs = (process.env.PATH ?? '').split(':')
+  const isWin = process.platform === 'win32'
+  const candidates = [
+    process.env.DSH_BIN,
+    // POSIX 常见安装路径（Homebrew / 官方脚本）；Windows 无固定安装路径，仅走 PATH
+    ...(isWin ? [] : ['/opt/homebrew/bin/dsh', '/usr/local/bin/dsh', '/usr/bin/dsh']),
+  ].filter((p): p is string => !!p)
+  const pathKey = isWin ? 'Path' : 'PATH'
+  const pathDirs = (process.env[pathKey] ?? process.env.PATH ?? '').split(isWin ? ';' : ':')
   for (const dir of pathDirs) {
-    const p = join(dir, 'dsh')
-    if (existsSync(p)) candidates.push(p)
+    for (const name of isWin ? ['dsh.cmd', 'dsh.exe', 'dsh'] : ['dsh']) {
+      const p = join(dir, name)
+      if (existsSync(p)) candidates.push(p)
+    }
   }
   return candidates.find((p) => existsSync(p)) ?? null
 }
@@ -117,6 +135,9 @@ async function waitForHttp(url: string, timeoutMs = 60_000): Promise<boolean> {
   return false
 }
 
+/** dsh 启动期致命错误的 stderr 标记（installFailLoud 输出，随后 exit 1） */
+const DSK_FATAL_RE = /dsh: fatal load failure: (.+)/
+
 /** 启动 dsh web：spawn 独立进程组，解析端口，轮询就绪 */
 export function startHarness(opts: {
   profile?: string
@@ -124,6 +145,8 @@ export function startHarness(opts: {
   port?: number
   onLog?: (line: string) => void
   readyTimeoutMs?: number
+  /** 子进程 spawn 后的同步回调（供调用方追踪 in-flight 进程，退出清理用） */
+  onSpawn?: (proc: ChildProcess) => void
 }): Promise<HarnessHandle> {
   const exec = resolveDshExec()
   if (!exec) return Promise.reject(new Error('未找到 dsh 可执行文件（请先安装 DeepSeek Harness）'))
@@ -136,7 +159,9 @@ export function startHarness(opts: {
     detached: true,
     env: runtimePathEnv(),
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
   })
+  opts.onSpawn?.(proc)
 
   return new Promise((resolve, reject) => {
     let url: string | null = null
@@ -154,6 +179,15 @@ export function startHarness(opts: {
       for (const line of buf.toString().split('\n')) {
         if (!line.trim()) continue
         opts.onLog?.(line)
+        // dsh 启动期致命错误：立即失败并携带原因，不等 180s 轮询超时
+        const fatal = line.match(DSK_FATAL_RE)
+        if (fatal && !settled) {
+          settled = true
+          clearTimeout(timer)
+          void stopTree(proc)
+          reject(new Error(`dsh 启动失败：${fatal[1].slice(0, 400)}`))
+          return
+        }
         url ??= parseHarnessUrl(line)
         // 只允许一个 HTTP 轮询在飞，避免每个日志块都新起轮询
         if (url && !settled && !polling) {
@@ -189,9 +223,48 @@ export function startHarness(opts: {
   })
 }
 
-/** 终止整个进程树：SIGTERM → 2s 后 SIGKILL */
-async function stopTree(proc: ChildProcess): Promise<void> {
+/** Windows：taskkill /T 终止整棵树（无 /F 先优雅；有窗口进程发 WM_CLOSE，控制台进程直接终止） */
+function taskkillTree(pid: number, force: boolean): void {
+  try {
+    spawnSync('taskkill', ['/pid', String(pid), '/T', ...(force ? ['/F'] : [])], { windowsHide: true, stdio: 'ignore' })
+  } catch {
+    /* 已退出 */
+  }
+}
+
+/** 终止单个进程树：Windows taskkill /T；POSIX SIGTERM（供插件取消/退出清理复用） */
+export function terminateTree(pid: number | undefined): void {
+  if (pid === undefined) return
+  if (process.platform === 'win32') {
+    taskkillTree(pid, false)
+  } else {
+    try {
+      process.kill(pid, 'SIGTERM')
+    } catch {
+      /* 已退出 */
+    }
+  }
+}
+
+/** 终止整个进程树：POSIX SIGTERM 进程组（detached 负 pid）；Windows taskkill /T → 2s 后兜底强杀 */
+export async function stopTree(proc: ChildProcess): Promise<void> {
   if (proc.pid === undefined || proc.exitCode !== null || proc.signalCode !== null) return
+  if (process.platform === 'win32') {
+    taskkillTree(proc.pid, false)
+    const { promise, resolve } = Promise.withResolvers<void>()
+    // 优雅窗口 800ms（非 2s）：安装器非 PowerShell 路径在 WM_CLOSE 后约 1300ms（300+1000）即 /F 强杀主进程；
+    // 优雅清理须落在该窗口内，否则 stopTree 半途被 TerminateProcess → node.exe 孤儿
+    const t = setTimeout(() => {
+      taskkillTree(proc.pid!, true)
+      resolve()
+    }, 800)
+    proc.once('exit', () => {
+      clearTimeout(t)
+      resolve()
+    })
+    await promise
+    return
+  }
   try {
     process.kill(-proc.pid, 'SIGTERM') // detached 后负 pid = 进程组
   } catch {

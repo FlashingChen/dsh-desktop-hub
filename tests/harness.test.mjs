@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const mod = await import(join(root, 'dist', 'core', 'harness.js'))
@@ -18,20 +18,23 @@ test('findDsh 优先 DSH_BIN，并总能解析到存在的可执行文件', () =
     writeFileSync(fake, '#!/bin/sh\nexit 0\n')
     chmodSync(fake, 0o755)
     const prevBin = process.env.DSH_BIN
-    const prevPath = process.env.PATH
+    // Windows 无 PATH 键（是 Path），与 findDsh 内部逻辑保持一致
+    const pathKey = process.platform === 'win32' ? 'Path' : 'PATH'
+    const prevPath = process.env[pathKey]
     try {
       // DSH_BIN 优先
       process.env.DSH_BIN = fake
       assert.equal(findDsh(), fake, 'DSH_BIN 应优先')
       // 无 DSH_BIN 时（PATH 或硬编码候选）应解析到存在的 dsh
       delete process.env.DSH_BIN
-      process.env.PATH = bin
+      process.env[pathKey] = bin
       const found = findDsh()
       assert.ok(found && existsSync(found), `应解析到存在的 dsh，实际 ${found}`)
     } finally {
       if (prevBin === undefined) delete process.env.DSH_BIN
       else process.env.DSH_BIN = prevBin
-      process.env.PATH = prevPath
+      if (prevPath === undefined) delete process.env[pathKey]
+      else process.env[pathKey] = prevPath
     }
   } finally {
     rmSync(bin, { recursive: true, force: true })
@@ -41,9 +44,10 @@ test('findDsh 优先 DSH_BIN，并总能解析到存在的可执行文件', () =
 test('dshHome 默认 ~/.dsh，可被 DSH_HOME 覆盖', () => {
   const prev = process.env.DSH_HOME
   try {
-    assert.equal(dshHome(), join(process.env.HOME ?? '', '.dsh'))
-    process.env.DSH_HOME = '/tmp/dsh-home-test'
-    assert.equal(dshHome(), '/tmp/dsh-home-test')
+    assert.equal(dshHome(), join(homedir(), '.dsh'))
+    const home = join(tmpdir(), 'dsh-home-test')
+    process.env.DSH_HOME = home
+    assert.equal(dshHome(), home)
   } finally {
     if (prev === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = prev
@@ -84,7 +88,7 @@ test('runtimePathEnv 在捆绑 runtime 存在时把 node/bin 与 .bin 加入 PAT
   assert.ok(env && typeof env.PATH === 'string', '应有 PATH')
   if (exec?.node) {
     assert.ok(env.PATH.includes(dirname(exec.node)), `PATH 应包含捆绑 node/bin: ${env.PATH}`)
-    assert.ok(env.PATH.includes(join(root, 'resources', 'dsh-runtime', 'node_modules', '.bin')), `PATH 应包含 dsh-runtime .bin: ${env.PATH}`)
+    assert.ok(env.PATH.includes(join(root, 'resources', 'rt', 'node_modules', '.bin')), `PATH 应包含运行时 .bin: ${env.PATH}`)
   }
   // 不破坏原有 PATH 内容
   assert.ok(env.PATH.includes(process.env.PATH ?? ''), '原 PATH 应保留')

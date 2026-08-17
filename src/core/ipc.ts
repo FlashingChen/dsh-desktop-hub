@@ -45,6 +45,8 @@ export interface HarnessStatus {
   url?: string
   code?: number | null
   signal?: string | null
+  /** 失败/退出原因（面向用户的简短说明，UI 显示；详见运行日志） */
+  error?: string
 }
 
 export interface McpApplyInput {

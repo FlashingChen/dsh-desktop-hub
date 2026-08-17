@@ -10,6 +10,7 @@ import {
   mkdtempSync,
 } from 'node:fs'
 import { join, dirname, resolve, basename } from 'node:path'
+import { homedir } from 'node:os'
 import { parseDocument, stringify } from 'yaml'
 import AdmZip from 'adm-zip'
 
@@ -132,8 +133,8 @@ function scanRoot(root: string, source: SkillSource, out: RawSkill[]): void {
 
 /** 扫描全部 skill 根（rank 升序），低 rank 优先，同名高 rank 标 shadowed */
 export function scanSkills(opts: SkillScanOptions = {}): SkillSummary[] {
-  const dshHome = opts.dshHome ?? join(process.env.HOME ?? '', '.dsh')
-  const agentsHome = opts.agentsHome ?? join(process.env.HOME ?? '', '.agents')
+  const dshHome = opts.dshHome ?? join(homedir(), '.dsh')
+  const agentsHome = opts.agentsHome ?? join(homedir(), '.agents')
   const roots: { dir: string; source: SkillSource }[] = []
   if (opts.projectRoot) {
     roots.push({ dir: join(opts.projectRoot, '.dsh', 'skills'), source: 'project-dsh' })
@@ -219,7 +220,7 @@ export function createSkill(opts: {
 /** frontmatter 缺 name 时的回退名：bundle（SKILL.md）取目录名，扁平（<name>.md）取文件名 */
 function fallbackSkillName(path: string): string {
   const base = basename(path)
-  if (base === 'SKILL.md') return dirname(path).split('/').pop() ?? ''
+  if (base === 'SKILL.md') return dirname(path).split(/[\\/]/).pop() ?? ''
   if (base.endsWith('.md')) return base.slice(0, -3)
   return ''
 }

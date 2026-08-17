@@ -326,7 +326,9 @@ export function deleteMcpRow(patchText: string, id: string): string {
 
 /** 原子写 + 备份：写 .bak-<ts>，临时文件 rename 落盘。
  * - 原文件不存在时跳过备份（不再 ENOENT），新文件默认 0600（patch 可能含 token）。
- * - 原文件存在时备份与临时文件继承原 mode（避免 0600 → 0644 权限漂移）。 */
+ * - 原文件存在时备份与临时文件继承原 mode（避免 0600 → 0644 权限漂移）。
+ * - rename 带短暂重试：Windows 上 Defender 实时扫描 / dsh HMR watcher 可能瞬时占用（EBUSY/EPERM），
+ *   与 dsh 自身写入器的重试策略对齐。 */
 export function atomicWriteWithBackup(file: string, content: string, backupsDir?: string): string {
   const dir = backupsDir ?? dirname(file)
   mkdirSync(dir, { recursive: true })
@@ -346,8 +348,23 @@ export function atomicWriteWithBackup(file: string, content: string, backupsDir?
   }
   const tmp = join(dir, `.${name}.tmp-${ts}`)
   writeFileSync(tmp, content, { mode: mode ?? 0o600 })
-  renameSync(tmp, file)
+  renameWithRetry(tmp, file)
   return backup
+}
+
+/** rename 落盘：EBUSY/EPERM/EACCES 时 50ms×10 退避重试（同步；主进程低频写路径，代价可忽略） */
+function renameWithRetry(from: string, to: string): void {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      renameSync(from, to)
+      return
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (attempt >= 9 || (code !== 'EBUSY' && code !== 'EPERM' && code !== 'EACCES')) throw err
+      // 同步小睡：Atomics.wait 是主进程可用的唯一同步 sleep
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+    }
+  }
 }
 
 /** 读取 profile 的 cordis.patch.yml（不存在返回空文本） */
