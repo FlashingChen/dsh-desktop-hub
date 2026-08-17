@@ -165,53 +165,101 @@ const manifest = {
 writeFileSync(join(root, 'resources', 'runtime-manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
 console.log(`[bundle] manifest: resources/runtime-manifest.json`)
 
-// 4) win32 交叉目标瘦身：只保留 win32-x64 运行所需的文件。
-// 收益：安装更小更快、文件数大降（Windows Defender 首扫与 NSIS 安装均随文件数/体积线性变慢）。
-if (TARGET) {
-  trimWin32Runtime(nodeDir, runtimeDir)
-}
+// 4) 交叉目标瘦身 + 通用裁剪（调用在文件末尾所有声明之后，见 end）
+const TRIM = TARGET || process.env.TRIM_RUNTIME === '1'
 
-function removeSourceMaps(dir) {
+/** 递归 walk：目录先判删，文件交给 fn（跳过 node_modules 目录本身） */
+function walkRuntime(dir, skipDirs, fn) {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, e.name)
-    if (e.isDirectory()) removeSourceMaps(p)
-    else if (e.name.endsWith('.map')) rmSync(p, { force: true })
+    if (e.isDirectory()) {
+      if (e.name !== 'node_modules' && skipDirs.has(e.name)) {
+        rmSync(p, { recursive: true, force: true })
+        continue
+      }
+      walkRuntime(p, skipDirs, fn)
+    } else fn(p, e.name)
   }
 }
 
-function trimWin32Runtime(nodeDir, runtimeDir) {
-  // 1) node 发行残留：zip 缓存（manifest 已锁定 sha）+ corepack + 文档/安装脚本
-  rmSync(join(nodeDir, TARBALL), { force: true })
-  for (const f of ['corepack', 'corepack.cmd', 'corepack.ps1', 'install_tools.bat', 'CHANGELOG.md']) {
-    rmSync(join(nodeDir, f), { recursive: true, force: true })
+const SKIP_DIRS = new Set(['test', 'tests', '__tests__', 'benchmark', 'bench', 'examples'])
+
+function trimRuntime(nodeDir, runtimeDir, winOnly) {
+  const rm = (p) => rmSync(p, { recursive: true, force: true })
+  // 1) 文档/类型/测试/点文件（平台无关；LICENSE/NOTICE/AUTHORS/COPYING 保留——合规）
+  const dropFile = (p, name) => {
+    if (name === '.map' || name.endsWith('.map')) return rm(p)
+    if (name.endsWith('.d.ts') || name.endsWith('.md')) return rm(p)
+    if (/^(README|CHANGELOG|SECURITY|CONTRIBUTING)/i.test(name)) return rm(p)
+    if (/^\.(npmignore|gitignore|gitattributes|editorconfig|eslintrc|prettierrc|yarn-integrity|DS_Store)/.test(name)) return rm(p)
   }
-  // 2) node-pty：只留 win32-x64 prebuilds 与 conpty win10-x64（删其余平台）
-  const pty = join(runtimeDir, 'node_modules', 'node-pty')
-  const prebuilds = join(pty, 'prebuilds')
-  if (existsSync(prebuilds)) {
-    for (const d of readdirSync(prebuilds)) {
-      if (d !== 'win32-x64') rmSync(join(prebuilds, d), { recursive: true, force: true })
-    }
-  }
-  const conpty = join(pty, 'third_party', 'conpty')
-  if (existsSync(conpty)) {
-    for (const verDir of readdirSync(conpty)) {
-      const ver = join(conpty, verDir)
-      if (!existsSync(ver)) continue
-      for (const sub of readdirSync(ver)) {
-        const s = sub.toLowerCase()
-        if (s.includes('arm64') || s.includes('x86')) rmSync(join(ver, sub), { recursive: true, force: true })
+  walkRuntime(nodeDir, SKIP_DIRS, dropFile)
+  walkRuntime(runtimeDir, SKIP_DIRS, dropFile)
+  // 2) 嵌套 @opentelemetry 副本（顶层保留；嵌套的 2.9.0 满足顶层 ^2.9.0 解析，Node 向上回退）
+  //    （同时递归进入顶层 @opentelemetry——前版 bug：顶层名被跳过导致嵌套未删）
+  const nm = join(runtimeDir, 'node_modules')
+  const dropNestedOtel = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue
+      const p = join(dir, e.name)
+      if (e.name === 'node_modules') {
+        const otel = join(p, '@opentelemetry')
+        if (existsSync(otel) && p !== nm) rm(otel)
+        dropNestedOtel(p)
+      } else {
+        dropNestedOtel(p)
       }
     }
   }
-  // 3) pnpm：只留 fastlist x64
-  for (const rel of ['dist/vendor/fastlist-0.3.0-x86.exe', 'artifacts/exe/dist/vendor/fastlist-0.3.0-x86.exe']) {
-    rmSync(join(runtimeDir, 'node_modules', 'pnpm', rel), { force: true })
+  dropNestedOtel(nm)
+  // 3) @opentelemetry/*/build/esnext 全删：'esnext' 不是 Node exports 条件（Node 解析走 default→build/src），
+  //    仅打包器使用，运行时永不加载。
+  const otelRoot = join(nm, '@opentelemetry')
+  if (existsSync(otelRoot)) {
+    for (const name of readdirSync(otelRoot)) {
+      rm(join(otelRoot, name, 'build', 'esnext'))
+    }
+    // mistralai src 是 TS 源码（main 指向 esm/index.js），运行时不需要
+    rm(join(runtimeDir, 'node_modules', '@mistralai', 'mistralai', 'src'))
   }
-  // 4) sharp：x64 目标不需要 wasm 回退
-  rmSync(join(runtimeDir, 'node_modules', '@img', 'sharp-wasm32'), { recursive: true, force: true })
-  // 5) sourcemap 全删（运行时不需要；文件数与体积大头）
-  removeSourceMaps(nodeDir)
-  removeSourceMaps(runtimeDir)
-  console.log('[bundle] 交叉捆绑：已瘦身（zip 缓存/corepack/非 win32-x64 prebuilds/wasm/sourcemap）')
+  // 4) win32 专属（交叉捆绑时才执行，darwin 验证需保留本机 prebuilds）
+  if (winOnly) {
+    rm(join(nodeDir, TARBALL))
+    for (const f of ['corepack', 'corepack.cmd', 'corepack.ps1', 'install_tools.bat', 'CHANGELOG.md']) {
+      rm(join(nodeDir, f))
+    }
+    const pty = join(runtimeDir, 'node_modules', 'node-pty')
+    const prebuilds = join(pty, 'prebuilds')
+    if (existsSync(prebuilds)) {
+      for (const d of readdirSync(prebuilds)) {
+        if (d !== 'win32-x64') rm(join(prebuilds, d))
+      }
+    }
+    const conpty = join(pty, 'third_party', 'conpty')
+    if (existsSync(conpty)) {
+      for (const verDir of readdirSync(conpty)) {
+        const ver = join(conpty, verDir)
+        if (!existsSync(ver)) continue
+        for (const sub of readdirSync(ver)) {
+          const s = sub.toLowerCase()
+          if (s.includes('arm64') || s.includes('x86')) rm(join(ver, sub))
+        }
+      }
+    }
+    for (const rel of ['dist/vendor/fastlist-0.3.0-x86.exe', 'artifacts/exe/dist/vendor/fastlist-0.3.0-x86.exe']) {
+      rm(join(runtimeDir, 'node_modules', 'pnpm', rel))
+    }
+    rm(join(runtimeDir, 'node_modules', '@img', 'sharp-wasm32'))
+  }
+  // 5) 统计
+  const count = (d) => {
+    let n = 0
+    walkRuntime(d, new Set(), () => { n++ })
+    return n
+  }
+  console.log(`[bundle] 裁剪完成：node ${count(nodeDir)} 文件 / dsh-runtime ${count(runtimeDir)} 文件${winOnly ? '（含 win32 专属裁剪）' : ''}`)
+}
+
+if (TRIM) {
+  trimRuntime(nodeDir, runtimeDir, !!TARGET)
 }
