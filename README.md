@@ -9,10 +9,11 @@
 DeepSeek Harness 官方 Web UI 桌面客户端 —— 内置 MCP 配置转换、Skills 管理、Plugin 管理三个管理台。
 
 [![macOS 下载 DMG](https://img.shields.io/badge/macOS-%E4%B8%8B%E8%BD%BD%20DMG-4d6bfe?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/FlashingChen/dsh-desktop-hub/releases/latest)
-[![Windows 即将推出](https://img.shields.io/badge/Windows-%E5%8D%B3%E5%B0%86%E6%8E%A8%E5%87%BA-9ca3af?style=for-the-badge&logo=windows&logoColor=white)]()
+[![Windows 下载 EXE](https://img.shields.io/badge/Windows-%E4%B8%8B%E8%BD%BD%20EXE-4d6bfe?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/FlashingChen/dsh-desktop-hub/releases/latest)
 [![GitHub release](https://img.shields.io/github/v/release/FlashingChen/dsh-desktop-hub?color=4d6bfe)](https://github.com/FlashingChen/dsh-desktop-hub/releases)
 [![License MIT](https://img.shields.io/github/license/FlashingChen/dsh-desktop-hub?color=4d6bfe)](LICENSE)
-[![CI](https://github.com/FlashingChen/dsh-desktop-hub/actions/workflows/release.yml/badge.svg)](https://github.com/FlashingChen/dsh-desktop-hub/actions)
+[![CI](https://github.com/FlashingChen/dsh-desktop-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/FlashingChen/dsh-desktop-hub/actions/workflows/ci.yml)
+[![Release](https://github.com/FlashingChen/dsh-desktop-hub/actions/workflows/release.yml/badge.svg)](https://github.com/FlashingChen/dsh-desktop-hub/actions/workflows/release.yml)
 
 </div>
 
@@ -50,11 +51,11 @@ Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH �
 
 ## 快速开始
 
-1. **下载** macOS DMG 并安装（首次打开提示未验证开发者时：右键 → 打开）。
+1. **下载安装**：macOS 下载 DMG；Windows 下载 EXE（当前未签名，首次运行需放行一次：macOS 右键 → 打开；Windows SmartScreen → 更多信息 → 仍要运行）。
 2. **配置模型**：在 Harness Tab 的官方 Web UI 里填入 API Key（首次引导会提示）。
 3. **开始使用**：直接对话；需要外部工具时，到 MCP / Skills / Plugin Tab 管理。
 
-> 当前为预览版（macOS arm64，未签名 DMG）；Windows 包即将推出。
+> 当前为预览版（macOS arm64 / Windows x64，均未签名）。
 
 ## Roadmap
 
@@ -64,7 +65,8 @@ Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH �
 | 🚧 | Profile 切换（当前固定 `web`） |
 | Planned | Model Manager（API Key / 模型管理面板） |
 | Planned | Doctor（环境自检与一键修复） |
-| Planned | Windows / Linux 安装包 |
+| ✅ | Windows 安装包（NSIS，x64，与 macOS 并行发布） |
+| Planned | Linux 安装包 |
 | Planned | 自动更新（electron-updater） |
 
 ## 社区与反馈
@@ -144,10 +146,10 @@ dsh-desktop-hub/
 │   ├── capture-demo.mjs        # README 演示截图/GIF 捕获（合成演示 profile，不碰真实数据）
 │   ├── verify.mjs              # 一键门禁：契约 + 构建 + typecheck×2 + 单测
 │   └── verify-m1.mjs           # M1 实机验证：dsh web 启动 → HTTP 200 → 优雅停止
-├── resources/                  # 捆绑运行时（gitignore）：node/ + dsh-runtime/（约 586MB）
+├── resources/                  # 捆绑运行时（node_modules 忽略）：nd/（Node 本体+shim）+ rt/（dsh runtime，锁文件入库）
 ├── assets/demo/                # README 截图与 GIF（脚本生成，可重跑）
 ├── build/icon.png              # 应用图标（electron-builder 引用，macOS 自动转 icns）
-├── release/                    # electron-builder 产物（gitignore）：DMG arm64
+├── release/                    # electron-builder 产物（gitignore）：DMG arm64 + NSIS EXE x64
 ├── dist/                       # tsc 产物（gitignore）
 ├── tsconfig.json               # 主进程 + core + preload（NodeNext，outDir dist）
 ├── tsconfig.preload.json       # preload：CommonJS → dist/preload/preload.cjs
@@ -163,7 +165,7 @@ dsh-desktop-hub/
 | `npm install` | 安装依赖（electron / typescript / electron-builder / yaml） |
 | `npm run build` | 三套 tsc（main+core → preload CJS → renderer）+ 拷贝 index.html，产物 `dist/` |
 | `npm run typecheck` | `tsc --noEmit`（main + core + preload；renderer 类型检查含在 `verify` 中） |
-| `npm test` | `node --test "tests/*.test.mjs"` 单测（**需先 build**，测试从 dist 导入） |
+| `npm test` | `node --test` 单测（自动发现 `tests/`，Windows 兼容；**需先 build**，测试从 dist 导入） |
 | `npm start` | 产品模式：启动 harness + 四 Tab 壳（需 dsh 可用且 `~/.dsh` 存在 web profile） |
 | `npm run smoke` | 骨架冒烟（不启 harness）：四 Tab DOM + 真实插件/MCP/skills 数据断言，截屏 `artifacts/m0-smoke.png` |
 | `npm run smoke:harness` | 真实 harness 冒烟：iframe 挂载 + 状态「已连接」，截屏 `artifacts/m1-harness.png` |
@@ -176,30 +178,28 @@ dsh-desktop-hub/
 npm run build                          # 1. 构建 dist/
 node scripts/bundle-runtime.mjs        # 2. 捆绑运行时（首次/更新）：下载 Node v24.10.0 +
                                       #    安装 @deepseek-ai/dsh@0.1.0-rc.6 到 resources/
-npx electron-builder                   # 3. 读 electron-builder.yml → release/DSH-Desktop-Hub-&lt;version&gt;-arm64.dmg
+npx electron-builder --mac dmg --arm64 # 3. macOS：release/DSH-Desktop-Hub-<version>-arm64.dmg
+npx electron-builder --win nsis --x64  # 4. Windows：release/DSH-Desktop-Hub-<version>-x64.exe
 ```
 
-- `bundle-runtime.mjs`：下载官方 Node v24.10.0（darwin/linux × arm64/x64）到 `resources/node`，用捆绑 npm 以 `--ignore-scripts` 安装锁定版本 `@deepseek-ai/dsh@0.1.0-rc.6` 到 `resources/dsh-runtime`。
-- `electron-builder.yml`：`files` 含 `dist/**/*` + `resources/**/*`；`asarUnpack` 展开 `resources/dsh-runtime` 与 `resources/node`（`resolveDshExec` 兼容 `app.asar.unpacked/resources` 布局）；mac 目标 DMG（arm64），`identity: null`（不签名）。
+- `bundle-runtime.mjs`：下载官方 Node v24.10.0（win/darwin/linux × x64/arm64）到 `resources/nd`，用捆绑 npm 以 `--ignore-scripts` 安装锁定版本 `@deepseek-ai/dsh@0.1.0-rc.6` 到 `resources/rt`；`RUNTIME_TARGET=win32` 可在 macOS 上交叉捆绑 Windows 运行时（含 .cmd shim 生成）。
+- `electron-builder.yml`：`files` 含 `dist/**/*` + `resources/**/*`；`asar: false`（产物直放 `resources/app`，压低 Windows 安装路径深度）；mac 目标 DMG（arm64）+ Windows 目标 NSIS（x64，oneClick per-user）；均未签名。
 - 打包后的应用在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）的环境下可用捆绑运行时启动。
 
 ## Release
 
-推送 `v*` tag 后，GitHub Actions 会自动完成：
+推送 `v*` tag 后，GitHub Actions 自动完成发布（无需手动构建/上传）：
 
-1. `npm ci` 安装依赖
-2. `npm run verify`：类型检查 + 构建 + 测试
-3. `node scripts/bundle-runtime.mjs`：生成捆绑运行时（Node + DSH）
-4. `npx electron-builder --mac dmg`：打包 macOS arm64 DMG
-5. 创建 GitHub Release 并上传 `.dmg` / `.dmg.blockmap`
+1. 创建 draft Release（自动生成 release notes）
+2. **并行构建**：macOS arm64 DMG（macos-15）与 Windows x64 NSIS 安装包（windows-latest），各自执行 `verify` → 捆绑运行时 → `electron-builder`
+3. **双平台都成功后自动转正发布**，上传 `.dmg / .dmg.blockmap / .exe / .exe.blockmap / latest.yml / latest-mac.yml`（`latest*.yml` 供自动更新通道使用）
 
 ```sh
-git push origin main
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
-> 当前仓库 `resources/` 已被 `.gitignore` 忽略；CI 会通过 `bundle-runtime.mjs` 在打包时重新生成，不需要把大文件提交进仓库。
+> `resources/` 采用「蓝图入库」：`nd/node.exe`、`rt/package-lock.json` 提交进仓库；`rt/node_modules`（数百 MB）被忽略，由 `bundle-runtime.mjs` 在打包时从锁文件重建（`npm ci`）。
 
 ## 验证基线
 
@@ -223,7 +223,7 @@ git push origin v0.1.0
 - **MCP `!!js` backtick 模板兼容**：patch 中以反引号模板写 `Bearer ${...}`（官方 README 示例写法）超出 yaml 解析器语法，MCP 面板会拒绝解析并提示；请改用单引号字符串 `!!js 'Bearer ${...}'`（语义为字面字符串）或行级 `process.env.X`。
 - **MCP 无文件导入**：MCP 面板支持粘贴 JSON（`${VAR}` 自动转 `!!js process.env.VAR`；默认合并写入，可选全量替换），暂无 `.mcp.json` 文件选择器。
 - **退出边界**：正常退出走 SIGTERM 进程组清理 + 单实例锁；Harness 意外退出可在 UI 一键重启；强杀（timeout / group-kill）仍可能遗留 dsh 子进程。
-- **打包范围**：仅 macOS DMG（arm64），未签名（`identity: null`）；Windows / Linux 打包待做；无自动更新。
+- **打包范围**：macOS DMG（arm64）+ Windows NSIS 安装包（x64），均未签名（首次运行需按平台放行一次）；Linux 待做；无自动更新。
 - **体积**：`resources/` 捆绑运行时约 586MB（gitignore），首包体积较大。
 - **写操作落真实 profile**：MCP「写入 patch」真实修改 `~/.dsh/profiles/web/cordis.patch.yml`（写入前自动 `.bak-<ts>` 备份）；插件安装/移除真实执行 `dsh plugin`。
 
