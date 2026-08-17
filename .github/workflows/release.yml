@@ -98,7 +98,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$USERPROFILE/.dsh/profiles/web"
-          printf '{"dependencies":{},"dsh":{"profile":{"bundles":[]}}}' > "$USERPROFILE/.dsh/profiles/web/package.json"
+          # bundles 必须非空：listProfiles 会过滤空 bundles 的 profile，否则 smoke 的 plugin 状态无法加载
+          printf '{"dependencies":{},"dsh":{"profile":{"bundles":["web"]}}}' > "$USERPROFILE/.dsh/profiles/web/package.json"
 
       - name: Smoke test (Electron renderer + tabs, no harness)
         # 主帧加载失败（如非法 file:// URL）会让 smoke 非零退出——Windows 渲染回归的守门员
