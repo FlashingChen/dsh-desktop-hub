@@ -85,11 +85,13 @@ test('parseHarnessUrl 解析 dsh web 输出', () => {
 test('runtimePathEnv 在捆绑 runtime 存在时把 node/bin 与 .bin 加入 PATH，否则原样返回', () => {
   const exec = resolveDshExec()
   const env = runtimePathEnv()
-  assert.ok(env && typeof env.PATH === 'string', '应有 PATH')
+  // Windows 的 PATH 键是 Path（大小写敏感，spread 副本不兼容大小写混用），随平台取键
+  const pathKey = process.platform === 'win32' ? 'Path' : 'PATH'
+  assert.ok(env && typeof env[pathKey] === 'string', '应有 PATH')
   if (exec?.node) {
-    assert.ok(env.PATH.includes(dirname(exec.node)), `PATH 应包含捆绑 node/bin: ${env.PATH}`)
-    assert.ok(env.PATH.includes(join(root, 'resources', 'rt', 'node_modules', '.bin')), `PATH 应包含运行时 .bin: ${env.PATH}`)
+    assert.ok(env[pathKey].includes(dirname(exec.node)), `PATH 应包含捆绑 node/bin: ${env[pathKey]}`)
+    assert.ok(env[pathKey].includes(join(root, 'resources', 'rt', 'node_modules', '.bin')), `PATH 应包含运行时 .bin: ${env[pathKey]}`)
   }
   // 不破坏原有 PATH 内容
-  assert.ok(env.PATH.includes(process.env.PATH ?? ''), '原 PATH 应保留')
+  assert.ok(env[pathKey].includes(process.env[pathKey] ?? ''), '原 PATH 应保留')
 })
