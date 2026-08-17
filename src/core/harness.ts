@@ -252,10 +252,12 @@ export async function stopTree(proc: ChildProcess): Promise<void> {
   if (process.platform === 'win32') {
     taskkillTree(proc.pid, false)
     const { promise, resolve } = Promise.withResolvers<void>()
+    // 优雅窗口 800ms（非 2s）：安装器非 PowerShell 路径在 WM_CLOSE 后约 1300ms（300+1000）即 /F 强杀主进程；
+    // 优雅清理须落在该窗口内，否则 stopTree 半途被 TerminateProcess → node.exe 孤儿
     const t = setTimeout(() => {
       taskkillTree(proc.pid!, true)
       resolve()
-    }, 2000)
+    }, 800)
     proc.once('exit', () => {
       clearTimeout(t)
       resolve()

@@ -66,6 +66,8 @@ let mainWindow: BrowserWindow | null = null
 let harness: HarnessHandle | null = null
 let restarting = false
 let stoppingHarness = false
+/** 退出标志：将在退出清理期间抑制 harness 自动重启（防关闭竞态 respawn 出孤儿） */
+let quitting = false
 let autoRestartTimer: NodeJS.Timeout | null = null
 /** 启动中（尚未就绪）的 dsh 子进程：退出时若仍在途则必须清理，防孤儿 */
 let startingProc: ChildProcess | null = null
@@ -554,7 +556,8 @@ function createSkeletonWindow(): void {
 // ---- harness 生命周期监控（P2-11）：意外退出 → 通知 UI + 自动重启（墙钟限流） ----
 function watchHarness(proc: HarnessHandle['proc']): void {
   proc.on('exit', (code, signal) => {
-    if (restarting || stoppingHarness || autoRestartTimer) return
+    // quitting：will-quit 清理期间不再触发自动重启（防关闭竞态 respawn 出孤儿）
+    if (restarting || stoppingHarness || autoRestartTimer || quitting) return
     log(`harness: 意外退出（code=${code}, signal=${signal ?? ''}），自动重启`)
     harness = null
     if (!canAutoRestart()) {
@@ -741,7 +744,6 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-let quitting = false
 app.on('will-quit', (e) => {
   clearTimeout(autoRestartTimer ?? undefined)
   autoRestartTimer = null

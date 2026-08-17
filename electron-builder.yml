@@ -32,6 +32,8 @@ win:
 nsis:
   oneClick: true
   perMachine: false
+  # 自定义「运行中应用查杀」：修默认实现盲区（目录内 node.exe 孤儿、域账户 USERNAME 过滤失配）
+  include: installer.nsh
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: DSH Desktop Hub
