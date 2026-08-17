@@ -41,7 +41,7 @@ const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx'
 const spawnOpts = { cwd: root, encoding: 'utf8', shell: process.platform === 'win32' }
 /** 组装错误摘要：spawn 失败时 stderr/stdout 可能为 null，不得直接 .slice（防空指针掩蔽真实错误）；取尾部（错误详情通常在末尾） */
-const errSummary = (r) => String((r.stderr || r.stdout || `spawn 失败（status=${r.status} error=${r.error ?? ''}）`).slice(-400))
+const errSummary = (r) => String((r.stderr || r.stdout || `spawn 失败（status=${r.status} error=${r.error ?? ''}）`).slice(-2000))
 
 // 4) 构建（harness/plugins 测试依赖 dist）
 const build = spawnSync(npmCmd, ['run', 'build'], spawnOpts)
