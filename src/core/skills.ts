@@ -9,7 +9,7 @@ import {
   renameSync,
   mkdtempSync,
 } from 'node:fs'
-import { join, dirname, resolve, basename } from 'node:path'
+import { join, dirname, resolve, basename, relative, isAbsolute } from 'node:path'
 import { homedir } from 'node:os'
 import { parseDocument, stringify } from 'yaml'
 import AdmZip from 'adm-zip'
@@ -342,7 +342,9 @@ function writeBundleFromZip(zip: AdmZip, sourceDir: string, root: string, overwr
       const rel = safeZipRelPath(norm.slice(skillDir.length + 1))!
       if (!rel) continue
       const dest = resolve(tmpDir, rel)
-      if (!dest.startsWith(resolve(tmpDir) + '/')) {
+      // 越界判定用 relative()：Windows 上 resolve 产物是反斜杠路径，直接 startsWith(前缀+'/') 会永不匹配
+      const relToTmp = relative(tmpDir, dest)
+      if (relToTmp.startsWith('..') || isAbsolute(relToTmp)) {
         throw new Error(`解压路径越界: ${e.entryName}`)
       }
       mkdirSync(dirname(dest), { recursive: true })

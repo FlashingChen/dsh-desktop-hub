@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 合并前的快速门禁：验证编译/测试 + Windows 渲染 smoke（不打包，打包走 release.yml）
+  windows-gate:
+    name: Verify + smoke
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify (typecheck + build + tests)
+        run: npm run verify
+
+      - name: Prepare smoke profile (empty web profile for CI)
+        shell: bash
+        run: |
+          mkdir -p "$USERPROFILE/.dsh/profiles/web"
+          # bundles 必须非空：listProfiles 会过滤空 bundles 的 profile，否则 smoke 的 plugin 状态无法加载
+          printf '{"dependencies":{},"dsh":{"profile":{"bundles":["web"]}}}' > "$USERPROFILE/.dsh/profiles/web/package.json"
+
+      - name: Smoke test (Electron renderer + tabs, no harness)
+        timeout-minutes: 5
+        run: npx electron . --smoke
+
+      - name: Upload main log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-main-log
+          path: |
+            ${{ env.USERPROFILE }}/.dsh-desktop-hub/logs/*.log
+            dist/test-stderr.log
+          if-no-files-found: ignore

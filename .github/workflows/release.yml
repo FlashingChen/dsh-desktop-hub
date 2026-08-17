@@ -9,9 +9,22 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build & Release (${{ github.ref_name }})
+  # 1) 秒级：先建 draft Release（含自动 release notes），Win/Mac 构建完一起转正
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --generate-notes --repo "$GITHUB_REPOSITORY"
+
+  # 2a) macOS（DMG 只能在 macOS runner 构建）——与 Windows 并行
+  build-mac:
+    name: Build macOS installer (${{ github.ref_name }})
     runs-on: macos-15 # arm64 runner，匹配 electron-builder.yml 中的 mac.arch: arm64
+    needs: create-release
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,7 +47,7 @@ jobs:
       - name: Verify (typecheck + build + tests)
         run: npm run verify
 
-      - name: Bundle runtime (Node + DSH)
+      - name: Bundle runtime (Node + DSH, darwin)
         run: node scripts/bundle-runtime.mjs
 
       - name: Package DMG
@@ -43,23 +56,18 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: |
-            release/*.dmg
-            release/*.dmg.blockmap
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+      - name: Upload artifacts to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" release/*.dmg release/*.dmg.blockmap release/latest-mac.yml \
+            --clobber --repo "$GITHUB_REPOSITORY"
 
-  release-windows:
+  # 2b) Windows（NSIS 在 Windows runner 上构建）——与 macOS 并行
+  build-windows:
     name: Build Windows installer (${{ github.ref_name }})
     runs-on: windows-latest
-    # 等 mac job 先建好 release 再上传资产，避免 softprops 并发 create release 冲突
-    needs: release
+    needs: create-release
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -90,7 +98,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$USERPROFILE/.dsh/profiles/web"
-          printf '{"dependencies":{},"dsh":{"profile":{"bundles":[]}}}' > "$USERPROFILE/.dsh/profiles/web/package.json"
+          # bundles 必须非空：listProfiles 会过滤空 bundles 的 profile，否则 smoke 的 plugin 状态无法加载
+          printf '{"dependencies":{},"dsh":{"profile":{"bundles":["web"]}}}' > "$USERPROFILE/.dsh/profiles/web/package.json"
 
       - name: Smoke test (Electron renderer + tabs, no harness)
         # 主帧加载失败（如非法 file:// URL）会让 smoke 非零退出——Windows 渲染回归的守门员
@@ -111,14 +120,22 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
-      - name: Publish GitHub Release (Windows)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: |
-            release/*.exe
-            release/*.exe.blockmap
-          generate_release_notes: false
-          fail_on_unmatched_files: true
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+      - name: Upload artifacts to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" release/*.exe release/*.exe.blockmap release/latest.yml \
+            --clobber --repo "$GITHUB_REPOSITORY"
+
+  # 3) 收尾：双平台都成功才把 draft 转正（实现「完成一个版本后自动发布」）
+  publish:
+    name: Publish release (${{ github.ref_name }})
+    runs-on: ubuntu-latest
+    needs: [build-mac, build-windows]
+    steps:
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
