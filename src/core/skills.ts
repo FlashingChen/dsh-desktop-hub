@@ -438,3 +438,57 @@ export async function importSkillFromGitHub(
   const sourceDir = [topLevel, subPath].filter(Boolean).join('/')
   return writeBundleFromZip(zip, sourceDir, opts.root, opts.overwrite ?? false)
 }
+
+function validClawHubPart(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(value)
+}
+
+/** 从 ClawHub 的公开 file API 导入固定版本的 SKILL.md。
+ * ClawHub 的公开读取接口对辅助文件没有稳定的匿名打包接口，因此当前只落地其规范入口文件，
+ * 不执行 skill 中的脚本；需要辅助文件的 Skill 仍应从 SkillsMP 的 GitHub source 安装。 */
+export async function importSkillFromClawHub(
+  input: { owner: string; slug: string; version?: string },
+  opts: { root: string; overwrite?: boolean },
+): Promise<SkillImportResult> {
+  const owner = input.owner.trim()
+  const slug = input.slug.trim()
+  if (!validClawHubPart(owner) || !validClawHubPart(slug)) throw new Error('ClawHub owner/slug 无效')
+  const apiBase = `https://clawhub.ai/api/v1/skills/${encodeURIComponent(slug)}`
+  let version = input.version?.trim() || 'latest'
+  if (version === 'latest') {
+    const detailResponse = await fetch(`${apiBase}?owner=${encodeURIComponent(owner)}`, {
+      headers: { Accept: 'application/json', 'User-Agent': 'DSH-Desktop-Hub/0.2' },
+      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+    })
+    if (!detailResponse.ok) throw new Error(`ClawHub skill 元数据请求失败（HTTP ${detailResponse.status}）`)
+    const detail = (await detailResponse.json()) as { latestVersion?: { version?: unknown } } | null
+    const resolved = detail?.latestVersion?.version
+    if (typeof resolved !== 'string' || !resolved.trim()) throw new Error('ClawHub 没有返回可安装版本')
+    version = resolved.trim()
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/.test(version)) throw new Error('ClawHub skill 版本无效')
+  const fileUrl = `${apiBase}/file?owner=${encodeURIComponent(owner)}&path=SKILL.md&version=${encodeURIComponent(version)}`
+  const response = await fetch(fileUrl, {
+    headers: { Accept: 'text/markdown, text/plain', 'User-Agent': 'DSH-Desktop-Hub/0.2' },
+    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+  })
+  if (!response.ok) throw new Error(`ClawHub SKILL.md 下载失败（HTTP ${response.status}）`)
+  const length = Number(response.headers.get('content-length') ?? 0)
+  if (length > MAX_ENTRY_SIZE) throw new Error(`SKILL.md 超过单文件上限 ${MAX_ENTRY_SIZE} 字节`)
+  const text = await response.text()
+  if (!text.trim() || text.includes('\0') || text.length > MAX_ENTRY_SIZE) throw new Error('ClawHub SKILL.md 内容无效或超过大小上限')
+  const { meta } = parseSkillFile(text)
+  const name = skillNameOf(meta.name, slug)
+  const target = join(opts.root, name)
+  mkdirSync(opts.root, { recursive: true })
+  const tmpParent = mkdtempSync(join(dirname(opts.root), '.dsh-clawhub-'))
+  const tmpSkill = join(tmpParent, name)
+  try {
+    mkdirSync(tmpSkill, { recursive: true })
+    writeFileSync(join(tmpSkill, 'SKILL.md'), text)
+    installExtracted(tmpSkill, target, opts.overwrite ?? false)
+    return { name, file: join(target, 'SKILL.md'), installed: [join(target, 'SKILL.md')] }
+  } finally {
+    rmSync(tmpParent, { recursive: true, force: true })
+  }
+}

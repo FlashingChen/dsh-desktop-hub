@@ -1,6 +1,6 @@
 # DSH Desktop Hub — 产品需求文档（PRD）
 
-> 状态：**已实现（审计修复完成）**（§2 调研结论为实施依据；M0-M5 已按 plan.md 全部落地并通过验证，见 §5；AUDIT_REPORT.md 的 P0-P3 全部修复）
+> 状态：**已实现（审计修复完成）**（§2 调研结论为实施依据；M0-M6 已按 plan.md 全部落地并通过验证，见 §5；AUDIT_REPORT.md 的 P0-P3 全部修复）
 > 版本：v0.1 · 日期：2026-08-16
 > 应用名：**DSH Desktop Hub**（已定名并落实，规避社区 `dsh-desktop` / `dsh_desktop` 撞名）
 
@@ -50,7 +50,7 @@
 | [myYangyunfan/dsh_desktop](https://github.com/myYangyunfan/dsh_desktop) | 304 | Windows 专用 Electron 壳，内置 node.exe + `@deepseek-ai/dsh`，有简单插件市场（npm/github） | 参考；Windows-only、封装而非管理系统 |
 | [mcporter](https://github.com/openclaw/mcporter) | — | 第三方 MCP 配置管理工具，支持 `mcporter config import claude-code` | 验证了「JSON MCP 配置 → 目标格式」转换的行业惯例 |
 
-**差异化结论**：现有桌面端都只做「封装启动」，没有任何产品提供用户要求的三个管理系统的 UI 化整合（Plugin 管理台 / MCP JSON→YAML 转换器 / Skills 管理器）。本项目的定位是 **DSH 桌面管理控制台 + 内置 harness**，补上这个空档。
+**差异化结论**：现有桌面端都只做「封装启动」，没有任何产品提供用户要求的三个管理系统的 UI 化整合（Plugin 管理台 / MCP JSON→YAML 转换器 / Skills 管理器）。本项目的定位是 **DSH 桌面管理控制台 + 内置 harness**，并进一步提供三类扩展市场。
 
 ---
 
@@ -262,7 +262,7 @@ dsh plugin --profile <name> update
 |---|---|---|
 | **Harness（主）** | 官方 Web UI（会话、模型、工具） | iframe 内嵌 loopback Web UI；`harness:frame-loaded` 状态推送 |
 | **Plugin** | profile「web」插件管理 | 列表（名称 / 来源：内置组合包、第三方组合包、普通依赖 / spec）；安装框支持 **npm 包名、`github:owner/repo#commit`、本地路径，并已升级为支持直接粘贴 GitHub 链接**（spec 透传给 `dsh plugin --profile web add`）；对 `dsh-routing-suite` 这类无 `package.json/dsh.bundle` 的聚合仓库拒绝直装，改为显示 injector/preset 的真实识别状态；移除（第三方包）、更新；写操作前确认，变更后提示「重启 harness 生效」 |
-| **MCP** | JSON → YAML 转换器 + 服务器管理 | 粘贴 Claude Code / Cursor 风格 JSON → 转换预览（含警告：`type: sse` 仅按 HTTP 处理、非法 serverName 跳过）→ 确认后写入 profile「web」的 `cordis.patch.yml`（**写入前自动 `.bak-<ts>` 备份**，原子写，官方 HMR 热生效）；显示现有服务器数 |
+| **MCP** | JSON → YAML 转换器 + 服务器管理 | 粘贴 Claude Code / Cursor 风格 JSON → 转换预览（含警告：`type: sse` 仅按 HTTP 处理、非法 serverName 跳过）→ 确认后写入 profile「web」的 `cordis.patch.yml`（**写入前自动 `.bak-<ts>` 备份**，原子写，官方 HMR 热生效）；市场条目声明环境变量时，在安装卡片先填写并写入该 MCP 行，用户无需自行设置系统环境；显示现有服务器数 |
 | **Skills** | skills 目录管理 | 按 DSH rank 规则扫描（用户 `~/.dsh/skills` / `~/.agents/skills` + `$DSH_BUNDLED_SKILL_DIR` 存在时的随包根，rank 400/500/600）；列表按来源标注，同名低 rank 生效、高 rank 标「被遮蔽」；可见性切换仅对用户级生效（项目/自定义/随包只读展示）；**新建**（kebab-case 名称校验 + 描述 + 正文表单，落盘 `~/.dsh/skills/<name>/SKILL.md`）；模型可见 / 用户可见切换（写 frontmatter `disable-model-invocation` / `user-invocable`），改动即时生效 |
 | **Settings（壳级）** | API Key、模型、profile、更新 | 本期未实现（预留；API Key/模型配置复用官方 Web UI 内能力） |
 | **第四系统（占位）** | 预留入口 | 本期未实现（§0 原始需求：暂不做） |
@@ -272,7 +272,7 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四�
 ### 3.4 平台与范围
 
 - **平台**：MVP 目标 macOS（本机开发环境）+ Windows（最大用户盘，参考实现已验证打包路线）；Linux 后续。
-- **本期不做**：第四系统、插件中心化市场（可先做 npm/GitHub 搜索）、手机远程、IM Channels、多 profile 高级管理（MVP 单 profile 起步）。
+- **本期不做**：第四系统、开放式社区市场（本期先做随包精选目录）、手机远程、IM Channels、多 profile 高级管理（MVP 单 profile 起步）。
 
 ---
 
@@ -289,6 +289,7 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四�
 | 配置写入 | 直接编辑 `$DSH_HOME/profiles/web/cordis.patch.yml`（MCP 行），原子写（tmp + rename）+ `.bak-<ts>` 备份，利用官方 HMR 热生效 | 配置层变更无需重启；bundle 安装仍走 `dsh plugin` + 重启 |
 | 转换器 | 主进程纯逻辑模块（`src/core/mcp.ts`，`yaml` 库）：JSON 解析/校验 → 映射表 → YAML 插件行；兼容 `url`/`baseUrl`，`type: sse` 仅警告 | 可单测；无网络依赖 |
 | Skills 管理 | `src/core/skills.ts`：用户级（rank 400/500）+ 随包（`$DSH_BUNDLED_SKILL_DIR`，rank 600）多根扫描 + frontmatter 解析 + 创建 + 可见性切换（与官方检测机制同构，§2.2；项目/自定义根由 DSH 在 workspace 内管理，壳层暂不扫描） | 改动即时生效，天然适合 UI 管理 |
+| 扩展市场 | `src/core/market.ts`：Plugin 接入 DSH Plugin Market 发布的 Awesome DSH Plugin machine snapshot，MCP 合并官方 MCP Registry 与 DSH MCP Market，Skills 合并 ClawHub 与 SkillsMP；schema 校验、磁盘缓存、随包精选目录离线兜底；Plugin 安装前校验 `dsh.bundle` 并锁定 npm 版本/GitHub commit | 外部平台负责发现与来源证明，DSH 负责统一展示、预检、权限确认和安装；所有写入仍需用户确认 |
 | 状态文件 | 暂无（`ACTIVE_PROFILE` 常量 = `'web'`；profile 切换为后续工作） | 当前 MVP 单 profile 起步 |
 
 ### 4.2 进程与生命周期
@@ -321,7 +322,16 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四�
 
 ---
 
-## 5. 里程碑（已实现：M0-M5 全部完成，验证证据与 plan.md 一致）
+## 5. 市场数据来源与归属声明
+
+三类市场均为上游目录聚合，不自称拥有或审计第三方扩展：
+
+- Plugin：`dsh-market/dsh-market` 发布的 Awesome DSH Plugin machine snapshot；README 作为 fallback；npm 仅在安装预检时读取 manifest。
+- MCP：官方 MCP Registry 与 `LKMeng2001/dsh-mcp-market` snapshot。
+- Skills：ClawHub 与 SkillsMP；ClawHub 匿名安装当前落地 `SKILL.md`，SkillsMP GitHub source 可带辅助文件。
+- 完整 URL、缓存、许可证边界与安全提示见 [`MARKET_SOURCES.md`](MARKET_SOURCES.md)。
+
+## 6. 里程碑（已实现：M0-M6 全部完成，验证证据与 plan.md 一致）
 
 | 里程碑 | 内容 | 状态与验证 |
 |---|---|---|
@@ -331,12 +341,13 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四�
 | M3 MCP Tab | JSON→YAML 转换器 + profile `cordis.patch.yml` 事务读写（备份/回滚）+ 服务器列表 | ✅ 已完成：单测 18 例（混合输入/sse 警告/格式拒绝/YAML 同构/提取/替换/编辑/删除保留注释/空 patch 新建/备份事务/`!!js` 行级保真）；UI 支持读取、编辑、删除已有 MCP 行 |
 | M4 Skills Tab | rank 400-600 目录扫描（用户级 + 随包）；SKILL.md/扁平 md 解析 + frontmatter；新建（kebab-case 校验）；模型/用户可见性切换 | ✅ 已完成：单测 13 例（rank 合并/shadowed/custom+bundled 根/往返一致/创建校验/可见性切换/扁平名回退/zip 导入与穿越拒绝）；冒烟真实数据 huashu-design + media-use |
 | M5 桌面整合与打包 | 四 Tab 主窗口整合（Harness iframe 内嵌官方 Web UI）+ electron-builder 出 DMG | ✅ 已完成：默认模式＝启动 harness + 四 Tab 壳；`release/DSH-Desktop-Hub-0.1.0-arm64.dmg` 产物存在；打包 app 在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）下用捆绑运行时启动，HTTP 200；TERM 退出无孤儿 |
+| M6 扩展中心 MVP | Plugin / MCP / Skills 三类市场 + 在线目录搜索 + 精选安装链路 | ✅ 已完成：DSH Plugin Market / Awesome DSH Plugin / 官方 MCP Registry / DSH MCP Market / ClawHub / SkillsMP 接入，来源等级与权限展示，插件 CLI 安装，MCP patch 合并写入，Skills GitHub / ClawHub / 模板安装；账号/评论/社区提交未纳入本期 |
 
 > 后续演进（未在本期范围）：Settings Tab（API Key/模型/更新）、profile 切换、插件 `allowBuilds` 授权向导、MCP/Skills 文件导入、Windows/Linux 打包、自动更新 —— 详见 plan.md「下一步」。
 
 ---
 
-## 6. 风险与开放问题
+## 7. 风险与开放问题
 
 1. **上游破坏性变更**：DSH 是 developer preview，官方明示兼容性会断。已实证：调研期间（2026-08-16）repo main 为 `0.1.0-rc.5` 而 npm latest 已发布 `0.1.0-rc.6`。→ 锁定 npm 版本交付，升级走显式更新。
 2. **命名冲突**：`dsh-desktop` / `dsh_desktop` 已被社区项目占用。→ 需要新应用名（待用户定）。
@@ -347,7 +358,7 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四�
 
 ---
 
-## 7. 交付说明
+## 8. 交付说明
 
-- 本文档为 **v0.1 已实现版**：§2 调研结论作为实施依据落地（见 §3.3 / §4 / §5 的当前实现说明）；M0-M5 已按 plan.md 完成并通过验证（`npm run verify` / `smoke` / `smoke:harness` / `verify:m1`）。
+- 本文档为 **v0.1 已实现版**：§2 调研结论作为实施依据落地（见 §3.3 / §4 / §5 的当前实现说明）；M0-M6 已按 plan.md 完成并通过验证（`npm run verify` / `smoke` / `smoke:harness` / `verify:m1`）。
 - 调研证据均为公开仓库当前 main/HEAD 状态；DSH 迭代快，实施以锁定的 npm 版本（`@deepseek-ai/dsh@0.1.0-rc.6`）为准。

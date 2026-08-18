@@ -24,6 +24,9 @@ const CH = {
   skillsToggle: 'skills:toggle',
   skillsImportFile: 'skills:import-file',
   skillsImportUrl: 'skills:import-url',
+  skillsImportClawHub: 'skills:import-clawhub',
+  marketList: 'market:list',
+  marketPluginPreflight: 'market:plugin-preflight',
 } as const
 
 interface HarnessStatus {
@@ -81,10 +84,16 @@ contextBridge.exposeInMainWorld('dshDesktop', {
   },
   skills: {
     list: () => ipcRenderer.invoke(CH.skillsList),
-    create: (input: { name: string; description: string; body: string }) => ipcRenderer.invoke(CH.skillsCreate, input),
+    create: (input: { name: string; description: string; body: string; overwrite?: boolean }) => ipcRenderer.invoke(CH.skillsCreate, input),
     toggle: (input: { id: string; source: string; kind: 'model' | 'user'; value: boolean }) =>
       ipcRenderer.invoke(CH.skillsToggle, input),
     importFile: (buffer: ArrayBuffer, overwrite: boolean) => ipcRenderer.invoke(CH.skillsImportFile, buffer, overwrite),
     importUrl: (url: string, overwrite: boolean) => ipcRenderer.invoke(CH.skillsImportUrl, url, overwrite),
+    importClawHub: (input: { owner: string; slug: string; version?: string }, overwrite: boolean) =>
+      ipcRenderer.invoke(CH.skillsImportClawHub, input, overwrite),
+  },
+  market: {
+    list: (kind: 'plugin' | 'mcp' | 'skill', query?: string) => ipcRenderer.invoke(CH.marketList, kind, query),
+    preflightPlugin: (spec: string) => ipcRenderer.invoke(CH.marketPluginPreflight, spec),
   },
 })

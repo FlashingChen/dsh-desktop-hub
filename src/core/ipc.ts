@@ -23,6 +23,9 @@ export const IPC = {
   skillsToggle: 'skills:toggle',
   skillsImportFile: 'skills:import-file',
   skillsImportUrl: 'skills:import-url',
+  skillsImportClawHub: 'skills:import-clawhub',
+  marketList: 'market:list',
+  marketPluginPreflight: 'market:plugin-preflight',
 } as const
 
 export type PluginOpAction = 'add' | 'remove' | 'update'

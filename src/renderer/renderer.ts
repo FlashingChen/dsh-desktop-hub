@@ -35,6 +35,67 @@ interface PluginOpDone {
   output: string
 }
 
+type MarketKind = 'plugin' | 'mcp' | 'skill'
+
+interface MarketBaseItem {
+  id: string
+  kind: MarketKind
+  name: string
+  description: string
+  author: string
+  version: string
+  category: string
+  tags: string[]
+  verified: boolean
+  permissions: string[]
+  source?: string
+  sourceUrl?: string
+  popularity?: number
+  trust?: 'bundled' | 'official' | 'curated' | 'community' | 'unreviewed'
+}
+
+interface PluginMarketItem extends MarketBaseItem {
+  kind: 'plugin'
+  spec: string
+  packageName: string
+}
+
+interface McpMarketItem extends MarketBaseItem {
+  kind: 'mcp'
+  row: McpRow
+  requiredEnv: string[]
+}
+
+interface SkillMarketItem extends MarketBaseItem {
+  kind: 'skill'
+  install:
+    | { type: 'template'; name: string; description: string; body: string }
+    | { type: 'github'; name: string; url: string }
+    | { type: 'clawhub'; owner: string; slug: string; version: string; name: string }
+}
+
+type MarketItem = PluginMarketItem | McpMarketItem | SkillMarketItem
+
+interface MarketListResult {
+  ok: boolean
+  kind?: MarketKind | 'all'
+  items?: MarketItem[]
+  online?: boolean
+  cached?: boolean
+  error?: string
+}
+
+interface PluginPreflightResult {
+  ok: boolean
+  normalizedSpec?: string
+  packageName?: string
+  version?: string
+  bundle?: boolean
+  locked?: boolean
+  warning?: string
+  error?: string
+}
+
 interface DesktopApi {
   harness: {
     url: () => Promise<string | null>
@@ -60,10 +121,15 @@ interface DesktopApi {
   }
   skills: {
     list: () => Promise<SkillsListResult>
-    create: (input: { name: string; description: string; body: string }) => Promise<{ ok: boolean; path?: string; error?: string }>
+    create: (input: { name: string; description: string; body: string; overwrite?: boolean }) => Promise<{ ok: boolean; path?: string; error?: string }>
     toggle: (input: { id: string; source: string; kind: 'model' | 'user'; value: boolean }) => Promise<{ ok: boolean; error?: string }>
     importFile: (buffer: ArrayBuffer, overwrite: boolean) => Promise<SkillsImportResult>
     importUrl: (url: string, overwrite: boolean) => Promise<SkillsImportResult>
+    importClawHub: (input: { owner: string; slug: string; version?: string }, overwrite: boolean) => Promise<SkillsImportResult>
+  }
+  market: {
+    list: (kind: MarketKind, query?: string) => Promise<MarketListResult>
+    preflightPlugin: (spec: string) => Promise<PluginPreflightResult>
   }
 }
 
@@ -183,6 +249,7 @@ const SOURCE_LABEL: Record<PluginEntry['source'], string> = {
 
 let activeOpToken: string | null = null
 let opResultText = ''
+let activeOpAfterDone: ((done: PluginOpDone) => void | Promise<void>) | null = null
 
 function setOpControls(running: boolean): void {
   const cancel = document.getElementById('plugin-cancel') as HTMLButtonElement | null
@@ -206,9 +273,12 @@ async function refreshPlugins(): Promise<void> {
   const res = await api.plugins.list()
   el.replaceChildren()
   if (!res.ok || !res.entries) {
+    installedPluginEntries = []
     setStatus(`加载失败: ${res.error ?? '未知错误'}`, 'error')
+    renderMarket('plugin')
     return
   }
+  installedPluginEntries = res.entries
   for (const p of res.entries) {
     const tr = document.createElement('tr')
     const tdName = document.createElement('td')
@@ -228,6 +298,7 @@ async function refreshPlugins(): Promise<void> {
         const span = document.createElement('span')
         span.className = 'status ok'
         span.textContent = '随包激活'
+        span.title = '已写入 profile bundle；安装或变更后需重启 Harness 才会出现在运行中的 Web 界面'
         tdOps.appendChild(span)
       } else if (p.activationSource === 'patch') {
         const span = document.createElement('span')
@@ -255,34 +326,48 @@ async function refreshPlugins(): Promise<void> {
     el.appendChild(tr)
   }
   setStatus(`profile「${res.profile}」共 ${res.entries.length} 个包`)
+  renderMarket('plugin')
 }
 
 async function activatePlugin(name: string): Promise<void> {
   if (!api) return
-  if (!confirm(`确认激活插件「${name}」？\n这会把它写入 profile patch，重启 Harness 后加载。`)) return
+  if (!confirm(`确认激活插件「${name}」？\n激活后会自动重启 Harness，使它出现在运行中的 Web 界面。`)) return
   setStatus(`激活中: ${name}`)
   const res = await api.plugins.activate(name)
   setStatus(res.ok ? (res.output ?? '激活成功') : `激活失败: ${res.error ?? ''}`, res.ok ? 'ok' : 'error')
-  if (res.ok) await refreshPlugins()
+  if (res.ok) {
+    await refreshPlugins()
+    await restartHarnessForPluginChange(`插件「${name}」激活`)
+  }
 }
 
 async function deactivatePlugin(name: string): Promise<void> {
   if (!api) return
-  if (!confirm(`确认停用插件「${name}」？\n只移除 patch 激活行，不卸载 package。`)) return
+  if (!confirm(`确认停用插件「${name}」？\n只移除 patch 激活行，不卸载 package。停用后会自动重启 Harness。`)) return
   setStatus(`停用中: ${name}`)
   const res = await api.plugins.deactivate(name)
   setStatus(res.ok ? (res.output ?? '停用成功') : `停用失败: ${res.error ?? ''}`, res.ok ? 'ok' : 'error')
-  if (res.ok) await refreshPlugins()
+  if (res.ok) {
+    await refreshPlugins()
+    await restartHarnessForPluginChange(`插件「${name}」停用`)
+  }
 }
 
-async function runPluginOpUi(action: 'add' | 'remove' | 'update', args: string[], label: string): Promise<void> {
+async function runPluginOpUi(
+  action: 'add' | 'remove' | 'update',
+  args: string[],
+  label: string,
+  afterDone?: (done: PluginOpDone) => void | Promise<void>,
+): Promise<void> {
   if (!api) return
   if (activeOpToken) {
     setStatus('已有插件操作进行中，请等待完成或取消', 'error')
     return
   }
+  activeOpAfterDone = afterDone ?? null
   const started = await api.plugins.startOp(action, args)
   if (!started.ok || !started.token) {
+    activeOpAfterDone = null
     setStatus(`启动失败: ${started.error ?? ''}`, 'error')
     return
   }
@@ -300,20 +385,28 @@ async function installPlugin(): Promise<void> {
     setStatus('请输入包名或 github:owner/repo#commit', 'error')
     return
   }
-  if (!confirm(`确认安装插件「${spec}」到 profile「web」？\n插件代码将在本机执行（沙箱之外）。`)) return
-  await runPluginOpUi('add', [spec], '安装')
+  if (!confirm(`确认安装插件「${spec}」到 profile「web」？\n安装完成后会自动重启 Harness，使插件生效。\n插件代码将在本机执行（沙箱之外）。`)) return
+  await runPluginOpUi('add', [spec], '安装', async () => {
+    await refreshPlugins()
+    await restartHarnessForPluginChange(`插件「${spec}」安装`)
+  })
 }
 
 async function removePlugin(name: string): Promise<void> {
   if (!api) return
-  if (!confirm(`确认移除插件「${name}」？\n若存在 patch 激活行将一并清理。`)) return
-  await runPluginOpUi('remove', [name], '移除')
+  if (!confirm(`确认移除插件「${name}」？\n若存在 patch 激活行将一并清理，完成后会自动重启 Harness。`)) return
+  await runPluginOpUi('remove', [name], '移除', async () => {
+    await restartHarnessForPluginChange(`插件「${name}」移除`)
+  })
 }
 
 async function updateAllPlugins(): Promise<void> {
   if (!api) return
-  if (!confirm('确认更新 profile「web」的全部插件？\n将执行 dsh plugin update。')) return
-  await runPluginOpUi('update', [], '更新')
+  if (!confirm('确认更新 profile「web」的全部插件？\n将执行 dsh plugin update，完成后会自动重启 Harness。')) return
+  await runPluginOpUi('update', [], '更新', async () => {
+    await refreshPlugins()
+    await restartHarnessForPluginChange('插件更新')
+  })
 }
 
 async function cancelPluginOp(): Promise<void> {
@@ -330,18 +423,416 @@ api?.plugins.onOpChunk((token, text) => {
 
 api?.plugins.onOpDone((done) => {
   if (done.token !== activeOpToken) return
+  const afterDone = activeOpAfterDone
+  activeOpAfterDone = null
   activeOpToken = null
   setOpControls(false)
   appendOpOutput(done.output)
   const head = done.exitCode === 0 ? '操作成功' : `操作失败（exit=${done.exitCode ?? 'signal ' + (done.signal ?? '?')}）`
   setStatus(`${head}\n${opResultText.slice(-2000)}`, done.exitCode === 0 ? 'ok' : 'error')
-  void refreshPlugins()
+  void (async () => {
+    await refreshPlugins()
+    if (done.exitCode === 0 && afterDone) await afterDone(done)
+  })()
 })
 
 document.getElementById('plugin-install')?.addEventListener('click', () => void installPlugin())
 document.getElementById('plugin-refresh')?.addEventListener('click', () => void refreshPlugins())
 document.getElementById('plugin-update-all')?.addEventListener('click', () => void updateAllPlugins())
 document.getElementById('plugin-cancel')?.addEventListener('click', () => void cancelPluginOp())
+
+// ---- 扩展市场：三个市场共享目录加载、搜索与卡片交互 ----
+const marketItems: Record<MarketKind, MarketItem[]> = { plugin: [], mcp: [], skill: [] }
+const marketSearchTimers: Partial<Record<MarketKind, number>> = {}
+const marketRequestSeq: Record<MarketKind, number> = { plugin: 0, mcp: 0, skill: 0 }
+const marketVisibleLimits: Record<MarketKind, number> = { plugin: 60, mcp: 60, skill: 60 }
+let installedPluginEntries: PluginEntry[] = []
+let installedSkillEntries: SkillsSummary[] = []
+/** ClawHub 的 SKILL.md frontmatter 可能给出不同于 slug 的规范名；记录本次导入返回的真实目录名。 */
+const marketSkillAliases = new Map<string, string>()
+
+const marketPanelNames: Record<MarketKind, string> = { plugin: 'plugin', mcp: 'mcp', skill: 'skills' }
+
+function setMarketMode(kind: MarketKind, mode: 'market' | 'manage'): void {
+  const suffix = marketPanelNames[kind]
+  const switcher = document.querySelector<HTMLElement>(`.market-switcher[data-market-kind="${kind}"]`)
+  switcher?.querySelectorAll<HTMLButtonElement>('[data-market-mode]').forEach((button) => {
+    const active = button.dataset.marketMode === mode
+    button.classList.toggle('active', active)
+    button.setAttribute('aria-selected', String(active))
+  })
+  const market = document.getElementById(`${suffix}-market-view`)
+  const manage = document.getElementById(`${suffix}-manage-view`)
+  if (market) market.hidden = mode !== 'market'
+  if (manage) manage.hidden = mode !== 'manage'
+}
+
+document.querySelectorAll<HTMLElement>('.market-switcher').forEach((switcher) => {
+  const kind = switcher.dataset.marketKind as MarketKind
+  if (kind !== 'plugin' && kind !== 'mcp' && kind !== 'skill') return
+  switcher.querySelectorAll<HTMLButtonElement>('[data-market-mode]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const mode = button.dataset.marketMode === 'manage' ? 'manage' : 'market'
+      setMarketMode(kind, mode)
+    })
+  })
+})
+
+function marketMatches(item: MarketItem, query: string): boolean {
+  if (!query.trim()) return true
+  const haystack = [item.name, item.description, item.author, item.category, ...item.tags].join(' ').toLowerCase()
+  return query.toLowerCase().trim().split(/\s+/).every((term) => haystack.includes(term))
+}
+
+function marketPluginIdentities(item: PluginMarketItem): string[] {
+  return [item.packageName, item.spec]
+    .flatMap((value) => {
+      const lower = value.toLowerCase().trim()
+      const clean = lower.replace(/^github:/, '').split('#')[0]
+      return [lower, clean, clean.split('/').pop() ?? clean]
+    })
+}
+
+function pluginSpecIdentity(value: string): string {
+  return value.toLowerCase().trim().replace(/^github:/, '').split('#')[0]
+}
+
+const MCP_ENV_REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
+
+function collectMcpEnvNames(value: unknown, names: Set<string>): void {
+  if (typeof value === 'string') {
+    for (const match of value.matchAll(MCP_ENV_REF)) names.add(match[1])
+    return
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry) => collectMcpEnvNames(entry, names))
+    return
+  }
+  if (value && typeof value === 'object') {
+    Object.values(value as Record<string, unknown>).forEach((entry) => collectMcpEnvNames(entry, names))
+  }
+}
+
+function marketMcpEnvNames(item: McpMarketItem): string[] {
+  const names = new Set(item.requiredEnv)
+  collectMcpEnvNames(item.row.config, names)
+  return [...names]
+}
+
+function fillMcpEnvValues(value: unknown, envValues: Record<string, string>): unknown {
+  if (typeof value === 'string') return value.replace(MCP_ENV_REF, (_match, name: string) => envValues[name] ?? _match)
+  if (Array.isArray(value)) return value.map((entry) => fillMcpEnvValues(entry, envValues))
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, entry]) => [key, fillMcpEnvValues(entry, envValues)]))
+  }
+  return value
+}
+
+function marketPluginInstalledEntry(item: PluginMarketItem): PluginEntry | undefined {
+  const identities = marketPluginIdentities(item)
+  const specIdentity = pluginSpecIdentity(item.spec)
+  return installedPluginEntries.find((entry) =>
+    identities.includes(entry.name.toLowerCase()) ||
+    (entry.spec !== '' && pluginSpecIdentity(entry.spec) === specIdentity),
+  )
+}
+
+function marketSkillNames(item: SkillMarketItem): Set<string> {
+  const names = new Set([item.install.name])
+  if (item.install.type === 'clawhub') {
+    names.add(item.install.slug)
+    names.add(item.name)
+    const alias = marketSkillAliases.get(item.id)
+    if (alias) names.add(alias)
+  }
+  return names
+}
+
+function marketIsInstalled(item: MarketItem): boolean {
+  if (item.kind === 'plugin') return marketPluginInstalledEntry(item) !== undefined
+  if (item.kind === 'mcp') {
+    const serverName = typeof item.row.config.serverName === 'string' ? item.row.config.serverName : item.row.id
+    return managedMcpRows.some((row) => row.id === item.row.id || row.config.serverName === serverName)
+  }
+  const names = marketSkillNames(item)
+  return installedSkillEntries.some((skill) => names.has(skill.name) && !skill.shadowed)
+}
+
+function appendMarketText(parent: HTMLElement, className: string, text: string): HTMLElement {
+  const node = document.createElement('span')
+  node.className = className
+  node.textContent = text
+  parent.appendChild(node)
+  return node
+}
+
+function createMarketCard(item: MarketItem): HTMLElement {
+  const card = document.createElement('article')
+  card.className = 'market-card'
+  const head = document.createElement('div')
+  head.className = 'market-card-head'
+  const titleWrap = document.createElement('div')
+  appendMarketText(titleWrap, 'market-card-title', item.name)
+  appendMarketText(titleWrap, 'market-card-author', `${item.author} · ${item.version}`)
+  head.appendChild(titleWrap)
+  if (item.verified) appendMarketText(head, 'market-verified', 'DSH 已验证')
+  else if (item.trust) {
+    const trustLabels: Record<NonNullable<MarketBaseItem['trust']>, string> = {
+      bundled: '随包内置',
+      official: '官方目录',
+      curated: '社区精选',
+      community: '社区来源',
+      unreviewed: '未审阅',
+    }
+    appendMarketText(head, 'market-trust', trustLabels[item.trust])
+  }
+  card.appendChild(head)
+
+  appendMarketText(card, 'market-card-description', item.description)
+  if (item.sourceUrl && /^https?:\/\//i.test(item.sourceUrl)) {
+    const sourceLink = document.createElement('a')
+    sourceLink.className = 'market-source-link'
+    sourceLink.href = item.sourceUrl
+    sourceLink.target = '_blank'
+    sourceLink.rel = 'noreferrer noopener'
+    sourceLink.textContent = '查看来源 ↗'
+    card.appendChild(sourceLink)
+  }
+  const meta = document.createElement('div')
+  meta.className = 'market-card-meta'
+  appendMarketText(meta, '', item.category)
+  if (item.source) appendMarketText(meta, '', item.source)
+  if (typeof item.popularity === 'number' && item.popularity > 0) appendMarketText(meta, '', `热度 ${Math.round(item.popularity)}`)
+  item.tags.slice(0, 4).forEach((tag) => appendMarketText(meta, '', `#${tag}`))
+  card.appendChild(meta)
+
+  const mcpEnvNames = item.kind === 'mcp' ? marketMcpEnvNames(item) : []
+  if (item.kind === 'mcp' && mcpEnvNames.length > 0) {
+    const env = document.createElement('div')
+    env.className = 'market-env-fields'
+    appendMarketText(env, 'market-env-title', '安装前填写以下环境变量（值会写入当前 profile，无需自行设置系统环境）')
+    mcpEnvNames.forEach((name) => {
+      const field = document.createElement('div')
+      field.className = 'market-env-field'
+      const label = document.createElement('label')
+      label.textContent = name
+      const input = document.createElement('input')
+      input.type = 'password'
+      input.autocomplete = 'off'
+      input.spellcheck = false
+      input.required = true
+      input.placeholder = `填写 ${name}`
+      input.dataset.mcpEnv = name
+      field.append(label, input)
+      env.appendChild(field)
+    })
+    card.appendChild(env)
+  }
+  if (item.permissions.length > 0) {
+    const permissions = document.createElement('div')
+    permissions.className = 'market-permissions'
+    appendMarketText(permissions, 'market-permission', `权限：${item.permissions.join('；')}`)
+    card.appendChild(permissions)
+  }
+
+  const footer = document.createElement('div')
+  footer.className = 'market-card-footer'
+  const installedPlugin = item.kind === 'plugin' ? marketPluginInstalledEntry(item) : undefined
+  const installed = item.kind === 'plugin' ? installedPlugin !== undefined : marketIsInstalled(item)
+  const activePlugin = installedPlugin && installedPlugin.activationSource !== 'none'
+  const statusText = item.kind === 'plugin'
+    ? activePlugin ? '已激活' : installed ? '已安装 · 未激活' : '未安装'
+    : installed ? '已安装' : '未安装'
+  appendMarketText(footer, 'status', statusText)
+  const action = document.createElement('button')
+  const needsPluginActivation = item.kind === 'plugin' && installedPlugin !== undefined && !activePlugin
+  action.className = installed && !needsPluginActivation ? '' : 'primary'
+  action.disabled = installed && !needsPluginActivation
+  action.textContent = activePlugin ? '已激活' : needsPluginActivation ? '激活' : item.kind === 'plugin' ? '安装并激活' : '安装'
+  action.addEventListener('click', () => {
+    if (item.kind === 'plugin') {
+      if (needsPluginActivation && installedPlugin) void activatePlugin(installedPlugin.name)
+      else void installMarketPlugin(item)
+    } else if (item.kind === 'mcp') {
+      const envValues = Object.fromEntries(
+        mcpEnvNames.map((name) => [name, (card.querySelector(`[data-mcp-env="${name}"]`) as HTMLInputElement | null)?.value ?? '']),
+      )
+      void installMarketMcp(item, envValues)
+    } else void installMarketSkill(item)
+  })
+  footer.appendChild(action)
+  card.appendChild(footer)
+  return card
+}
+
+function renderMarket(kind: MarketKind): void {
+  const suffix = marketPanelNames[kind]
+  const grid = document.getElementById(`${suffix}-market-grid`)
+  if (!grid) return
+  const search = (document.getElementById(`${suffix}-market-search`) as HTMLInputElement | null)?.value.trim() ?? ''
+  const items = marketItems[kind].filter((item) => marketMatches(item, search))
+  grid.replaceChildren()
+  if (items.length === 0) {
+    const empty = document.createElement('div')
+    empty.className = 'market-empty'
+    empty.textContent = search ? '没有匹配的扩展' : '目录暂时为空'
+    grid.appendChild(empty)
+    return
+  }
+  const visible = items.slice(0, marketVisibleLimits[kind])
+  visible.forEach((item) => grid.appendChild(createMarketCard(item)))
+  if (items.length > visible.length) {
+    const more = document.createElement('button')
+    more.className = 'market-load-more'
+    more.type = 'button'
+    more.textContent = `加载更多（还有 ${items.length - visible.length} 个）`
+    more.addEventListener('click', () => {
+      marketVisibleLimits[kind] += 60
+      renderMarket(kind)
+    })
+    grid.appendChild(more)
+  }
+}
+
+function setMarketCaption(kind: MarketKind, online: boolean, cached: boolean, error?: string): void {
+  const suffix = marketPanelNames[kind]
+  const caption = document.querySelector<HTMLElement>(`#${suffix}-market-view .market-toolbar-caption`)
+  if (!caption) return
+  caption.textContent = online ? error ? '在线目录 · 部分来源不可用' : '在线目录 · 安装前显示权限' : cached ? '网络不可用 · 显示上次缓存' : '网络不可用 · 显示随包精选'
+  caption.title = error ?? ''
+}
+
+async function refreshMarket(kind: MarketKind, query = ''): Promise<void> {
+  if (!api) return
+  const requestId = ++marketRequestSeq[kind]
+  const res = await api.market.list(kind, query)
+  if (requestId !== marketRequestSeq[kind]) return
+  if (!res.ok || !res.items) {
+    marketItems[kind] = []
+    setMarketCaption(kind, false, false, res.error)
+    renderMarket(kind)
+    return
+  }
+  marketItems[kind] = res.items
+  marketVisibleLimits[kind] = 60
+  setMarketCaption(kind, res.online === true, res.cached === true, res.error)
+  renderMarket(kind)
+}
+
+function refreshAllMarkets(): void {
+  ;(['plugin', 'mcp', 'skill'] as MarketKind[]).forEach((kind) => void refreshMarket(kind))
+}
+
+async function installMarketPlugin(item: PluginMarketItem): Promise<void> {
+  if (!api) return
+  setStatus(`正在预检插件：${item.name}`)
+  const preflight = await api.market.preflightPlugin(item.spec)
+  if (!preflight.ok || !preflight.normalizedSpec) {
+    setStatus(`插件预检失败：${preflight.error ?? '未声明 dsh.bundle，已拒绝安装'}`, 'error')
+    return
+  }
+  const lockedSpec = preflight.normalizedSpec
+  const versionText = preflight.version ? `\n版本：${preflight.version}` : ''
+  const warningText = preflight.warning ? `\n注意：${preflight.warning}` : ''
+  if (!confirm(`确认安装并激活「${item.name}」？\n安装来源：${lockedSpec}${versionText}${warningText}\n安装完成后会自动重启 Harness，使插件出现在运行中的 Web 界面。\n插件代码将在本机执行（沙箱之外）。`)) return
+  setMarketMode('plugin', 'manage')
+  await runPluginOpUi('add', [lockedSpec], '安装', async () => {
+    const packageName = preflight.packageName ?? item.packageName
+    const entry = installedPluginEntries.find((candidate) => candidate.name.toLowerCase() === packageName.toLowerCase())
+    if (!entry) {
+      setStatus(`已安装「${item.name}」，但未在 profile 清单找到 ${packageName}；请在已安装列表手动激活。`, 'error')
+      return
+    }
+    if (entry.activationSource === 'none') {
+      const activated = await api.plugins.activate(entry.name)
+      if (!activated.ok) {
+        setStatus(`已安装但激活失败：${activated.error ?? '请在已安装列表手动激活'}`, 'error')
+        await refreshPlugins()
+        return
+      }
+    }
+    await refreshPlugins()
+    await restartHarnessForPluginChange(`插件「${item.name}」安装并激活`)
+  })
+}
+
+async function installMarketMcp(item: McpMarketItem, envValues: Record<string, string> = {}): Promise<void> {
+  if (!api) return
+  const envNames = marketMcpEnvNames(item)
+  const missing = envNames.filter((name) => envValues[name] === undefined || envValues[name] === '')
+  if (missing.length > 0) {
+    setMcpStatus(`请先填写环境变量：${missing.join('、')}`, 'error')
+    return
+  }
+  const config = fillMcpEnvValues(item.row.config, envValues) as Record<string, unknown>
+  if (envNames.length > 0) {
+    const existingEnv = config.env && typeof config.env === 'object' && !Array.isArray(config.env)
+      ? { ...(config.env as Record<string, unknown>) }
+      : {}
+    // requiredEnv 是安装契约，不应只在模板碰巧含有 ${VAR} 占位符时才生效。
+    for (const name of envNames) existingEnv[name] = envValues[name]
+    config.env = existingEnv
+  }
+  const row: McpRow = { ...item.row, config }
+  const envHint = envNames.length > 0 ? `\n已填写：${envNames.join('、')}（值会写入当前 profile）` : ''
+  if (!confirm(`确认安装 MCP「${item.name}」？\n服务器命令将在本机执行（沙箱之外）。${envHint}`)) return
+  setMarketMode('mcp', 'manage')
+  setMcpStatus(`安装 MCP 中: ${item.name}`)
+  const res = await api.mcp.apply({ rows: [row], mode: 'merge' })
+  setMcpStatus(res.ok ? `已安装「${item.name}」（备份: ${res.backup}），配置已写入` : `安装失败: ${res.error ?? ''}`, res.ok ? 'ok' : 'error')
+  if (res.ok) {
+    await refreshMcpServers()
+    renderMarket('mcp')
+  }
+}
+
+async function installMarketSkill(item: SkillMarketItem): Promise<void> {
+  if (!api) return
+  const exists = marketIsInstalled(item)
+  const prompt = exists
+    ? `Skill「${item.install.name}」已存在，确认覆盖更新？\n现有 SKILL.md 将被替换。`
+    : `确认安装 Skill「${item.name}」到用户级 ~/.dsh/skills？`
+  if (!confirm(prompt)) return
+  setMarketMode('skill', 'manage')
+  setImportStatus(`安装 Skill 中: ${item.name}`)
+  const res = item.install.type === 'github'
+    ? await api.skills.importUrl(item.install.url, true)
+    : item.install.type === 'clawhub'
+      ? await api.skills.importClawHub({ owner: item.install.owner, slug: item.install.slug, version: item.install.version }, true)
+      : await api.skills.create({
+          name: item.install.name,
+          description: item.install.description,
+          body: item.install.body,
+          overwrite: true,
+        })
+  const installedPath = (res as SkillsImportResult).result?.file ?? (res as { path?: string }).path
+  const importedName = 'result' in res ? res.result?.name : undefined
+  setImportStatus(res.ok ? `已安装「${item.name}」: ${installedPath ?? ''}` : `安装失败: ${res.error ?? ''}`, res.ok ? 'ok' : 'error')
+  if (res.ok && item.install.type === 'clawhub' && importedName) {
+    // importer 以 SKILL.md frontmatter 的合法 name 为准；同步回卡片，避免本次会话重复安装。
+    marketSkillAliases.set(item.id, importedName)
+    item.install.name = importedName
+  }
+  if (res.ok) {
+    await refreshSkills()
+    renderMarket('skill')
+  }
+}
+
+for (const kind of ['plugin', 'mcp', 'skill'] as MarketKind[]) {
+  const suffix = marketPanelNames[kind]
+  document.getElementById(`${suffix}-market-search`)?.addEventListener('input', () => {
+    const input = document.getElementById(`${suffix}-market-search`) as HTMLInputElement | null
+    marketVisibleLimits[kind] = 60
+    renderMarket(kind)
+    if (marketSearchTimers[kind] !== undefined) window.clearTimeout(marketSearchTimers[kind])
+    marketSearchTimers[kind] = window.setTimeout(() => void refreshMarket(kind, input?.value.trim() ?? ''), 350)
+  })
+  document.getElementById(`${suffix}-market-refresh`)?.addEventListener('click', () => {
+    const input = document.getElementById(`${suffix}-market-search`) as HTMLInputElement | null
+    void refreshMarket(kind, input?.value.trim() ?? '')
+  })
+}
 
 // ---- MCP 面板 ----
 let mcpDraftRows: McpRow[] = []
@@ -453,6 +944,7 @@ async function refreshMcpServers(): Promise<void> {
     summary.textContent = `profile「${res.profile}」现有 MCP 服务器: ${managedMcpRows.length}`
     summary.className = 'status ok'
   }
+  renderMarket('mcp')
 }
 
 /** 深度还原 !!js 哨兵（{ $js: 'process.env.X' } → '${X}'；其他表达式保持字面字符串），
@@ -603,9 +1095,12 @@ async function refreshSkills(): Promise<void> {
   const res = await api.skills.list()
   el.replaceChildren()
   if (!res.ok || !res.skills) {
+    installedSkillEntries = []
     setSkillsStatus(`加载失败: ${res.error ?? '未知错误'}`, 'error')
+    renderMarket('skill')
     return
   }
+  installedSkillEntries = res.skills
   for (const s of res.skills) {
     const tr = document.createElement('tr')
     if (s.shadowed) tr.className = 'dim'
@@ -649,6 +1144,7 @@ async function refreshSkills(): Promise<void> {
     el.appendChild(tr)
   }
   setSkillsStatus(`共 ${res.skills.length} 个 skill（含被遮蔽项）`)
+  renderMarket('skill')
 }
 
 async function toggleSkill(id: string, source: string, kind: 'model' | 'user', value: boolean): Promise<void> {
@@ -815,13 +1311,13 @@ async function mountHarness(): Promise<void> {
   frame.src = url
 }
 
-async function restartHarness(): Promise<void> {
-  if (!api) return
+async function restartHarness(): Promise<boolean> {
+  if (!api) return false
   setHarnessStatusText({ state: 'restarting' })
   const res = await api.harness.restart()
   if (!res.ok) {
     setHarnessStatusText({ state: 'exited', code: -1, error: `重启失败: ${res.error ?? ''}` })
-    return
+    return false
   }
   // 重启后 --port 0 会换新端口：必须把 iframe 重挂到新 URL，否则停留在已死进程的旧端口
   const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
@@ -829,6 +1325,14 @@ async function restartHarness(): Promise<void> {
     frame.src = res.url
     setHarnessStatusText({ state: 'ready', url: res.url })
   }
+  return true
+}
+
+async function restartHarnessForPluginChange(label: string): Promise<void> {
+  setStatus(`${label}成功，正在重启 Harness 使运行时生效…`, 'ok')
+  const restarted = await restartHarness()
+  if (restarted) setStatus(`${label}成功，Harness 已重启，插件已加载`, 'ok')
+  else setStatus(`${label}成功，但 Harness 重启失败；请点击 Harness 状态菜单手动重启`, 'error')
 }
 
 /** 重新连接：仅重挂 iframe，不重启后端进程；8s 内无就绪回执则提示超时 */
@@ -891,5 +1395,6 @@ if (api) {
   void refreshPlugins()
   void refreshMcpServers()
   void refreshSkills()
+  refreshAllMarkets()
   void mountHarness()
 }

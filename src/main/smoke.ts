@@ -31,6 +31,7 @@ interface DomSnapshot {
   mcpApply?: string
   mcpCancelHidden?: boolean
   skillsStatus?: string
+  marketCards?: { plugin: number; mcp: number; skills: number }
   harnessStatus?: string
 }
 
@@ -41,8 +42,13 @@ async function snapshot(win: BrowserWindow): Promise<DomSnapshot> {
     const panels = ['harness','plugin','mcp','skills'].map(t => !!document.getElementById('panel-' + t))
     const pluginRows = [...document.querySelectorAll('#plugin-rows tr')].map(r => r.textContent ?? '')
     const mcpRows = [...document.querySelectorAll('#mcp-server-rows tr')].map(r => r.textContent ?? '')
+    const marketCards = {
+      plugin: document.querySelectorAll('#plugin-market-grid .market-card').length,
+      mcp: document.querySelectorAll('#mcp-market-grid .market-card').length,
+      skills: document.querySelectorAll('#skills-market-grid .market-card').length,
+    }
     return {
-      tabs, active, panels, title: document.title, bodyLen: document.body.innerText.length, pluginRows, mcpRows,
+      tabs, active, panels, title: document.title, bodyLen: document.body.innerText.length, pluginRows, mcpRows, marketCards,
       apiPresent: !!window.dshDesktop,
       pluginStatus: document.getElementById('plugin-status')?.textContent ?? '',
       mcpApply: document.getElementById('mcp-apply')?.textContent ?? '',
@@ -59,18 +65,26 @@ async function assertDomAndScreenshot(
   assert: (dom: DomSnapshot) => boolean,
   artifactsDir: string,
   exitAfter = true,
-): Promise<void> {
+): Promise<boolean> {
   const dom = await snapshot(win)
   if (!assert(dom)) {
     console.error(`SMOKE FAIL: unexpected DOM ${JSON.stringify(dom)}`)
     app.exit(1)
+    return false
   }
-  const image = await win.webContents.capturePage()
-  const out = join(artifactsDir, `${tag}.png`)
-  mkdirSync(dirname(out), { recursive: true })
-  writeFileSync(out, image.toPNG())
-  console.log(`SMOKE OK: ${tag} DOM ${JSON.stringify({ title: dom.title, bodyLen: dom.bodyLen })} screenshot ${out}`)
+  try {
+    const image = await win.webContents.capturePage()
+    const out = join(artifactsDir, `${tag}.png`)
+    mkdirSync(dirname(out), { recursive: true })
+    writeFileSync(out, image.toPNG())
+    console.log(`SMOKE OK: ${tag} DOM ${JSON.stringify({ title: dom.title, bodyLen: dom.bodyLen })} screenshot ${out}`)
+  } catch (err) {
+    console.error(`SMOKE FAIL: ${tag} 截图或工件写入失败：${err instanceof Error ? err.message : String(err)}`)
+    app.exit(1)
+    return false
+  }
   if (exitAfter) app.exit(0)
+  return true
 }
 
 /** 等待谓词为真（带超时） */
@@ -106,13 +120,20 @@ export function wireSmoke(ctx: SmokeContext): void {
           win,
           async () => {
             const dom = await snapshot(win)
-            return (dom.pluginStatus ?? '').includes('共') && (dom.skillsStatus ?? '').includes('共')
+            return (
+              (dom.pluginStatus ?? '').includes('共') &&
+              (dom.skillsStatus ?? '').includes('共') &&
+              (dom.marketCards?.plugin ?? 0) > 0 &&
+              (dom.marketCards?.mcp ?? 0) > 0 &&
+              (dom.marketCards?.skills ?? 0) > 0
+            )
           },
-          8000,
+          35_000,
         )
         if (!ready) {
           console.error(`SMOKE FAIL: Plugin/Skills 面板未完成加载 ${JSON.stringify(await snapshot(win))}`)
           app.exit(1)
+          return
         }
         // 驱动 MCP JSON→YAML 转换（只读，不写 profile）
         await win.webContents.executeJavaScript(`(() => {
@@ -132,7 +153,7 @@ export function wireSmoke(ctx: SmokeContext): void {
           console.error('SMOKE FAIL: MCP 转换未完成')
           app.exit(1)
         }
-        await assertDomAndScreenshot(
+        const screenshotOk = await assertDomAndScreenshot(
           win,
           'm0-smoke',
           (dom) => {
@@ -145,12 +166,16 @@ export function wireSmoke(ctx: SmokeContext): void {
               (d.pluginStatus ?? '').includes('共') &&
               (d.skillsStatus ?? '').includes('共') &&
               d.mcpApply === '写入 patch' &&
-              d.mcpCancelHidden === true
+              d.mcpCancelHidden === true &&
+              (d.marketCards?.plugin ?? 0) > 0 &&
+              (d.marketCards?.mcp ?? 0) > 0 &&
+              (d.marketCards?.skills ?? 0) > 0
             )
           },
           ctx.artifactsDir,
           false,
         )
+        if (!screenshotOk) return
         // MCP 转换结果单独校验（预览必须与 patch 同构）
         const mcp = (await win.webContents.executeJavaScript(`(() => {
           const preview = document.getElementById('mcp-preview').textContent
@@ -190,13 +215,14 @@ export function wireSmoke(ctx: SmokeContext): void {
         console.error('SMOKE FAIL: harness iframe 未挂载')
         app.exit(1)
       }
-      await assertDomAndScreenshot(
+      const screenshotOk = await assertDomAndScreenshot(
         win,
         'm1-harness',
         (dom) => dom.title === APP_TITLE && dom.bodyLen > 0,
         ctx.artifactsDir,
         false,
       )
+      if (!screenshotOk) return
       const src = (await win.webContents.executeJavaScript(`document.getElementById('harness-frame').src`)) as string
       if (!src.startsWith('http://127.0.0.1:')) {
         console.error(`SMOKE FAIL: harness iframe 未挂载 (${src})`)

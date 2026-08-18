@@ -31,6 +31,10 @@
   - 实测 2026-08-16：默认模式＝四 Tab 壳 + iframe 内嵌官方 Web UI（主菜单仅「退出/全屏」）；DMG 248MB（arm64，`release/DSH-Desktop-0.1.0-arm64.dmg`）；打包 app 在 PATH 仅 /usr/bin:/bin（无系统 node/dsh）下用捆绑 Node+dsh 启动，HTTP 200；TERM 退出无孤儿。
   - 已知限制：`ACTIVE_PROFILE` 固定 'web'（profile 切换待做）；强杀（timeout/group-kill）可能遗留 dsh 子进程；应用图标为 Electron 默认；Windows 打包待后续（本机构建环境为 macOS）。
 
+- [x] **M6 扩展中心 MVP** — 在 Plugin / MCP / Skills 三个工作区加入精选市场；支持搜索、来源/权限展示，并分别复用插件 CLI、MCP patch 事务写入、Skills 用户级创建完成安装。
+  - 验证：市场目录契约测试；`npm run smoke` 断言三类市场卡片均加载；`npm run verify` 全绿。
+  - 当前边界：Plugin 从 DSH Plugin Market 发布的 Awesome DSH Plugin machine snapshot 发现，并在安装前校验 `dsh.bundle`、锁定 npm 版本或 GitHub commit；MCP 合并官方 MCP Registry 与 DSH MCP Market；Skills 合并 ClawHub 与 SkillsMP，ClawHub 版本直接锁定并只安装 `SKILL.md`；在线目录写入本地缓存，网络失败回退缓存或随包精选目录，暂不包含账号、评论和社区发布。
+
 ## 约束
 
 - 只读操作优先走真实环境（`~/.dsh`）；任何写操作（安装插件 / 改 patch / 新建 skill）默认落在**临时 profile / 临时目录**，除非用户显式指向真实 profile。
@@ -41,8 +45,8 @@
 
 - **Profile 切换**：`ACTIVE_PROFILE` 常量（现固定 'web'）→ 壳级设置/托盘多 profile 选择；借鉴 anywhere-labs 的 last-known-good 回退（重启边界）。
 - **Settings Tab（壳级）**：API Key / 模型 / profile / 更新入口（复用官方 Web UI 设置能力 + 壳级项，PRD §3.3）。
-- **插件体验**：git 来源 `allowBuilds` 授权向导（PRD §2.3）；安装后一键重启 harness（当前为手动重启）。
-- **MCP / Skills 导入**：`.mcp.json` 文件选择器；skill 文件导入（当前为粘贴正文表单）。
+- **扩展中心增强**：签名远程 registry、插件详情/依赖图、安装回滚与一键重启；MCP 连接测试与凭据管理；Skills 正文编辑与项目级安装。
+- **插件安全**：git 来源 `allowBuilds` 授权向导（PRD §2.3），安装前展示更细粒度权限。
 - **打包矩阵**：Windows（NSIS）与 Linux（AppImage）；应用图标；自动更新（electron-updater 或自建版本服务）。
 - **稳定性**：单实例锁；渲染崩溃自愈；`dsh web` 意外退出后的重连/重启策略。
 
