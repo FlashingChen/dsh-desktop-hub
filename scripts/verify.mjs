@@ -20,13 +20,14 @@ for (const f of [
   'src/renderer/index.html',
   'src/renderer/renderer.ts',
   'scripts/verify.mjs',
+  'scripts/smoke-plugin-remove.mjs',
 ]) {
   check(`文件存在: ${f}`, existsSync(req(f)))
 }
 
 // 2) package.json 契约
 const pkg = JSON.parse(readFileSync(req('package.json'), 'utf8'))
-for (const s of ['typecheck', 'test', 'build', 'start', 'verify']) {
+for (const s of ['typecheck', 'test', 'build', 'start', 'verify', 'smoke:plugin']) {
   check(`脚本存在: ${s}`, typeof pkg.scripts?.[s] === 'string')
 }
 

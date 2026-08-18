@@ -207,6 +207,98 @@
         margin-bottom: 12px;
         overflow: hidden;
       }
+      .market-switcher {
+        align-items: center;
+        background: var(--surface-subtle);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        display: inline-flex;
+        gap: 3px;
+        margin-bottom: 14px;
+        padding: 3px;
+      }
+      .market-switcher button {
+        background: transparent;
+        border-color: transparent;
+        color: var(--ink-soft);
+        font-size: 12px;
+        min-height: 30px;
+        padding: 6px 13px;
+      }
+      .market-switcher button.active {
+        background: var(--surface);
+        border-color: var(--line);
+        box-shadow: var(--shadow-sm);
+        color: var(--brand-dark);
+        font-weight: 650;
+      }
+      .market-view[hidden] { display: none; }
+      .market-toolbar {
+        align-items: center;
+        display: flex;
+        gap: 9px;
+        margin-bottom: 12px;
+      }
+      .market-toolbar input { flex: 1; min-width: 0; }
+      .market-toolbar-caption { color: var(--ink-faint); font-size: 11px; white-space: nowrap; }
+      .market-source-note { color: var(--ink-faint); font-size: 10px; line-height: 1.5; margin: 8px 0 12px; }
+      .market-source-note a { color: var(--brand-dark); text-decoration: none; }
+      .market-source-note a:hover { text-decoration: underline; }
+      .market-grid {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      }
+      .market-card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        display: flex;
+        flex-direction: column;
+        min-height: 208px;
+        padding: 15px;
+        transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+      }
+      .market-card:hover { border-color: #cbd5ff; box-shadow: var(--shadow-md); transform: translateY(-1px); }
+      .market-card-head { align-items: flex-start; display: flex; gap: 10px; justify-content: space-between; }
+      .market-card-title { color: var(--ink); font-size: 14px; font-weight: 680; line-height: 1.35; }
+      .market-card-author { color: var(--ink-faint); font-size: 10px; margin-top: 4px; }
+      .market-verified, .market-trust {
+        background: var(--success-bg);
+        border: 1px solid #c9ead8;
+        border-radius: 5px;
+        color: var(--success);
+        flex: none;
+        font-size: 10px;
+        padding: 3px 6px;
+      }
+      .market-trust { background: #f1f3ff; border-color: #dce1ff; color: #4d5eb0; }
+      .market-card-description { color: var(--ink-soft); font-size: 11px; line-height: 1.55; margin-top: 12px; }
+      .market-source-link { color: var(--brand-dark); display: inline-block; font-size: 10px; margin-top: 8px; text-decoration: none; }
+      .market-source-link:hover { text-decoration: underline; }
+      .market-card-meta { color: var(--ink-faint); display: flex; flex-wrap: wrap; font-size: 10px; gap: 6px; margin-top: 11px; }
+      .market-card-meta span, .market-permission {
+        background: var(--surface-subtle);
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        padding: 3px 6px;
+      }
+      .market-card-footer { align-items: center; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: space-between; margin-top: auto; padding-top: 12px; }
+      .market-card-footer .status { font-size: 11px; min-height: 0; }
+      .market-card-footer button { font-size: 11px; min-height: 30px; padding: 6px 10px; }
+      .market-permissions { color: var(--warn); display: flex; flex-wrap: wrap; font-size: 10px; gap: 5px; line-height: 1.35; margin-top: 9px; }
+      .market-env-fields { background: var(--surface-subtle); border: 1px solid #f0d9a3; border-radius: 8px; display: grid; gap: 7px; margin-top: 10px; padding: 9px; }
+      .market-env-title { color: var(--warn); font-size: 10px; font-weight: 680; line-height: 1.35; }
+      .market-env-field { display: grid; gap: 4px; }
+      .market-env-field label { color: var(--ink-soft); font-size: 10px; font-weight: 620; }
+      .market-env-field input { font-size: 11px; min-height: 30px; padding: 5px 8px; }
+      .market-empty {  background: var(--surface); border: 1px dashed var(--line-strong); border-radius: 10px; color: var(--ink-faint); font-size: 12px; padding: 30px 16px; text-align: center; }
+      .market-load-more { background: var(--surface); border: 1px solid var(--line-strong); border-radius: 9px; color: var(--brand-dark); cursor: pointer; font-size: 11px; grid-column: 1 / -1; min-height: 38px; padding: 8px 12px; }
+      .market-load-more:hover { background: var(--surface-subtle); }
+      @media (max-width: 640px) {
+        .market-toolbar { align-items: stretch; flex-direction: column; }
+        .market-toolbar-caption { white-space: normal; }
+      }
       .surface-head {
         align-items: flex-start;
         border-bottom: 1px solid var(--line);
@@ -229,7 +321,7 @@
       .field-hint { color: var(--ink-faint); font-size: 10px; line-height: 1.45; margin-top: 6px; }
       .install-row, .file-row { align-items: flex-end; display: flex; gap: 9px; }
       .install-row .field, .file-row .field { flex: 1; min-width: 0; }
-      input[type="text"], input[type="url"], input[type="file"] {
+      input[type="text"], input[type="url"], input[type="password"], input[type="file"] {
         background: var(--surface-subtle);
         border: 1px solid var(--line-strong);
         border-radius: var(--radius-sm);
@@ -240,7 +332,7 @@
         padding: 7px 10px;
         width: 100%;
       }
-      input[type="text"]::placeholder, input[type="url"]::placeholder, textarea::placeholder { color: var(--ink-faint); }
+      input[type="text"]::placeholder, input[type="url"]::placeholder, input[type="password"]::placeholder, textarea::placeholder { color: var(--ink-faint); }
       input[type="file"] { color: var(--ink-soft); padding: 6px 8px; }
       input[type="file"]::file-selector-button {
         background: var(--surface);
@@ -669,42 +761,57 @@
           <div class="page">
             <div class="page-header">
               <div>
-                <div class="eyebrow">Packages / Profile web</div>
+                <div class="eyebrow">Extension center / Profile web</div>
                 <h1>插件</h1>
-                <p class="page-description">管理 web profile 的组合包与依赖；安装、激活或移除后需重启 Harness。</p>
+                <p class="page-description">浏览精选 DSH 插件，或管理 web profile 中已经安装的组合包与依赖。</p>
               </div>
             </div>
-            <section class="surface">
-              <div class="surface-head">
-                <div>
-                  <h2 class="surface-title">已安装的包</h2>
-                  <p class="surface-caption">安装依赖与激活插件是两步；内置组合包只读，第三方包可单独激活或移除。</p>
-                </div>
-                <div class="surface-actions">
-                  <button id="plugin-update-all" type="button">更新全部</button>
-                  <button id="plugin-cancel" class="quiet" type="button" hidden>取消操作</button>
-                  <button id="plugin-refresh" class="quiet" type="button">刷新列表</button>
-                </div>
+            <div class="market-switcher" data-market-kind="plugin" role="tablist" aria-label="插件市场与已安装插件">
+              <button class="active" type="button" data-market-mode="market" role="tab" aria-selected="true">插件市场</button>
+              <button type="button" data-market-mode="manage" role="tab" aria-selected="false">已安装</button>
+            </div>
+            <section class="market-view" id="plugin-market-view">
+              <div class="market-toolbar">
+                <input id="plugin-market-search" type="text" placeholder="搜索插件名称、作者或标签" aria-label="搜索插件市场" />
+                <span class="market-toolbar-caption">DSH Plugin Market / Awesome DSH Plugin · 安装前校验来源</span>
+                <button id="plugin-market-refresh" class="quiet" type="button">刷新目录</button>
               </div>
-              <div class="surface-body">
-                <label class="field-label" for="plugin-spec">添加插件</label>
-                <div class="install-row">
-                  <div class="field">
-                    <input id="plugin-spec" type="text" placeholder="npm 包名 · github:owner/repo · ./本地路径" />
-                    <p class="field-hint">支持 npm、GitHub、tarball 或本地路径；多组件仓库请按其安装说明操作。</p>
+              <p class="market-source-note">数据来源：<a href="https://github.com/dsh-market/dsh-market" target="_blank" rel="noreferrer">DSH Plugin Market</a> 发布的 <a href="https://github.com/awesome-dsh-plugin/awesome-dsh-plugin" target="_blank" rel="noreferrer">Awesome DSH Plugin</a> 清单；npm 仅用于安装预检。</p>
+              <div id="plugin-market-grid" class="market-grid"></div>
+            </section>
+            <section class="market-view" id="plugin-manage-view" hidden>
+              <section class="surface">
+                <div class="surface-head">
+                  <div>
+                    <h2 class="surface-title">已安装的包</h2>
+                    <p class="surface-caption">安装依赖与激活插件是两步；内置组合包只读，第三方包可单独激活或移除。</p>
                   </div>
-                  <button id="plugin-install" class="primary" type="button">安装插件</button>
+                  <div class="surface-actions">
+                    <button id="plugin-update-all" type="button">更新全部</button>
+                    <button id="plugin-cancel" class="quiet" type="button" hidden>取消操作</button>
+                    <button id="plugin-refresh" class="quiet" type="button">刷新列表</button>
+                  </div>
                 </div>
-                <div id="plugin-status" class="status inline-status" aria-live="polite"></div>
-              </div>
-              <div class="table-wrap">
-                <table class="list">
-                  <thead>
-                    <tr><th>名称</th><th>来源</th><th>Spec</th><th>操作</th></tr>
-                  </thead>
-                  <tbody id="plugin-rows"></tbody>
-                </table>
-              </div>
+                <div class="surface-body">
+                  <label class="field-label" for="plugin-spec">添加插件</label>
+                  <div class="install-row">
+                    <div class="field">
+                      <input id="plugin-spec" type="text" placeholder="npm 包名 · github:owner/repo · ./本地路径" />
+                      <p class="field-hint">支持 npm、GitHub、tarball 或本地路径；多组件仓库请按其安装说明操作。</p>
+                    </div>
+                    <button id="plugin-install" class="primary" type="button">安装插件</button>
+                  </div>
+                  <div id="plugin-status" class="status inline-status" aria-live="polite"></div>
+                </div>
+                <div class="table-wrap">
+                  <table class="list">
+                    <thead>
+                      <tr><th>名称</th><th>来源</th><th>Spec</th><th>操作</th></tr>
+                    </thead>
+                    <tbody id="plugin-rows"></tbody>
+                  </table>
+                </div>
+              </section>
             </section>
           </div>
         </section>
@@ -712,11 +819,25 @@
           <div class="page">
             <div class="page-header">
               <div>
-                <div class="eyebrow">Configuration bridge / Profile web</div>
+                <div class="eyebrow">Extension center / Profile web</div>
                 <h1>MCP</h1>
-                <p class="page-description">转换通用 MCP JSON，并写入 web profile 的 patch。</p>
+                <p class="page-description">从精选市场安装 MCP，或转换并管理 web profile 的 MCP 配置。</p>
               </div>
             </div>
+            <div class="market-switcher" data-market-kind="mcp" role="tablist" aria-label="MCP 市场与已安装服务器">
+              <button class="active" type="button" data-market-mode="market" role="tab" aria-selected="true">MCP 市场</button>
+              <button type="button" data-market-mode="manage" role="tab" aria-selected="false">我的 MCP</button>
+            </div>
+            <section class="market-view" id="mcp-market-view">
+              <div class="market-toolbar">
+                <input id="mcp-market-search" type="text" placeholder="搜索 MCP 名称、作者或标签" aria-label="搜索 MCP 市场" />
+                <span class="market-toolbar-caption">官方 Registry + DSH MCP Market · 安装后可编辑</span>
+                <button id="mcp-market-refresh" class="quiet" type="button">刷新目录</button>
+              </div>
+              <p class="market-source-note">数据来源：<a href="https://registry.modelcontextprotocol.io/v0.1/servers" target="_blank" rel="noreferrer">官方 MCP Registry</a> 与 <a href="https://github.com/LKMeng2001/dsh-mcp-market" target="_blank" rel="noreferrer">DSH MCP Market</a>；官方目录不等于安全审计。</p>
+              <div id="mcp-market-grid" class="market-grid"></div>
+            </section>
+            <section class="market-view" id="mcp-manage-view" hidden>
             <div class="notice">
               <span class="notice-mark" aria-hidden="true">i</span>
               <span>写入前会自动备份现有 patch。MCP 服务器命令将在本机、Harness 沙箱之外执行，请只导入可信配置。</span>
@@ -788,17 +909,32 @@
                 <pre id="mcp-preview">—</pre>
               </div>
             </section>
+            </section>
           </div>
         </section>
         <section class="panel" id="panel-skills" role="tabpanel" aria-labelledby="tab-skills">
           <div class="page">
             <div class="page-header">
               <div>
-                <div class="eyebrow">Capability library / Local</div>
+                <div class="eyebrow">Extension center / Local</div>
                 <h1>Skills</h1>
-                <p class="page-description">查看、导入和创建本机可用的 skills。</p>
+                <p class="page-description">从精选市场安装 Skills，或管理本机可用的 Skills。</p>
               </div>
             </div>
+            <div class="market-switcher" data-market-kind="skill" role="tablist" aria-label="Skills 市场与我的 Skills">
+              <button class="active" type="button" data-market-mode="market" role="tab" aria-selected="true">Skills 市场</button>
+              <button type="button" data-market-mode="manage" role="tab" aria-selected="false">我的 Skills</button>
+            </div>
+            <section class="market-view" id="skills-market-view">
+              <div class="market-toolbar">
+                <input id="skills-market-search" type="text" placeholder="搜索 Skill 名称、作者或标签" aria-label="搜索 Skills 市场" />
+                <span class="market-toolbar-caption">ClawHub + SkillsMP · 网络不可用时回退缓存</span>
+                <button id="skills-market-refresh" class="quiet" type="button">刷新目录</button>
+              </div>
+              <p class="market-source-note">数据来源：<a href="https://clawhub.ai" target="_blank" rel="noreferrer">ClawHub</a> 与 <a href="https://skillsmp.com" target="_blank" rel="noreferrer">SkillsMP</a>；ClawHub 公开安装当前落地 `SKILL.md`，GitHub source 可包含辅助文件。</p>
+              <div id="skills-market-grid" class="market-grid"></div>
+            </section>
+            <section class="market-view" id="skills-manage-view" hidden>
             <section class="surface">
               <div class="surface-head">
                 <div>
@@ -868,6 +1004,7 @@
                 </div>
               </section>
             </div>
+            </section>
           </div>
         </section>
       </main>

@@ -10,7 +10,7 @@ import AdmZip from 'adm-zip'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const mod = await import(pathToFileURL(join(root, 'dist', 'core', 'skills.js')).href)
-const { scanSkills, parseSkillFile, renderSkillFile, createSkill, setInvocation, importSkillFromZip, parseGitHubSkillUrl } = mod
+const { scanSkills, parseSkillFile, renderSkillFile, createSkill, setInvocation, importSkillFromZip, parseGitHubSkillUrl, importSkillFromClawHub } = mod
 
 /**
  * 构建原始 ZIP（store 方法，不做任何路径规整）。
@@ -202,6 +202,42 @@ test('parseGitHubSkillUrl 解析仓库根与 tree 路径', () => {
     owner: 'owner', repo: 'skill-repo', branch: 'main', subPath: 'skills/foo',
   })
   assert.throws(() => parseGitHubSkillUrl('https://example.com/x'), /GitHub/)
+})
+
+test('importSkillFromClawHub 固定版本下载并事务写入 SKILL.md', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  const originalFetch = globalThis.fetch
+  try {
+    globalThis.fetch = async (url) => {
+      const value = String(url)
+      if (value.includes('/api/v1/skills/demo?')) {
+        return new Response(JSON.stringify({ latestVersion: { version: '1.2.3' } }), { status: 200 })
+      }
+      assert.match(value, /\/api\/v1\/skills\/demo\/file\?/)
+      return new Response('---\nname: demo\ndescription: ClawHub skill\n---\n正文\n', { status: 200 })
+    }
+    const res = await importSkillFromClawHub({ owner: 'owner', slug: 'demo', version: 'latest' }, { root: join(dir, 'skills') })
+    assert.equal(res.name, 'demo')
+    assert.ok(readFileSync(join(dir, 'skills', 'demo', 'SKILL.md'), 'utf8').includes('ClawHub skill'))
+  } finally {
+    globalThis.fetch = originalFetch
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('importSkillFromClawHub 对空元数据返回可控错误', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  const originalFetch = globalThis.fetch
+  try {
+    globalThis.fetch = async () => new Response('null', { status: 200 })
+    await assert.rejects(
+      importSkillFromClawHub({ owner: 'owner', slug: 'demo', version: 'latest' }, { root: join(dir, 'skills') }),
+      /ClawHub 没有返回可安装版本/,
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('importSkillFromZip 拒绝原始 ZIP 目录穿越（..）且不越界写', () => {

@@ -16,6 +16,7 @@
     "build": "tsc -p tsconfig.json && node scripts/build-preload.mjs && tsc -p tsconfig.renderer.json && node scripts/copy-renderer.mjs",
     "start": "electron .",
     "smoke": "electron . --smoke",
+    "smoke:plugin": "npm run build && node scripts/smoke-plugin-remove.mjs",
     "smoke:harness": "electron . --harness-smoke",
     "verify:m1": "node scripts/verify-m1.mjs",
     "verify": "node scripts/verify.mjs"

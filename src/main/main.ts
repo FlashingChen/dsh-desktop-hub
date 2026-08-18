@@ -36,9 +36,10 @@ import {
   readPatch,
   type McpRow,
 } from '../core/mcp.js'
-import { scanSkills, createSkill, setInvocation, importSkillFromZip, importSkillFromGitHub, type SkillSummary } from '../core/skills.js'
+import { scanSkills, createSkill, setInvocation, importSkillFromZip, importSkillFromGitHub, importSkillFromClawHub, type SkillSummary } from '../core/skills.js'
 import { IPC, type PluginOpAction, type HarnessStatus } from '../core/ipc.js'
 import { initLog, log } from '../core/log.js'
+import { fetchMarketItems, preflightPluginSpec, type MarketKind } from '../core/market.js'
 import { wireSmoke } from './smoke.js'
 
 const APP_NAME = 'DSH Desktop Hub'
@@ -71,6 +72,8 @@ let quitting = false
 let autoRestartTimer: NodeJS.Timeout | null = null
 /** 启动中（尚未就绪）的 dsh 子进程：退出时若仍在途则必须清理，防孤儿 */
 let startingProc: ChildProcess | null = null
+/** 每次主动停止都会递增；让被取消的启动 Promise 不能重新夺回 harness 状态或触发自动重启。 */
+let harnessStartGeneration = 0
 /** 自动重启墙钟限流：10 分钟内最多 8 次（防 crash-after-ready 死循环绕过计数） */
 const autoRestartTimes: number[] = []
 /** dsh 子进程最近输出（环形），失败时拼进 UI 错误信息 */
@@ -144,6 +147,7 @@ function appendCapped(buf: string, chunk: string): string {
 function streamPluginOp(
   action: PluginOpAction,
   args: string[],
+  finalize?: () => void,
 ): Promise<{ ok: boolean; token?: string; error?: string; exitCode?: number | null }> {
   const exec = resolveDshExec()
   if (!exec) return Promise.resolve({ ok: false, error: '未找到 dsh 可执行文件' })
@@ -177,13 +181,28 @@ function streamPluginOp(
     op.stderr.on('data', onChunk)
     const res = await op.done
     activeOps.delete(token)
+    let exitCode = res.exitCode
+    let finalOutput = output
+    let finalizeError: string | undefined
+    // 先完成 remove 的 patch 清理，再通知 renderer 刷新/重启 Harness，避免读到旧配置。
+    // dsh remove 成功但清理失败仍必须对 UI 报失败，否则 renderer 会重启并加载残留激活行。
+    if (res.exitCode === 0 && finalize) {
+      try {
+        finalize()
+      } catch (err) {
+        finalizeError = err instanceof Error ? err.message : String(err)
+        exitCode = 1
+        finalOutput = appendCapped(output, `\n插件移除后的 patch 激活行清理失败：${finalizeError}\n`)
+        log(`plugin remove: patch 激活行清理失败 —— ${finalizeError}`)
+      }
+    }
     sendToShell(IPC.pluginOpDone, token, {
       token,
-      exitCode: res.exitCode,
+      exitCode,
       signal: res.signal,
-      output,
+      output: finalOutput,
     })
-    return { ok: true, token, exitCode: res.exitCode }
+    return { ok: exitCode === 0, token, exitCode, ...(finalizeError ? { error: finalizeError } : {}) }
   })
 }
 
@@ -304,21 +323,15 @@ function registerIpc(): void {
       return { ok: false as const, error: 'args 无效' }
     }
     if (action === 'add' && args.length !== 1) return { ok: false as const, error: '安装需要 spec 参数' }
-    const res = await streamPluginOp(action, args as string[])
-    // remove 成功后清理残留的 patch 激活行（P1：避免重启后引用不存在的插件）
-    if (action === 'remove' && res.ok && res.exitCode === 0) {
-      try {
-        await serializeMutation(() => {
-          const profile = activeProfile()
-          if (!profile) return
-          const patch = readPatch(profile.dir)
-          const cleaned = deactivatePluginIfActive(patch, (args as string[])[0])
-          if (cleaned !== patch) writePluginPatch(profile, cleaned)
-        })
-      } catch (err) {
-        console.error(`remove 后 patch 激活行清理失败: ${(err as Error).message}`)
-      }
-    }
+    const removeName = action === 'remove' ? (args as string[])[0] : undefined
+    const res = await streamPluginOp(action, args as string[], removeName === undefined ? undefined : () => {
+      // 已在 streamPluginOp 的 profile mutation 串行区内，不能再次进入 serializeMutation。
+      const profile = activeProfile()
+      if (!profile) throw new Error(`profile「${ACTIVE_PROFILE}」不存在，无法清理插件激活行`)
+      const patch = readPatch(profile.dir)
+      const cleaned = deactivatePluginIfActive(patch, removeName)
+      if (cleaned !== patch) writePluginPatch(profile, cleaned)
+    })
     return res
   })
 
@@ -421,7 +434,7 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.skillsCreate, (event, input: unknown) => {
     assertRendererSender(event)
-    const payload = input as { name?: unknown; description?: unknown; body?: unknown }
+    const payload = input as { name?: unknown; description?: unknown; body?: unknown; overwrite?: unknown }
     if (typeof payload.name !== 'string' || typeof payload.description !== 'string' || typeof payload.body !== 'string') {
       return { ok: false as const, error: '输入无效', path: '' }
     }
@@ -431,6 +444,7 @@ function registerIpc(): void {
         name: payload.name,
         description: payload.description,
         body: payload.body,
+        overwrite: payload.overwrite === true,
       })
       return { ok: true as const, path }
     } catch (err) {
@@ -474,6 +488,39 @@ function registerIpc(): void {
     } catch (err) {
       return { ok: false as const, error: (err as Error).message, result: null }
     }
+  })
+
+  ipcMain.handle(IPC.skillsImportClawHub, async (event, input: unknown, overwrite: unknown) => {
+    assertRendererSender(event)
+    if (!input || typeof input !== 'object') return { ok: false as const, error: 'ClawHub 条目无效', result: null }
+    const payload = input as { owner?: unknown; slug?: unknown; version?: unknown }
+    if (typeof payload.owner !== 'string' || typeof payload.slug !== 'string') return { ok: false as const, error: 'ClawHub owner/slug 无效', result: null }
+    try {
+      const result = await importSkillFromClawHub({
+        owner: payload.owner,
+        slug: payload.slug,
+        version: typeof payload.version === 'string' ? payload.version : undefined,
+      }, { root: join(dshHome(), 'skills'), overwrite: overwrite === true })
+      return { ok: true as const, result }
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message, result: null }
+    }
+  })
+
+  ipcMain.handle(IPC.marketList, async (event, kind: unknown, query: unknown) => {
+    assertRendererSender(event)
+    const selected = kind === 'plugin' || kind === 'mcp' || kind === 'skill' ? kind as MarketKind : undefined
+    if (!selected) return { ok: false as const, kind: 'all' as const, items: [], error: '市场类型无效' }
+    const result = await fetchMarketItems(selected, typeof query === 'string' ? query.slice(0, 120) : '', {
+      cacheDir: join(app.getPath('userData'), 'market-cache'),
+    })
+    return { ok: true as const, kind: selected, items: result.items, online: result.online, cached: result.cached, error: result.error }
+  })
+
+  ipcMain.handle(IPC.marketPluginPreflight, async (event, spec: unknown) => {
+    assertRendererSender(event)
+    if (typeof spec !== 'string' || !spec.trim()) return { ok: false as const, error: '插件 spec 无效' }
+    return preflightPluginSpec(spec.slice(0, 500))
   })
 }
 
@@ -581,6 +628,7 @@ function sendHarnessStatus(status: HarnessStatus): void {
 
 /** 同步启动 harness 并等待就绪（冒烟模式 / 手动重启共用；失败抛错且不改窗口状态） */
 async function startHarnessAndWatch(): Promise<void> {
+  const generation = ++harnessStartGeneration
   sendHarnessStatus({ state: 'starting' })
   try {
     const exec = resolveDshExec()
@@ -597,16 +645,27 @@ async function startHarnessAndWatch(): Promise<void> {
         if (recentDshLog.length > 10) recentDshLog.shift()
       },
       onSpawn: (proc) => {
+        if (generation !== harnessStartGeneration) {
+          void stopTree(proc)
+          return
+        }
         startingProc = proc
         log(`harness: 子进程已启动（pid=${proc.pid}）`)
       },
     })
+    // stopHarness() 可能在 startHarness() 等待期间取消了这一代；不能让已停止的进程重新成为当前 harness。
+    if (generation !== harnessStartGeneration || stoppingHarness || quitting) {
+      await next.stop()
+      return
+    }
     harness = next
     startingProc = null
     watchHarness(next.proc)
     log(`harness: 就绪 ${next.url}`)
     sendHarnessStatus({ state: 'ready', url: next.url })
   } catch (err) {
+    // 被主动停止/新一代启动取消的 Promise 不算启动失败，也不能触发自动重试。
+    if (generation !== harnessStartGeneration || stoppingHarness || quitting) return
     startingProc = null
     const msg = err instanceof Error ? err.message : String(err)
     // 附上 dsh 最近输出（截断），让 UI 直接显示真实失败原因而不是干等 180s 或笼统报错
@@ -643,6 +702,8 @@ function scheduleAutoRestart(reason: string): void {
 /** 主动停止（手动重启 / 退出用）：抑制 watchHarness 的自动重启 */
 async function stopHarness(): Promise<void> {
   stoppingHarness = true
+  // 先使所有在途启动失效，再等待其子进程退出，避免旧 Promise 重新写回 harness。
+  harnessStartGeneration += 1
   try {
     if (startingProc) {
       try {
@@ -667,7 +728,8 @@ async function restartHarness(): Promise<{ ok: boolean; url?: string; error?: st
   autoRestartTimer = null
   sendHarnessStatus({ state: 'restarting' })
   try {
-    if (harness) await stopHarness()
+    // 初次后台启动尚未就绪时 harness 仍为 null，但 startingProc 已经存在；必须无条件取消它。
+    await stopHarness()
     await startHarnessAndWatch()
     return { ok: true, url: harness?.url }
   } catch (err) {
