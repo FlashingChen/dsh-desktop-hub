@@ -310,7 +310,7 @@ async function waitForHttp(url: string, timeoutMs = 60_000): Promise<boolean> {
 const DSK_FATAL_RE = /dsh: fatal load failure: (.+)/
 const DIRECTORY_PICKER_DUP_RE = /service ["']directoryPicker["'] has been registered/i
 
-/** 启动 dsh web：spawn 独立进程组，解析端口，轮询就绪 */
+/** 启动 dsh web：POSIX 用独立进程组；Windows 由 taskkill /T 管理进程树 */
 export function startHarness(opts: {
   profile?: string
   cwd?: string
@@ -333,7 +333,9 @@ export function startHarness(opts: {
   const useWindowsShim = process.platform === 'win32' && !exec.node && /\.(?:cmd|bat)$/i.test(exec.exec)
   const proc = spawn(exec.node ?? exec.exec, spawnArgs, {
     cwd,
-    detached: true,
+    // Windows 的 cmd.exe + pipe 在 detached 模式下不会转发 shim 的 stdout；
+    // taskkill /T 已覆盖整棵树，因此 Windows 不需要 detached。
+    detached: process.platform !== 'win32',
     env: runtimePathEnv(profile, cwd),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
