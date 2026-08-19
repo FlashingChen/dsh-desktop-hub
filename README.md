@@ -8,6 +8,8 @@
 
 DeepSeek Harness 官方 Web UI 桌面客户端 —— 内置插件市场、MCP 市场、Skills 市场与三套本地管理台。
 
+> 注：本项目是社区维护的开源项目，非 DeepSeek 官方产品。
+
 [![macOS 下载 DMG](https://img.shields.io/badge/macOS-%E4%B8%8B%E8%BD%BD%20DMG-4d6bfe?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/FlashingChen/dsh-desktop-hub/releases/latest)
 [![Windows 下载 EXE](https://img.shields.io/badge/Windows-%E4%B8%8B%E8%BD%BD%20EXE-4d6bfe?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/FlashingChen/dsh-desktop-hub/releases/latest)
 [![GitHub release](https://img.shields.io/github/v/release/FlashingChen/dsh-desktop-hub?color=4d6bfe)](https://github.com/FlashingChen/dsh-desktop-hub/releases)
