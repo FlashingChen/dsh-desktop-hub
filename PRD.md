@@ -237,12 +237,13 @@ dsh plugin --profile <name> update
 
 ### 3.1 定位
 
-**DSH Desktop Hub 管理控制台**：一个桌面应用，内置完整 DSH harness（无需安装 Node.js/pnpm 等任何运行环境，双击即进入），并在原生/集成 UI 中以多 Tab 提供三个管理系统：
+**DSH Desktop Hub 管理控制台**：一个桌面应用，内置完整 DSH harness（无需安装 Node.js/pnpm 等任何运行环境，双击即进入），并在原生/集成 UI 中以多 Tab 提供三个管理系统和一个反馈入口：
 
 1. **Plugin 系统** — 管理、安装、移除本机 DSH 所有插件
 2. **MCP 系统** — 把普通 JSON 格式的 MCP 配置转换为 DeepSeek 所需的 YAML 并接入 harness
 3. **Skills 系统** — 管理 DeepSeek（DSH harness）可用的 skills
-4. （第四系统预留 Tab 位，本期不做）
+4. **反馈系统** — 匿名/署名反馈、低敏诊断信息、复制兜底和 QQ 群入口；通过可访问的反馈 API 由 bot 创建 GitHub Issue
+5. （其他系统预留 Tab 位，暂不做）
 
 ### 3.2 用户故事
 
@@ -253,10 +254,11 @@ dsh plugin --profile <name> update
 | U3 | 作为从 Claude Code 迁来的用户，我能粘贴/选择 `.mcp.json`（或其他 JSON 格式），预览转换后的 DSH YAML，确认后写入配置并即时生效 |
 | U4 | 作为 DSH 用户，我能在 Skills 系统浏览、创建、编辑、启用/禁用用户级与项目级 skills，改动即时生效 |
 | U5 | 作为用户，我能看到 harness 运行状态、API Key/模型配置状态，并能彻底退出（不留孤儿进程） |
+| U6 | 作为用户，我能在不访问 GitHub 的情况下提交匿名或署名反馈，并选择是否附加低敏诊断信息；网络失败时可以复制内容发送到 QQ 群 |
 
 ### 3.3 多 Tab 主窗口（当前实现）
 
-**壳层（已落地）**：主窗口＝四 Tab 壳（顶部 Tab 栏：Harness / Plugin / MCP / Skills，`src/renderer/index.html`）。应用启动后主进程拉起 `dsh web`（profile「web」，`--port 0` 由 dsh 自选端口），轮询 HTTP 200 就绪后创建 BrowserWindow（1280×800，sandbox + contextIsolation）；**Harness Tab 以 `<iframe>` 内嵌官方 Web UI**（CSP `frame-src http://127.0.0.1:*`）。由于 iframe 的 `load` 事件对长连接页面不可靠，由主进程监听 `did-frame-navigate`（非主帧且前缀命中 harness URL）推送 `harness:frame-loaded`，渲染层据此更新状态条「harness 已连接: 127.0.0.1:PORT」。
+**壳层（已落地）**：主窗口＝五 Tab 壳（顶部 Tab 栏：Harness / Plugin / MCP / Skills / 反馈，`src/renderer/index.html`）。应用启动后主进程拉起 `dsh web`（profile「web」，`--port 0` 由 dsh 自选端口），轮询 HTTP 200 就绪后创建 BrowserWindow（1280×800，sandbox + contextIsolation）；**Harness Tab 以 `<iframe>` 内嵌官方 Web UI**（CSP `frame-src http://127.0.0.1:*`）。由于 iframe 的 `load` 事件对长连接页面不可靠，由主进程监听 `did-frame-navigate`（非主帧且前缀命中 harness URL）推送 `harness:frame-loaded`，渲染层据此更新状态条「harness 已连接: 127.0.0.1:PORT」。
 
 | Tab | 功能 | 关键交互（已实现） |
 |---|---|---|
@@ -264,10 +266,11 @@ dsh plugin --profile <name> update
 | **Plugin** | profile「web」插件管理 | 列表（名称 / 来源：内置组合包、第三方组合包、普通依赖 / spec）；安装框支持 **npm 包名、`github:owner/repo#commit`、本地路径，并已升级为支持直接粘贴 GitHub 链接**（spec 透传给 `dsh plugin --profile web add`）；对 `dsh-routing-suite` 这类无 `package.json/dsh.bundle` 的聚合仓库拒绝直装，改为显示 injector/preset 的真实识别状态；移除（第三方包）、更新；写操作前确认，变更后提示「重启 harness 生效」 |
 | **MCP** | JSON → YAML 转换器 + 服务器管理 | 粘贴 Claude Code / Cursor 风格 JSON → 转换预览（含警告：`type: sse` 仅按 HTTP 处理、非法 serverName 跳过）→ 确认后写入 profile「web」的 `cordis.patch.yml`（**写入前自动 `.bak-<ts>` 备份**，原子写，官方 HMR 热生效）；市场条目声明环境变量时，在安装卡片先填写并写入该 MCP 行，用户无需自行设置系统环境；显示现有服务器数 |
 | **Skills** | skills 目录管理 | 按 DSH rank 规则扫描（用户 `~/.dsh/skills` / `~/.agents/skills` + `$DSH_BUNDLED_SKILL_DIR` 存在时的随包根，rank 400/500/600）；列表按来源标注，同名低 rank 生效、高 rank 标「被遮蔽」；可见性切换仅对用户级生效（项目/自定义/随包只读展示）；**新建**（kebab-case 名称校验 + 描述 + 正文表单，落盘 `~/.dsh/skills/<name>/SKILL.md`）；模型可见 / 用户可见切换（写 frontmatter `disable-model-invocation` / `user-invocable`），改动即时生效 |
+| **反馈** | 匿名/署名反馈、低敏诊断、复制和 QQ 群 | 通过配置的 HTTPS feedback API 提交，不打开 GitHub；服务端由私有 Cloudflare Worker + GitHub Bot 异步创建 Issue；服务端未配置或网络失败时复制内容仍可用 |
 | **Settings（壳级）** | API Key、模型、profile、更新 | 本期未实现（预留；API Key/模型配置复用官方 Web UI 内能力） |
-| **第四系统（占位）** | 预留入口 | 本期未实现（§0 原始需求：暂不做） |
+| **其他系统（占位）** | 预留入口 | 本期未实现 |
 
-UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四个系统 Tab 与官方会话界面并列切换。
+UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），五个系统 Tab 与官方会话界面并列切换。
 
 ### 3.4 平台与范围
 
@@ -296,19 +299,19 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四�
 
 ```
 启动 → app.whenReady
-  → registerIpc()（harness:url / plugins:* / mcp:* / skills:*）
+  → registerIpc()（harness:* / plugins:* / mcp:* / skills:* / feedback:*）
   → resolveDshExec()（打包内 runtime 优先，回退 PATH）
   → spawn dsh web --port 0（detached 独立进程组，cwd=~）
   → 解析输出 127.0.0.1:PORT → 轮询 HTTP 200（就绪超时 120s）
   → 创建 BrowserWindow（1280×800，sandbox + contextIsolation + preload.cjs）
-  → 加载四 Tab 壳（file://dist/renderer/index.html）
+  → 加载五 Tab 壳（file://dist/renderer/index.html）
   → renderer 经 IPC 取 harness URL → iframe 挂载官方 Web UI
   → 主进程 did-frame-navigate（非主帧且前缀命中）推送 harness:frame-loaded
 退出 → window-all-closed（非 macOS 退出）
   → will-quit → harness.stop()：SIGTERM 进程组 → 2s 兜底 SIGKILL → app.quit
 ```
 
-冒烟模式：`--smoke`（不启 harness：四 Tab DOM + 真实插件/MCP/skills 数据断言，截屏 `artifacts/m0-smoke.png`）；`--harness-smoke`（真实 harness + iframe 加载断言，截屏 `artifacts/m1-harness.png`）。
+冒烟模式：`--smoke`（不启 harness：五 Tab DOM + 真实插件/MCP/skills 数据断言，截屏 `artifacts/m0-smoke.png`）；`--harness-smoke`（真实 harness + iframe 加载断言，截屏 `artifacts/m1-harness.png`）。
 
 ### 4.3 安全边界（当前实现）
 
@@ -319,6 +322,7 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四�
 - MCP 写入前自动备份（`.bak-<ts>`），原子写（tmp + rename）失败不落盘。
 - 转换器只做解析与映射，不执行任何命令。
 - API Key 走官方通道（`$DSH_HOME/.credentials.yaml`，只写），壳层不触碰。
+- 反馈 API 只接收用户明确提交的反馈和可选低敏诊断；桌面端不保存或发送 GitHub 凭据。私有 `github-issue-server/` 使用 Cloudflare Worker/Queues/D1 和 GitHub App secret。
 
 ---
 
@@ -331,17 +335,18 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四�
 - Skills：ClawHub 与 SkillsMP；ClawHub 匿名安装当前落地 `SKILL.md`，SkillsMP GitHub source 可带辅助文件。
 - 完整 URL、缓存、许可证边界与安全提示见 [`MARKET_SOURCES.md`](MARKET_SOURCES.md)。
 
-## 6. 里程碑（已实现：M0-M6 全部完成，验证证据与 plan.md 一致）
+## 6. 里程碑（M0-M6 已完成；反馈升级另记为 M7）
 
 | 里程碑 | 内容 | 状态与验证 |
 |---|---|---|
-| M0 壳骨架 | Electron + TypeScript 三端工程（main/preload/renderer）；四 Tab 契约；`typecheck` / `test` / `verify` 脚本 | ✅ 已完成：`npm run verify` 全绿；`npm run smoke` 四 Tab DOM 断言（截屏 `artifacts/m0-smoke.png`） |
+| M0 壳骨架 | Electron + TypeScript 三端工程（main/preload/renderer）；五 Tab 契约；`typecheck` / `test` / `verify` 脚本 | ✅ 已完成：`npm run verify` 全绿；`npm run smoke` 五 Tab DOM 断言（截屏 `artifacts/m0-smoke.png`） |
 | M1 Harness 启动与加载 | `dsh` / `$DSH_HOME` / profiles 检测；spawn `dsh web`（`--port 0`，detached 进程组）；轮询 HTTP 200；Harness Tab iframe 内嵌官方 Web UI（`did-frame-navigate` 状态推送）；退出清理进程树 | ✅ 已完成：`npm run verify:m1`（真实启动 → HTTP 200 → 优雅停止 → 端口关闭无孤儿）；`npm run smoke:harness`（iframe 挂载 + 状态「已连接」，截屏 `artifacts/m1-harness.png`） |
 | M2 Plugin Tab | profile 发现 + 插件列表（`dsh.profile.bundles` ∪ dependencies）；封装 `dsh plugin --profile web add|remove|update`（支持 npm 包名 / `github:owner/repo#commit` / 本地路径 / 直接粘贴 GitHub 链接） | ✅ 已完成：单测 17 例（分类/排序/命令形态/带协议与裸 GitHub 链接归一化/聚合仓库拦截/pnpm ignored builds 与 Git prepare 授权/显式拒绝保护/退出码+取消/幂等激活行清理）；冒烟断言真实 web profile ≥4 项含 dsh-base |
 | M3 MCP Tab | JSON→YAML 转换器 + profile `cordis.patch.yml` 事务读写（备份/回滚）+ 服务器列表 | ✅ 已完成：单测 18 例（混合输入/sse 警告/格式拒绝/YAML 同构/提取/替换/编辑/删除保留注释/空 patch 新建/备份事务/`!!js` 行级保真）；UI 支持读取、编辑、删除已有 MCP 行 |
-| M4 Skills Tab | rank 400-600 目录扫描（用户级 + 随包）；SKILL.md/扁平 md 解析 + frontmatter；新建（kebab-case 校验）；模型/用户可见性切换 | ✅ 已完成：单测 15 例（rank 合并/shadowed/custom+bundled 根/往返一致/创建校验/可见性切换/扁平名回退/zip 导入与穿越拒绝）；冒烟真实数据 huashu-design + media-use |
-| M5 桌面整合与打包 | 四 Tab 主窗口整合（Harness iframe 内嵌官方 Web UI）+ electron-builder 出 DMG | ✅ 已完成：默认模式＝启动 harness + 四 Tab 壳；`release/DSH-Desktop-Hub-0.1.0-arm64.dmg` 产物存在；打包 app 在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）下用捆绑运行时启动，HTTP 200；TERM 退出无孤儿 |
+| M4 Skills Tab | rank 400-600 目录扫描（用户级 + 随包）；SKILL.md/扁平 md 解析 + frontmatter；新建（kebab-case 校验）；模型/用户可见性切换 | ✅ 已完成：单测 15 例（rank 合并/shadowed/custom+bundled 根/往返一致/创建校验/可见性切换/扁平 skill 文件名回退/zip 导入与穿越拒绝）；冒烟真实数据 huashu-design + media-use |
+| M5 桌面整合与打包 | 五 Tab 主窗口整合（Harness iframe 内嵌官方 Web UI）+ electron-builder 出 DMG | ✅ 已完成：默认模式＝启动 harness + 五 Tab 壳；`release/DSH-Desktop-Hub-0.1.0-arm64.dmg` 产物存在；打包 app 在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）下用捆绑运行时启动，HTTP 200；TERM 退出无孤儿 |
 | M6 扩展中心 MVP | Plugin / MCP / Skills 三类市场 + 在线目录搜索 + 精选安装链路 | ✅ 已完成：DSH Plugin Market / Awesome DSH Plugin / 官方 MCP Registry / DSH MCP Market / ClawHub / SkillsMP 接入，来源等级与权限展示，插件 CLI 安装，MCP patch 合并写入，Skills GitHub / ClawHub / 模板安装；账号/评论/社区提交未纳入本期 |
+| M7 反馈与社区入口 | 第五个反馈 Tab + 低敏诊断/复制 + 私有 Cloudflare Worker 接收 + GitHub Bot Issue | 🚧 客户端与 Cloudflare Worker 私有工程已实现；正式 endpoint、Cloudflare 资源和 GitHub App 凭据需部署配置后启用；未配置时不伪造提交成功 |
 
 > 后续演进（未在本期范围）：Settings Tab（API Key/模型/更新）、profile 切换、更细粒度的插件构建授权向导、MCP/Skills 文件导入、Windows/Linux 打包、自动更新 —— 详见 plan.md「下一步」。
 

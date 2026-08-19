@@ -321,7 +321,7 @@
       .field-hint { color: var(--ink-faint); font-size: 10px; line-height: 1.45; margin-top: 6px; }
       .install-row, .file-row { align-items: flex-end; display: flex; gap: 9px; }
       .install-row .field, .file-row .field { flex: 1; min-width: 0; }
-      input[type="text"], input[type="url"], input[type="password"], input[type="file"] {
+      input[type="text"], input[type="url"], input[type="password"], input[type="file"], select {
         background: var(--surface-subtle);
         border: 1px solid var(--line-strong);
         border-radius: var(--radius-sm);
@@ -333,6 +333,7 @@
         width: 100%;
       }
       input[type="text"]::placeholder, input[type="url"]::placeholder, input[type="password"]::placeholder, textarea::placeholder { color: var(--ink-faint); }
+      select { outline: none; width: 100%; }
       input[type="file"] { color: var(--ink-soft); padding: 6px 8px; }
       input[type="file"]::file-selector-button {
         background: var(--surface);
@@ -492,6 +493,76 @@
       .skills-actions .row { align-items: flex-end; }
       .skills-actions .row > * { flex: 1; min-width: 0; }
       .skills-actions .row > button { flex: none; }
+      .feedback-mode-switcher {
+        align-items: center;
+        background: var(--surface-subtle);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        display: inline-flex;
+        gap: 3px;
+        margin-bottom: 14px;
+        padding: 3px;
+      }
+      .feedback-mode-switcher button {
+        background: transparent;
+        border-color: transparent;
+        color: var(--ink-soft);
+        font-size: 12px;
+        min-height: 30px;
+        padding: 6px 13px;
+      }
+      .feedback-mode-switcher button.active {
+        background: var(--surface);
+        border-color: var(--line);
+        box-shadow: var(--shadow-sm);
+        color: var(--brand-dark);
+        font-weight: 650;
+      }
+      .feedback-signature-field[hidden] { display: none; }
+      .feedback-privacy {
+        align-items: flex-start;
+        background: var(--surface-blue);
+        border: 1px solid #dfe5ff;
+        border-radius: 9px;
+        color: var(--ink-soft);
+        display: flex;
+        font-size: 11px;
+        gap: 8px;
+        line-height: 1.55;
+        margin-top: 12px;
+        padding: 9px 11px;
+      }
+      .feedback-privacy input { flex: none; margin-top: 3px; }
+      .feedback-diagnostics {
+        background: #202938;
+        border: 1px solid #202938;
+        border-radius: var(--radius-sm);
+        color: #dbe4ff;
+        font-family: var(--font-code);
+        font-size: 11px;
+        line-height: 1.6;
+        max-height: 280px;
+        min-height: 120px;
+        overflow: auto;
+        padding: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .feedback-diagnostics.empty { color: #9da9c6; }
+      .feedback-community {
+        align-items: center;
+        display: flex;
+        gap: 22px;
+      }
+      .feedback-community-copy { flex: 1; min-width: 0; }
+      .feedback-community-copy p { color: var(--ink-soft); font-size: 11px; line-height: 1.6; margin-top: 7px; }
+      .feedback-qr { flex: none; text-align: center; width: 148px; }
+      .feedback-qr img { background: #fff; border: 1px solid var(--line); border-radius: 8px; height: 148px; object-fit: contain; padding: 5px; width: 148px; }
+      .feedback-qr figcaption { color: var(--ink-faint); font-size: 10px; margin-top: 5px; }
+      @media (max-width: 640px) {
+        .feedback-community { align-items: stretch; flex-direction: column; }
+        .feedback-qr { margin: 0 auto; }
+      }
       .harness-wrap {
         background: var(--canvas-deep);
         display: flex;
@@ -718,6 +789,12 @@
               <svg viewBox="0 0 24 24"><path d="M5 7.5 12 4l7 3.5v9L12 20l-7-3.5z"></path><path d="m5 7.5 7 3.5 7-3.5M12 11v9"></path></svg>
             </span>
             <span class="tab-copy"><span>Skills</span></span>
+          </button>
+          <button class="tab" id="tab-feedback" type="button" data-tab="feedback" role="tab" aria-selected="false" aria-controls="panel-feedback">
+            <span class="tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6a2.5 2.5 0 0 1-2.5 2.5h-5.7L7 19v-4H7.5A2.5 2.5 0 0 1 5 12.5z"></path><path d="M8 8.5h8M8 11.5h5"></path></svg>
+            </span>
+            <span class="tab-copy"><span>反馈</span><small>问题与建议</small></span>
           </button>
         </nav>
         <div class="sidebar-spacer"></div>
@@ -1004,6 +1081,95 @@
                 </div>
               </section>
             </div>
+            </section>
+          </div>
+        </section>
+        <section class="panel" id="panel-feedback" role="tabpanel" aria-labelledby="tab-feedback">
+          <div class="page">
+            <div class="page-header">
+              <div>
+                <div class="eyebrow">Support / Privacy first</div>
+                <h1>反馈</h1>
+                <p class="page-description">反馈会发送到反馈服务，再由 bot 整理到 GitHub Issue。你不需要访问 GitHub；诊断信息也只有在明确勾选后才会随反馈发送。</p>
+              </div>
+            </div>
+            <div class="notice">
+              <span class="notice-mark" aria-hidden="true">i</span>
+              <span>匿名模式不收集署名；署名模式只使用你手填的署名。应用不会打开 GitHub。服务端暂未配置时，仍可复制内容发送到 QQ 群。</span>
+            </div>
+            <div class="feedback-mode-switcher" role="tablist" aria-label="反馈提交方式">
+              <button class="active" id="feedback-mode-anonymous" type="button" data-feedback-mode="anonymous" role="tab" aria-selected="true">匿名 / 不署名</button>
+              <button id="feedback-mode-signed" type="button" data-feedback-mode="signed" role="tab" aria-selected="false">署名提交</button>
+            </div>
+            <div class="two-column">
+              <section class="surface">
+                <div class="surface-head">
+                  <div>
+                    <h2 class="surface-title">写下你的反馈</h2>
+                    <p class="surface-caption">描述越具体，越容易复现和处理。</p>
+                  </div>
+                </div>
+                <div class="surface-body">
+                  <div class="row">
+                    <div class="field" style="flex: 1; min-width: 180px">
+                      <label class="field-label" for="feedback-category">类型</label>
+                      <select id="feedback-category" aria-label="反馈类型">
+                        <option value="bug">问题反馈</option>
+                        <option value="feature">功能建议</option>
+                        <option value="other">其他</option>
+                      </select>
+                    </div>
+                    <div class="field feedback-signature-field" id="feedback-signature-field" style="flex: 1.4; min-width: 220px" hidden>
+                      <label class="field-label" for="feedback-signature">署名</label>
+                      <input id="feedback-signature" type="text" maxlength="80" autocomplete="nickname" placeholder="请输入希望显示的署名" />
+                    </div>
+                  </div>
+                  <div class="field" style="margin-top: 12px">
+                    <label class="field-label" for="feedback-title">标题</label>
+                    <input id="feedback-title" type="text" maxlength="160" placeholder="一句话概括问题或建议" />
+                  </div>
+                  <div class="field" style="margin-top: 12px">
+                    <label class="field-label" for="feedback-body">详细描述</label>
+                    <textarea id="feedback-body" rows="10" maxlength="20000" placeholder="发生了什么？如何复现？你期望的结果是什么？"></textarea>
+                  </div>
+                  <label class="feedback-privacy" for="feedback-include-diagnostics">
+                    <input id="feedback-include-diagnostics" type="checkbox" />
+                    <span>附加诊断信息（不含账号、路径和密钥）。默认不附加，你可以先查看下方内容再决定。</span>
+                  </label>
+                  <div class="surface-actions" style="margin-top: 14px">
+                    <button id="feedback-submit" class="primary" type="button">提交反馈</button>
+                    <button id="feedback-copy-full" type="button">复制完整反馈</button>
+                    <button id="feedback-copy-diagnostics" class="quiet" type="button">复制诊断信息</button>
+                  </div>
+                  <div id="feedback-status" class="status inline-status" aria-live="polite"></div>
+                </div>
+              </section>
+              <section class="surface">
+                <div class="surface-head">
+                  <div>
+                    <h2 class="surface-title">诊断环境信息</h2>
+                    <p class="surface-caption">低敏白名单信息，仅用于定位版本和运行环境问题。</p>
+                  </div>
+                  <button id="feedback-refresh-diagnostics" class="quiet" type="button">刷新</button>
+                </div>
+                <div class="surface-body">
+                  <pre id="feedback-diagnostics" class="feedback-diagnostics empty" aria-live="polite">读取中…</pre>
+                  <p class="field-hint">不会包含用户名、主机名、文件路径、环境变量、API Key、MCP 配置、会话内容或原始日志。</p>
+                </div>
+              </section>
+            </div>
+            <section class="surface">
+              <div class="surface-body feedback-community">
+                <div class="feedback-community-copy">
+                  <h2 class="surface-title">加入交流群</h2>
+                  <p>如果当前网络无法提交反馈，或你想和其他用户交流，可以复制上面的内容后发送到 QQ 群。</p>
+                  <p><strong>群号：1106611027</strong></p>
+                </div>
+                <figure class="feedback-qr">
+                  <img src="community/qq-group.png" alt="dsh-desktop-hub QQ 交流群二维码" />
+                  <figcaption>扫码加入 QQ 群</figcaption>
+                </figure>
+              </div>
             </section>
           </div>
         </section>

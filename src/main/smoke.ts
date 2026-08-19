@@ -33,13 +33,15 @@ interface DomSnapshot {
   skillsStatus?: string
   marketCards?: { plugin: number; mcp: number; skills: number }
   harnessStatus?: string
+  feedbackControls?: boolean
+  feedbackQr?: boolean
 }
 
 async function snapshot(win: BrowserWindow): Promise<DomSnapshot> {
   return win.webContents.executeJavaScript(`(() => {
     const tabs = [...document.querySelectorAll('[data-tab]')].map(b => b.dataset.tab)
     const active = document.querySelector('.tab.active')?.dataset.tab
-    const panels = ['harness','plugin','mcp','skills'].map(t => !!document.getElementById('panel-' + t))
+    const panels = ['harness','plugin','mcp','skills','feedback'].map(t => !!document.getElementById('panel-' + t))
     const pluginRows = [...document.querySelectorAll('#plugin-rows tr')].map(r => r.textContent ?? '')
     const mcpRows = [...document.querySelectorAll('#mcp-server-rows tr')].map(r => r.textContent ?? '')
     const marketCards = {
@@ -55,6 +57,8 @@ async function snapshot(win: BrowserWindow): Promise<DomSnapshot> {
       mcpCancelHidden: document.getElementById('mcp-cancel-edit')?.hidden ?? false,
       skillsStatus: document.getElementById('skills-status')?.textContent ?? '',
       harnessStatus: document.getElementById('harness-status')?.textContent ?? '',
+      feedbackControls: !!document.getElementById('feedback-submit') && !!document.getElementById('feedback-diagnostics') && !!document.getElementById('feedback-copy-full'),
+      feedbackQr: !!document.querySelector('#panel-feedback img[src="community/qq-group.png"]'),
     }
   })()`) as Promise<DomSnapshot>
 }
@@ -113,7 +117,7 @@ export function wireSmoke(ctx: SmokeContext): void {
   })
 
   if (!ctx.harnessSmoke) {
-    // ---- 骨架冒烟：四 Tab + 数据面板加载（不依赖特定 profile 数据）----
+    // ---- 骨架冒烟：五 Tab + 数据面板加载（不依赖特定 profile 数据）----
     win.webContents.once('did-finish-load', () => {
       void (async () => {
         const ready = await waitFor(
@@ -159,7 +163,7 @@ export function wireSmoke(ctx: SmokeContext): void {
           (dom) => {
             const d = dom as DomSnapshot
             return (
-              JSON.stringify(d.tabs) === JSON.stringify(['harness', 'plugin', 'mcp', 'skills']) &&
+              JSON.stringify(d.tabs) === JSON.stringify(['harness', 'plugin', 'mcp', 'skills', 'feedback']) &&
               d.active === 'harness' &&
               (d.panels?.every(Boolean) ?? false) &&
               d.title === APP_TITLE &&
@@ -169,7 +173,9 @@ export function wireSmoke(ctx: SmokeContext): void {
               d.mcpCancelHidden === true &&
               (d.marketCards?.plugin ?? 0) > 0 &&
               (d.marketCards?.mcp ?? 0) > 0 &&
-              (d.marketCards?.skills ?? 0) > 0
+              (d.marketCards?.skills ?? 0) > 0 &&
+              d.feedbackControls === true &&
+              d.feedbackQr === true
             )
           },
           ctx.artifactsDir,

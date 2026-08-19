@@ -28,6 +28,9 @@ export const IPC = {
   skillsImportClawHub: 'skills:import-clawhub',
   marketList: 'market:list',
   marketPluginPreflight: 'market:plugin-preflight',
+  feedbackDiagnostics: 'feedback:diagnostics',
+  feedbackCopy: 'feedback:copy',
+  feedbackSubmit: 'feedback:submit',
 } as const
 
 export type PluginOpAction = 'add' | 'remove' | 'update'
@@ -62,4 +65,13 @@ export interface HarnessStatus {
 export interface McpApplyInput {
   rows: unknown[]
   mode: 'merge' | 'replace'
+}
+
+export interface FeedbackSubmitInput {
+  mode: 'anonymous' | 'signed'
+  category: 'bug' | 'feature' | 'other'
+  title: string
+  body: string
+  signature?: string | null
+  diagnostics?: string | null
 }

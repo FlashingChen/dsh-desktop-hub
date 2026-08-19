@@ -35,6 +35,10 @@
   - 验证：市场目录契约测试；`npm run smoke` 断言三类市场卡片均加载；`npm run verify` 全绿。
   - 当前边界：Plugin 从 DSH Plugin Market 发布的 Awesome DSH Plugin machine snapshot 发现，并在安装前校验 `dsh.bundle`、锁定 npm 版本或 GitHub commit；MCP 合并官方 MCP Registry 与 DSH MCP Market；Skills 合并 ClawHub 与 SkillsMP，ClawHub 版本直接锁定并只安装 `SKILL.md`；在线目录写入本地缓存，网络失败回退缓存或随包精选目录，暂不包含账号、评论和社区发布。
 
+- [x] **M7 反馈与社区入口客户端** — 第五个 Feedback Tab；匿名/署名表单；低敏诊断预览与可选附加；复制完整反馈/诊断；通过 `DSH_FEEDBACK_ENDPOINT` 调用版本化 HTTPS API；内置 QQ 群二维码并随 renderer 打包。
+  - 验证：诊断/反馈纯函数与 mock client 单测；`npm run verify` 全绿；Electron smoke 断言五个 Tab、反馈控件和二维码存在。
+  - 私有服务端：`github-issue-server/` 为 Cloudflare Worker + D1 + Queue + GitHub App scaffold，目录被 `.gitignore` 排除，不进入公开源码；正式 endpoint、Cloudflare 资源 ID、App secrets 需单独部署配置。
+
 ## 约束
 
 - 只读操作优先走真实环境（`~/.dsh`）；任何写操作（安装插件 / 改 patch / 新建 skill）默认落在**临时 profile / 临时目录**，除非用户显式指向真实 profile。

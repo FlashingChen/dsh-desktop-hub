@@ -29,6 +29,9 @@ const CH = {
   skillsImportClawHub: 'skills:import-clawhub',
   marketList: 'market:list',
   marketPluginPreflight: 'market:plugin-preflight',
+  feedbackDiagnostics: 'feedback:diagnostics',
+  feedbackCopy: 'feedback:copy',
+  feedbackSubmit: 'feedback:submit',
 } as const
 
 interface HarnessStatus {
@@ -104,5 +107,18 @@ contextBridge.exposeInMainWorld('dshDesktop', {
   market: {
     list: (kind: 'plugin' | 'mcp' | 'skill', query?: string) => ipcRenderer.invoke(CH.marketList, kind, query),
     preflightPlugin: (spec: string) => ipcRenderer.invoke(CH.marketPluginPreflight, spec),
+  },
+  feedback: {
+    diagnostics: (): Promise<{ ok: boolean; text?: string; error?: string }> => ipcRenderer.invoke(CH.feedbackDiagnostics),
+    copy: (text: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke(CH.feedbackCopy, text),
+    submit: (input: {
+      mode: 'anonymous' | 'signed'
+      category: 'bug' | 'feature' | 'other'
+      title: string
+      body: string
+      signature?: string | null
+      diagnostics?: string | null
+    }): Promise<{ ok: boolean; status?: 'queued' | 'accepted'; receiptId?: string; code?: string; message?: string; retryable?: boolean }> =>
+      ipcRenderer.invoke(CH.feedbackSubmit, input),
   },
 })
