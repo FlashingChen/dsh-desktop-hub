@@ -22,8 +22,8 @@ import {
   isPluginActive,
   listPlugins,
   runPluginOp,
-  type PluginOpHandle,
 } from '../core/plugins.js'
+import { PluginOpRunner } from '../core/plugin-ops.js'
 import {
   MCP_PLUGIN,
   convertJsonToYaml,
@@ -134,75 +134,45 @@ function serializeMutation<T>(task: () => Promise<T> | T): Promise<T> {
   return next
 }
 
-// ---- 插件操作：流式输出 + 可取消 + 有界缓冲（P1-5 / P2-10）----
-const OP_OUTPUT_CAP = 64 * 1024
-const activeOps = new Map<string, PluginOpHandle>()
+// ---- 插件操作：启动/完成分离 + 流式输出 + 可取消 + 有界缓冲（P1-5 / P2-10）----
+// IPC 的 start-op 只能确认「已登记」，不能等待 dsh 子进程结束；完成由 plugin-op:done
+// 事件单独推送。否则一个 0.8s 内完成的操作会先发 done，再把 token 返回 renderer，
+// renderer 永远收不到与自己 token 匹配的终态（Issue #8）。
 let opSeq = 0
 
-function appendCapped(buf: string, chunk: string): string {
-  buf += chunk
-  return buf.length > OP_OUTPUT_CAP ? buf.slice(buf.length - OP_OUTPUT_CAP) : buf
+function sendPluginEvent(channel: string, ...payload: unknown[]): void {
+  try {
+    // 每次推送取最新 webContents；窗口可能在长操作期间销毁，send 需防御（P3）。
+    shellWebContents()?.send(channel, ...payload)
+  } catch {
+    /* 窗口已销毁：忽略推送；终态仍由 PluginOpRunner 有界保存，供 status 查询。 */
+  }
 }
 
-function streamPluginOp(
-  action: PluginOpAction,
-  args: string[],
-  finalize?: () => void,
-): Promise<{ ok: boolean; token?: string; error?: string; exitCode?: number | null }> {
+const pluginOps = new PluginOpRunner({
+  nextToken: () => `op-${++opSeq}`,
+  schedule: (task) => serializeMutation(task),
+  onChunk: (token, text) => sendPluginEvent(IPC.pluginOpChunk, token, text),
+  onDone: (done) => sendPluginEvent(IPC.pluginOpDone, done),
+  onFinalizeError: (message) => log(`plugin remove: patch 激活行清理失败 —— ${message}`),
+})
+
+function startPluginOp(action: PluginOpAction, args: string[], finalize?: () => void) {
   const exec = resolveDshExec()
-  if (!exec) return Promise.resolve({ ok: false, error: '未找到 dsh 可执行文件' })
-  return serializeMutation(async () => {
-    const token = `op-${++opSeq}`
-    const op = runPluginOp({
+  if (!exec) return { ok: false as const, error: '未找到 dsh 可执行文件' }
+  return pluginOps.start({
+    profile: ACTIVE_PROFILE,
+    action,
+    args,
+    run: () => runPluginOp({
       dsh: exec.exec,
       node: exec.node,
       profile: ACTIVE_PROFILE,
       action,
       args,
       env: runtimePathEnv(),
-    })
-    activeOps.set(token, op)
-    // 每次推送取最新 webContents；窗口可能在长操作期间销毁，send 需防御（P3）
-    const sendToShell = (channel: string, ...payload: unknown[]): void => {
-      try {
-        shellWebContents()?.send(channel, ...payload)
-      } catch {
-        /* 窗口已销毁：忽略推送，操作结果仍由有界缓冲保存 */
-      }
-    }
-    sendToShell(IPC.pluginOpChunk, token, `dsh plugin --profile ${ACTIVE_PROFILE} ${action} ${args.join(' ')}\n`)
-    let output = ''
-    const onChunk = (buf: Buffer): void => {
-      const text = String(buf)
-      output = appendCapped(output, text)
-      sendToShell(IPC.pluginOpChunk, token, text)
-    }
-    op.stdout.on('data', onChunk)
-    op.stderr.on('data', onChunk)
-    const res = await op.done
-    activeOps.delete(token)
-    let exitCode = res.exitCode
-    let finalOutput = output
-    let finalizeError: string | undefined
-    // 先完成 remove 的 patch 清理，再通知 renderer 刷新/重启 Harness，避免读到旧配置。
-    // dsh remove 成功但清理失败仍必须对 UI 报失败，否则 renderer 会重启并加载残留激活行。
-    if (res.exitCode === 0 && finalize) {
-      try {
-        finalize()
-      } catch (err) {
-        finalizeError = err instanceof Error ? err.message : String(err)
-        exitCode = 1
-        finalOutput = appendCapped(output, `\n插件移除后的 patch 激活行清理失败：${finalizeError}\n`)
-        log(`plugin remove: patch 激活行清理失败 —— ${finalizeError}`)
-      }
-    }
-    sendToShell(IPC.pluginOpDone, token, {
-      token,
-      exitCode,
-      signal: res.signal,
-      output: finalOutput,
-    })
-    return { ok: exitCode === 0, token, exitCode, ...(finalizeError ? { error: finalizeError } : {}) }
+    }),
+    finalize,
   })
 }
 
@@ -314,7 +284,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle(IPC.pluginsStartOp, async (event, action: unknown, args: unknown) => {
+  ipcMain.handle(IPC.pluginsStartOp, (event, action: unknown, args: unknown) => {
     assertRendererSender(event)
     if (action !== 'add' && action !== 'remove' && action !== 'update') {
       return { ok: false as const, error: 'action 无效' }
@@ -324,24 +294,26 @@ function registerIpc(): void {
     }
     if (action === 'add' && args.length !== 1) return { ok: false as const, error: '安装需要 spec 参数' }
     const removeName = action === 'remove' ? (args as string[])[0] : undefined
-    const res = await streamPluginOp(action, args as string[], removeName === undefined ? undefined : () => {
-      // 已在 streamPluginOp 的 profile mutation 串行区内，不能再次进入 serializeMutation。
+    return startPluginOp(action, args as string[], removeName === undefined ? undefined : () => {
+      // 已在 PluginOpRunner 的 profile mutation 串行区内，不能再次进入 serializeMutation。
       const profile = activeProfile()
       if (!profile) throw new Error(`profile「${ACTIVE_PROFILE}」不存在，无法清理插件激活行`)
       const patch = readPatch(profile.dir)
       const cleaned = deactivatePluginIfActive(patch, removeName)
       if (cleaned !== patch) writePluginPatch(profile, cleaned)
     })
-    return res
   })
 
   ipcMain.handle(IPC.pluginsCancelOp, (event, token: unknown) => {
     assertRendererSender(event)
     if (typeof token !== 'string') return { ok: false as const }
-    const op = activeOps.get(token)
-    if (!op) return { ok: false as const }
-    op.cancel()
-    return { ok: true as const }
+    return { ok: pluginOps.cancel(token) }
+  })
+
+  ipcMain.handle(IPC.pluginsOpStatus, (event, token: unknown) => {
+    assertRendererSender(event)
+    if (typeof token !== 'string' || !token) return { state: 'unknown' as const }
+    return pluginOps.status(token)
   })
 
   ipcMain.handle(IPC.mcpList, (event) => {

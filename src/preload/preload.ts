@@ -12,6 +12,7 @@ const CH = {
   pluginsDeactivate: 'plugins:deactivate',
   pluginsStartOp: 'plugins:start-op',
   pluginsCancelOp: 'plugins:cancel-op',
+  pluginsOpStatus: 'plugins:op-status',
   pluginOpChunk: 'plugin-op:chunk',
   pluginOpDone: 'plugin-op:done',
   mcpList: 'mcp:list',
@@ -50,6 +51,11 @@ interface PluginOpDone {
   output: string
 }
 
+type PluginOpStatus =
+  | { state: 'running' }
+  | { state: 'done'; done: PluginOpDone }
+  | { state: 'unknown' }
+
 contextBridge.exposeInMainWorld('dshDesktop', {
   harness: {
     url: (): Promise<string | null> => ipcRenderer.invoke(CH.harnessUrl),
@@ -68,6 +74,7 @@ contextBridge.exposeInMainWorld('dshDesktop', {
     startOp: (action: 'add' | 'remove' | 'update', args: string[]): Promise<PluginOpStarted> =>
       ipcRenderer.invoke(CH.pluginsStartOp, action, args),
     cancelOp: (token: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(CH.pluginsCancelOp, token),
+    opStatus: (token: string): Promise<PluginOpStatus> => ipcRenderer.invoke(CH.pluginsOpStatus, token),
     onOpChunk: (cb: (token: string, text: string) => void): void => {
       ipcRenderer.on(CH.pluginOpChunk, (_e, token: string, text: string) => cb(token, text))
     },
