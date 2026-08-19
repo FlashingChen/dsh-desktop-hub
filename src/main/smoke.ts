@@ -19,6 +19,15 @@ export interface SmokeContext {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+/** Request a graceful quit; main's will-quit handler cleans Harness and preserves this exit code. */
+let smokeFinished = false
+function finishSmoke(code: number): void {
+  if (smokeFinished) return
+  smokeFinished = true
+  process.exitCode = code
+  app.quit()
+}
+
 interface DomSnapshot {
   tabs?: string[]
   active?: string
@@ -69,7 +78,7 @@ async function assertDomAndScreenshot(
   const dom = await snapshot(win)
   if (!assert(dom)) {
     console.error(`SMOKE FAIL: unexpected DOM ${JSON.stringify(dom)}`)
-    app.exit(1)
+    finishSmoke(1)
     return false
   }
   try {
@@ -80,10 +89,10 @@ async function assertDomAndScreenshot(
     console.log(`SMOKE OK: ${tag} DOM ${JSON.stringify({ title: dom.title, bodyLen: dom.bodyLen })} screenshot ${out}`)
   } catch (err) {
     console.error(`SMOKE FAIL: ${tag} 截图或工件写入失败：${err instanceof Error ? err.message : String(err)}`)
-    app.exit(1)
+    finishSmoke(1)
     return false
   }
-  if (exitAfter) app.exit(0)
+  if (exitAfter) finishSmoke(0)
   return true
 }
 
@@ -101,14 +110,14 @@ export function wireSmoke(ctx: SmokeContext): void {
   const win = ctx.mainWindow()
   if (!win) {
     console.error('SMOKE FAIL: 无窗口')
-    app.exit(1)
+    finishSmoke(1)
     return
   }
   win.webContents.on('did-fail-load', (_e, code, desc, _url, isMainFrame) => {
     // 子帧（harness iframe）失败/中止（-3）在重启旧进程时是正常现象，容忍，由后续状态断言把关
     if (isMainFrame) {
       console.error(`SMOKE FAIL: main frame load failed (${code} ${desc})`)
-      app.exit(1)
+      finishSmoke(1)
     }
   })
 
@@ -132,7 +141,7 @@ export function wireSmoke(ctx: SmokeContext): void {
         )
         if (!ready) {
           console.error(`SMOKE FAIL: Plugin/Skills 面板未完成加载 ${JSON.stringify(await snapshot(win))}`)
-          app.exit(1)
+          finishSmoke(1)
           return
         }
         // 驱动 MCP JSON→YAML 转换（只读，不写 profile）
@@ -151,7 +160,8 @@ export function wireSmoke(ctx: SmokeContext): void {
         )
         if (!converted) {
           console.error('SMOKE FAIL: MCP 转换未完成')
-          app.exit(1)
+          finishSmoke(1)
+          return
         }
         const screenshotOk = await assertDomAndScreenshot(
           win,
@@ -184,10 +194,11 @@ export function wireSmoke(ctx: SmokeContext): void {
         })()`)) as { preview: string; warnings: string; servers: string }
         if (!mcp.preview.trimStart().startsWith('- insert:') || !mcp.preview.includes('dsh-mcp-client') || !mcp.preview.includes('streamable-http')) {
           console.error(`SMOKE FAIL: MCP 转换异常 ${JSON.stringify(mcp)}`)
-          app.exit(1)
+          finishSmoke(1)
+          return
         }
         console.log(`SMOKE OK: MCP convert 端到端通过（${JSON.stringify(mcp.servers)}）`)
-        app.exit(0)
+        finishSmoke(0)
       })()
     })
     return
@@ -213,7 +224,8 @@ export function wireSmoke(ctx: SmokeContext): void {
       )
       if (!mounted) {
         console.error('SMOKE FAIL: harness iframe 未挂载')
-        app.exit(1)
+        finishSmoke(1)
+        return
       }
       const screenshotOk = await assertDomAndScreenshot(
         win,
@@ -226,7 +238,8 @@ export function wireSmoke(ctx: SmokeContext): void {
       const src = (await win.webContents.executeJavaScript(`document.getElementById('harness-frame').src`)) as string
       if (!src.startsWith('http://127.0.0.1:')) {
         console.error(`SMOKE FAIL: harness iframe 未挂载 (${src})`)
-        app.exit(1)
+        finishSmoke(1)
+        return
       }
       // 状态条（renderer 经 harness:status / frame-loaded 更新）
       const connected = await waitFor(
@@ -239,7 +252,8 @@ export function wireSmoke(ctx: SmokeContext): void {
       )
       if (!connected) {
         console.error(`SMOKE FAIL: harness 状态未变为已连接 ${JSON.stringify(await snapshot(win))}`)
-        app.exit(1)
+        finishSmoke(1)
+        return
       }
       const finalStatus = (await win.webContents.executeJavaScript(
         `document.getElementById('harness-status').textContent`,
@@ -258,7 +272,8 @@ export function wireSmoke(ctx: SmokeContext): void {
       )
       if (!remounted) {
         console.error(`SMOKE FAIL: restart 后 iframe 未重挂载（旧 ${oldSrc}）${JSON.stringify(await snapshot(win))}`)
-        app.exit(1)
+        finishSmoke(1)
+        return
       }
       const newSrc = (await win.webContents.executeJavaScript(`document.getElementById('harness-frame').src`)) as string
       const reconnected = await waitFor(
@@ -271,10 +286,11 @@ export function wireSmoke(ctx: SmokeContext): void {
       )
       if (!reconnected) {
         console.error(`SMOKE FAIL: 重启后状态未恢复已连接 ${JSON.stringify(await snapshot(win))}`)
-        app.exit(1)
+        finishSmoke(1)
+        return
       }
       console.log(`SMOKE OK: harness 重启后 iframe 重挂载（${oldSrc} → ${newSrc}，状态已连接）`)
-      app.exit(0)
+      finishSmoke(0)
     })()
   })
 }
