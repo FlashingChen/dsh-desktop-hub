@@ -10,6 +10,7 @@ const CH = {
   pluginsList: 'plugins:list',
   pluginsActivate: 'plugins:activate',
   pluginsDeactivate: 'plugins:deactivate',
+  pluginsPrepareInstall: 'plugins:prepare-install',
   pluginsStartOp: 'plugins:start-op',
   pluginsCancelOp: 'plugins:cancel-op',
   pluginsOpStatus: 'plugins:op-status',
@@ -71,6 +72,7 @@ contextBridge.exposeInMainWorld('dshDesktop', {
     list: () => ipcRenderer.invoke(CH.pluginsList),
     activate: (name: string) => ipcRenderer.invoke(CH.pluginsActivate, name),
     deactivate: (name: string) => ipcRenderer.invoke(CH.pluginsDeactivate, name),
+    prepareInstall: (spec: string) => ipcRenderer.invoke(CH.pluginsPrepareInstall, spec),
     startOp: (action: 'add' | 'remove' | 'update', args: string[]): Promise<PluginOpStarted> =>
       ipcRenderer.invoke(CH.pluginsStartOp, action, args),
     cancelOp: (token: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(CH.pluginsCancelOp, token),

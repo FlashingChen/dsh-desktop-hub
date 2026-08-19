@@ -3,7 +3,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -13,6 +13,9 @@ const {
   runPluginOp,
   normalizeInstallSpec,
   classifyInstallSpec,
+  parseIgnoredBuildPackages,
+  parseBuildApprovalKeys,
+  approveIgnoredBuilds,
   pluginPatchId,
   isPluginActive,
   activatePlugin,
@@ -98,6 +101,8 @@ test('buildPluginCommand 构造官方命令形态', () => {
 
 test('normalizeInstallSpec 将 GitHub 链接转为 github:owner/repo#branch', () => {
   assert.equal(normalizeInstallSpec('https://github.com/deepseek-ai/deepseek-harness'), 'github:deepseek-ai/deepseek-harness')
+  assert.equal(normalizeInstallSpec('github.com/omdsh-dev/DSH-better-sidebar'), 'github:omdsh-dev/DSH-better-sidebar')
+  assert.equal(normalizeInstallSpec('https://github.com/owner/repo?tab=readme'), 'github:owner/repo')
   assert.equal(normalizeInstallSpec('https://github.com/owner/repo.git'), 'github:owner/repo')
   assert.equal(normalizeInstallSpec('https://github.com/owner/repo/tree/main'), 'github:owner/repo#main')
   assert.equal(normalizeInstallSpec('https://github.com/owner/repo/tree/feat/x'), 'github:owner/repo#feat/x')
@@ -116,6 +121,49 @@ test('classifyInstallSpec 将 Routing Suite 聚合仓库挡在 plugin 命令前'
   assert.equal(plan.normalized, 'github:yjh051108/dsh-routing-suite#main')
   assert.match(plan.message, /不是 DSH bundle/)
   assert.equal(classifyInstallSpec('github:yjh051108/dsh-super-injector').kind, 'plugin')
+})
+
+test('parseIgnoredBuildPackages 提取 pnpm 忽略的构建包并去掉版本', () => {
+  assert.deepEqual(
+    parseIgnoredBuildPackages('[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: node-pty@1.1.0, @scope/native-addon@2.0.0'),
+    ['node-pty', '@scope/native-addon'],
+  )
+})
+
+test('parseBuildApprovalKeys 保留 Git prepare 错误要求的完整 allowBuilds key', () => {
+  const depPath = '@scope/native-addon@git+https://github.com/owner/repo.git#abc1234'
+  const output = `[ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED] git prepare blocked\nhint: allowBuilds:\nhint:   ${depPath}: true`
+  assert.deepEqual(parseBuildApprovalKeys(output), [depPath])
+})
+
+test('approveIgnoredBuilds 幂等写入 pnpm-workspace.yaml 的 allowBuilds', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pnpm-policy-'))
+  try {
+    const workspaceFile = join(dir, 'pnpm-workspace.yaml')
+    writeFileSync(workspaceFile, 'packages:\n  - .\n')
+    assert.deepEqual(approveIgnoredBuilds(workspaceFile, ['node-pty']), { changed: true, approved: ['node-pty'] })
+    const depPath = '@scope/native-addon@git+https://github.com/owner/repo.git#abc1234'
+    assert.deepEqual(approveIgnoredBuilds(workspaceFile, [depPath]), { changed: true, approved: [depPath] })
+    const first = (await import('yaml')).parse(readFileSync(workspaceFile, 'utf8'))
+    assert.equal(first.allowBuilds['node-pty'], true)
+    assert.equal(first.allowBuilds[depPath], true)
+    assert.deepEqual(approveIgnoredBuilds(workspaceFile, ['node-pty']), { changed: false, approved: [] })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('approveIgnoredBuilds 不覆盖用户明确拒绝的构建包', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pnpm-policy-deny-'))
+  try {
+    const workspaceFile = join(dir, 'pnpm-workspace.yaml')
+    const original = 'allowBuilds:\n  node-pty: false\n'
+    writeFileSync(workspaceFile, original)
+    assert.throws(() => approveIgnoredBuilds(workspaceFile, ['node-pty']), /明确拒绝/)
+    assert.equal(readFileSync(workspaceFile, 'utf8'), original)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('activatePlugin 为无 dsh.bundle 依赖写入 patch 激活行', () => {
@@ -154,6 +202,130 @@ test('deactivatePluginIfActive 幂等清理 patch 激活行（remove 后残留�
   assert.equal(deactivatePluginIfActive(patch, 'never-installed'), patch)
 })
 
+test('runPluginOp 检测被忽略的构建脚本，授权后自动重试并成功', async () => {
+  const bin = mkdtempSync(join(tmpdir(), 'dsh-build-retry-'))
+  try {
+    const script = join(bin, 'dsh-retry.mjs')
+    const marker = join(bin, 'first-attempt')
+    const workspaceFile = join(bin, 'pnpm-workspace.yaml')
+    writeFileSync(workspaceFile, 'packages:\n  - .\n')
+    writeFileSync(
+      script,
+      "import { existsSync, writeFileSync } from 'node:fs'\n" +
+        `const marker = ${JSON.stringify(marker)}\n` +
+        `if (!existsSync(marker)) { writeFileSync(marker, '1'); console.error('[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: node-pty@1.1.0'); process.exit(1) }\n` +
+        "console.log('retry succeeded')\n",
+    )
+    const op = runPluginOp({
+      dsh: script,
+      node: process.execPath,
+      profile: 'web',
+      action: 'add',
+      args: ['github:owner/repo'],
+      autoApproveBuilds: { workspaceFile },
+      requestBuildApproval: async (packages) => {
+        assert.deepEqual(packages, ['node-pty'])
+        return true
+      },
+    })
+    let output = ''
+    op.stdout.on('data', (chunk) => { output += String(chunk) })
+    op.stderr.on('data', (chunk) => { output += String(chunk) })
+    const result = await op.done
+    assert.equal(result.exitCode, 0)
+    assert.match(output, /Ignored build scripts/)
+    assert.match(output, /retry succeeded/)
+    assert.match((await import('node:fs')).readFileSync(workspaceFile, 'utf8'), /node-pty:\s*true/)
+  } finally {
+    rmSync(bin, { recursive: true, force: true })
+  }
+})
+
+test('runPluginOp 处理 Git prepare 错误时按完整 depPath 授权并重试', async () => {
+  const bin = mkdtempSync(join(tmpdir(), 'dsh-git-build-retry-'))
+  try {
+    const script = join(bin, 'dsh-git-retry.mjs')
+    const marker = join(bin, 'first-attempt')
+    const workspaceFile = join(bin, 'pnpm-workspace.yaml')
+    const depPath = '@scope/native-addon@git+https://github.com/owner/repo.git#abc1234'
+    writeFileSync(workspaceFile, 'packages:\n  - .\n')
+    writeFileSync(
+      script,
+      "import { existsSync, writeFileSync } from 'node:fs'\n" +
+        `const marker = ${JSON.stringify(marker)}\n` +
+        `if (!existsSync(marker)) { writeFileSync(marker, '1'); console.error('[ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED] git prepare blocked\\nhint: allowBuilds:\\nhint:   ${depPath}: true'); process.exit(1) }\n` +
+        "console.log('git retry succeeded')\n",
+    )
+    const op = runPluginOp({
+      dsh: script,
+      node: process.execPath,
+      profile: 'web',
+      action: 'add',
+      args: ['github:owner/repo'],
+      autoApproveBuilds: { workspaceFile },
+      requestBuildApproval: async (keys) => {
+        assert.deepEqual(keys, [depPath])
+        return true
+      },
+    })
+    const result = await op.done
+    assert.equal(result.exitCode, 0)
+    const workspace = (await import('yaml')).parse(readFileSync(workspaceFile, 'utf8'))
+    assert.equal(workspace.allowBuilds[depPath], true)
+  } finally {
+    rmSync(bin, { recursive: true, force: true })
+  }
+})
+
+test('runPluginOp 未获构建授权时保留失败且不写入 allowBuilds', async () => {
+  const bin = mkdtempSync(join(tmpdir(), 'dsh-build-denied-'))
+  try {
+    const script = join(bin, 'dsh-denied.mjs')
+    const workspaceFile = join(bin, 'pnpm-workspace.yaml')
+    const original = 'packages:\n  - .\n'
+    writeFileSync(workspaceFile, original)
+    writeFileSync(script, "console.error('[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: node-pty@1.1.0')\nprocess.exit(1)\n")
+    const op = runPluginOp({
+      dsh: script,
+      node: process.execPath,
+      profile: 'web',
+      action: 'add',
+      args: ['github:owner/repo'],
+      autoApproveBuilds: { workspaceFile },
+      requestBuildApproval: async () => false,
+    })
+    const result = await op.done
+    assert.equal(result.exitCode, 1)
+    assert.equal(readFileSync(workspaceFile, 'utf8'), original)
+  } finally {
+    rmSync(bin, { recursive: true, force: true })
+  }
+})
+
+test('runPluginOp 已成功的普通安装保持成功且不额外写入 allowBuilds', async () => {
+  const bin = mkdtempSync(join(tmpdir(), 'dsh-build-success-'))
+  try {
+    const script = join(bin, 'dsh-success.mjs')
+    const workspaceFile = join(bin, 'pnpm-workspace.yaml')
+    const original = 'packages:\n  - .\n'
+    writeFileSync(workspaceFile, original)
+    writeFileSync(script, "console.log('already succeeded')\n")
+    const op = runPluginOp({
+      dsh: script,
+      node: process.execPath,
+      profile: 'web',
+      action: 'add',
+      args: ['some-npm-package'],
+      autoApproveBuilds: { workspaceFile },
+    })
+    const result = await op.done
+    assert.equal(result.exitCode, 0)
+    assert.equal((await import('node:fs')).readFileSync(workspaceFile, 'utf8'), original)
+  } finally {
+    rmSync(bin, { recursive: true, force: true })
+  }
+})
+
 test('runPluginOp 透传退出码并支持取消', async () => {
   const bin = mkdtempSync(join(tmpdir(), 'dsh-bin-'))
   try {
@@ -175,6 +347,13 @@ test('runPluginOp 透传退出码并支持取消', async () => {
     const bad = runPluginOp({ dsh: script, profile: 'web', action: 'fail', ...nodeOpt })
     const badOut = await bad.done
     assert.equal(badOut.exitCode, 3)
+
+    const slow = join(bin, 'slow.mjs')
+    writeFileSync(slow, 'setTimeout(() => {}, 10_000)\n')
+    const cancellable = runPluginOp({ dsh: slow, profile: 'web', action: 'add', ...nodeOpt })
+    setTimeout(() => cancellable.cancel(), 50)
+    const cancelled = await cancellable.done
+    assert.ok(cancelled.signal === 'SIGTERM' || cancelled.exitCode !== 0, `取消必须终止操作：${JSON.stringify(cancelled)}`)
   } finally {
     rmSync(bin, { recursive: true, force: true })
   }

@@ -9,6 +9,7 @@ export const IPC = {
   pluginsList: 'plugins:list',
   pluginsActivate: 'plugins:activate',
   pluginsDeactivate: 'plugins:deactivate',
+  pluginsPrepareInstall: 'plugins:prepare-install',
   pluginsStartOp: 'plugins:start-op',
   pluginsCancelOp: 'plugins:cancel-op',
   pluginsOpStatus: 'plugins:op-status',
