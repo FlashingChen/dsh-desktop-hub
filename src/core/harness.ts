@@ -232,11 +232,14 @@ function taskkillTree(pid: number, force: boolean): void {
   }
 }
 
-/** 终止单个进程树：Windows taskkill /T；POSIX SIGTERM（供插件取消/退出清理复用） */
+/** 终止单个进程树：Windows taskkill /T /F；POSIX SIGTERM（供插件取消复用）。
+ * 插件取消必须有确定终态；Windows 控制台 Node 进程不会可靠响应 taskkill 的优雅 WM_CLOSE，
+ * 只发不带 /F 的 taskkill 会让 dsh plugin 一直跑完，导致取消失效并卡住 CI。
+ */
 export function terminateTree(pid: number | undefined): void {
   if (pid === undefined) return
   if (process.platform === 'win32') {
-    taskkillTree(pid, false)
+    taskkillTree(pid, true)
   } else {
     try {
       process.kill(pid, 'SIGTERM')
