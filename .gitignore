@@ -6,3 +6,5 @@ artifacts/
 .DS_Store
 frontend/
 resources/node/
+# 私有反馈服务端：部署到 Cloudflare Worker，不进入公开仓库
+github-issue-server/

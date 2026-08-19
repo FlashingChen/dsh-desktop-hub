@@ -108,6 +108,15 @@ interface PluginPreflightResult {
   error?: string
 }
 
+interface FeedbackSubmitResult {
+  ok: boolean
+  status?: 'queued' | 'accepted'
+  receiptId?: string
+  code?: string
+  message?: string
+  retryable?: boolean
+}
+
 interface DesktopApi {
   harness: {
     url: () => Promise<string | null>
@@ -144,6 +153,18 @@ interface DesktopApi {
   market: {
     list: (kind: MarketKind, query?: string) => Promise<MarketListResult>
     preflightPlugin: (spec: string) => Promise<PluginPreflightResult>
+  }
+  feedback: {
+    diagnostics: () => Promise<{ ok: boolean; text?: string; error?: string }>
+    copy: (text: string) => Promise<{ ok: boolean; error?: string }>
+    submit: (input: {
+      mode: 'anonymous' | 'signed'
+      category: 'bug' | 'feature' | 'other'
+      title: string
+      body: string
+      signature?: string | null
+      diagnostics?: string | null
+    }) => Promise<FeedbackSubmitResult>
   }
 }
 
@@ -199,7 +220,7 @@ interface McpApplyResult {
 type DesktopWindow = Window & { dshDesktop?: DesktopApi }
 const api = (window as DesktopWindow).dshDesktop
 
-const TABS = ['harness', 'plugin', 'mcp', 'skills'] as const
+const TABS = ['harness', 'plugin', 'mcp', 'skills', 'feedback'] as const
 type TabId = (typeof TABS)[number]
 
 const harnessFullscreenButton = document.getElementById('harness-fullscreen')
@@ -222,6 +243,7 @@ function switchTab(id: TabId): void {
     panel?.classList.toggle('active', active)
     panel?.setAttribute('aria-hidden', String(!active))
   }
+  if (id === 'feedback') void refreshFeedbackDiagnostics()
 }
 
 harnessFullscreenButton?.addEventListener('click', () => {
@@ -1304,6 +1326,164 @@ async function importFromFile(): Promise<void> {
 document.getElementById('skill-import-url-btn')?.addEventListener('click', () => void importFromUrl())
 document.getElementById('skill-import-file')?.addEventListener('click', () => void importFromFile())
 
+// ---- Feedback 面板：隐私选择 + 诊断复制 + 反馈 API ----
+type FeedbackMode = 'anonymous' | 'signed'
+type FeedbackCategory = 'bug' | 'feature' | 'other'
+
+let feedbackMode: FeedbackMode = 'anonymous'
+let feedbackDiagnosticsText = ''
+let feedbackDiagnosticsLoaded = false
+let feedbackSubmitting = false
+
+function setFeedbackStatus(text: string, kind: 'error' | 'ok' | 'warn' = 'ok'): void {
+  const el = document.getElementById('feedback-status')
+  if (!el) return
+  el.textContent = text
+  el.className = `status ${kind} inline-status`
+}
+
+function setFeedbackMode(mode: FeedbackMode): void {
+  feedbackMode = mode
+  document.querySelectorAll<HTMLButtonElement>('[data-feedback-mode]').forEach((button) => {
+    const active = button.dataset.feedbackMode === mode
+    button.classList.toggle('active', active)
+    button.setAttribute('aria-selected', String(active))
+  })
+  const signature = document.getElementById('feedback-signature-field')
+  if (signature) signature.hidden = mode !== 'signed'
+  const input = document.getElementById('feedback-signature') as HTMLInputElement | null
+  if (input) {
+    input.required = mode === 'signed'
+    if (mode !== 'signed') input.value = ''
+  }
+}
+
+function feedbackCategory(): FeedbackCategory {
+  const value = (document.getElementById('feedback-category') as HTMLSelectElement | null)?.value
+  return value === 'feature' || value === 'other' ? value : 'bug'
+}
+
+function feedbackInput(includeDiagnostics = false): {
+  mode: FeedbackMode
+  category: FeedbackCategory
+  title: string
+  body: string
+  signature: string | null
+  diagnostics: string | null
+} {
+  return {
+    mode: feedbackMode,
+    category: feedbackCategory(),
+    title: (document.getElementById('feedback-title') as HTMLInputElement | null)?.value ?? '',
+    body: (document.getElementById('feedback-body') as HTMLTextAreaElement | null)?.value ?? '',
+    signature: feedbackMode === 'signed' ? (document.getElementById('feedback-signature') as HTMLInputElement | null)?.value ?? '' : null,
+    diagnostics: includeDiagnostics && feedbackDiagnosticsText ? feedbackDiagnosticsText : null,
+  }
+}
+
+function feedbackDocument(input: ReturnType<typeof feedbackInput>): string {
+  const category = input.category === 'bug' ? '问题反馈' : input.category === 'feature' ? '功能建议' : '其他'
+  const mode = input.mode === 'signed' ? '署名提交' : '匿名/不署名'
+  const lines = [
+    '## DSH Desktop Hub 反馈',
+    '',
+    `- 类型：${category}`,
+    `- 模式：${mode}`,
+    ...(input.mode === 'signed' ? [`- 署名：${input.signature ?? ''}`] : []),
+    '',
+    `### ${input.title.trim()}`,
+    '',
+    input.body.trim(),
+  ]
+  if (input.diagnostics) lines.push('', '### 诊断信息', '', input.diagnostics)
+  return `${lines.join('\n')}\n`
+}
+
+async function refreshFeedbackDiagnostics(): Promise<void> {
+  const pre = document.getElementById('feedback-diagnostics')
+  if (!pre || !api) return
+  pre.textContent = '读取中…'
+  pre.className = 'feedback-diagnostics empty'
+  const result = await api.feedback.diagnostics()
+  if (!result.ok || !result.text) {
+    feedbackDiagnosticsText = ''
+    feedbackDiagnosticsLoaded = false
+    pre.textContent = result.error ?? '诊断信息暂时不可用'
+    pre.className = 'feedback-diagnostics empty'
+    return
+  }
+  feedbackDiagnosticsText = result.text
+  feedbackDiagnosticsLoaded = true
+  pre.textContent = result.text
+  pre.className = 'feedback-diagnostics'
+}
+
+async function copyFeedbackText(text: string, label: string): Promise<void> {
+  if (!api) return
+  if (!text.trim()) {
+    setFeedbackStatus(`没有可复制的${label}`, 'error')
+    return
+  }
+  const result = await api.feedback.copy(text)
+  setFeedbackStatus(result.ok ? `${label}已复制到剪贴板` : `复制失败：${result.error ?? '未知错误'}`, result.ok ? 'ok' : 'error')
+}
+
+async function copyDiagnostics(): Promise<void> {
+  if (!feedbackDiagnosticsLoaded) await refreshFeedbackDiagnostics()
+  await copyFeedbackText(feedbackDiagnosticsText, '诊断信息')
+}
+
+async function copyFullFeedback(): Promise<void> {
+  const include = (document.getElementById('feedback-include-diagnostics') as HTMLInputElement | null)?.checked ?? false
+  if (include && !feedbackDiagnosticsLoaded) await refreshFeedbackDiagnostics()
+  await copyFeedbackText(feedbackDocument(feedbackInput(include)), '完整反馈')
+}
+
+async function submitFeedbackUi(): Promise<void> {
+  if (!api || feedbackSubmitting) return
+  feedbackSubmitting = true
+  const submit = document.getElementById('feedback-submit') as HTMLButtonElement | null
+  if (submit) submit.disabled = true
+  try {
+    const include = (document.getElementById('feedback-include-diagnostics') as HTMLInputElement | null)?.checked ?? false
+    if (include && !feedbackDiagnosticsLoaded) await refreshFeedbackDiagnostics()
+    const input = feedbackInput(include)
+    if (!input.title.trim()) {
+      setFeedbackStatus('请填写反馈标题', 'error')
+      return
+    }
+    if (!input.body.trim()) {
+      setFeedbackStatus('请填写反馈内容', 'error')
+      return
+    }
+    if (input.mode === 'signed' && !input.signature?.trim()) {
+      setFeedbackStatus('署名提交需要填写署名', 'error')
+      return
+    }
+    setFeedbackStatus('提交中…')
+    const result = await api.feedback.submit(input)
+    if (result.ok) {
+      setFeedbackStatus(`反馈已收到，处理编号：${result.receiptId ?? '—'}`, 'ok')
+    } else {
+      setFeedbackStatus(`提交失败：${result.message ?? result.code ?? '未知错误'}\n可以复制完整反馈后发送到 QQ 群。`, result.code === 'unconfigured' ? 'warn' : 'error')
+    }
+  } catch {
+    setFeedbackStatus('提交失败：反馈服务暂时不可用\n可以复制完整反馈后发送到 QQ 群。', 'error')
+  } finally {
+    feedbackSubmitting = false
+    if (submit) submit.disabled = false
+  }
+}
+
+document.querySelectorAll<HTMLButtonElement>('[data-feedback-mode]').forEach((button) => {
+  button.addEventListener('click', () => setFeedbackMode(button.dataset.feedbackMode === 'signed' ? 'signed' : 'anonymous'))
+})
+document.getElementById('feedback-refresh-diagnostics')?.addEventListener('click', () => void refreshFeedbackDiagnostics())
+document.getElementById('feedback-copy-diagnostics')?.addEventListener('click', () => void copyDiagnostics())
+document.getElementById('feedback-copy-full')?.addEventListener('click', () => void copyFullFeedback())
+document.getElementById('feedback-submit')?.addEventListener('click', () => void submitFeedbackUi())
+setFeedbackMode('anonymous')
+
 // ---- Harness 面板：内嵌官方 Web UI + 折叠式状态徽章（点击展开 已连接/重新连接/重新启动）----
 
 const harnessOverlay = document.querySelector<HTMLElement>('.harness-overlay')
@@ -1477,5 +1657,6 @@ if (api) {
   void refreshMcpServers()
   void refreshSkills()
   refreshAllMarkets()
+  void refreshFeedbackDiagnostics()
   void mountHarness()
 }

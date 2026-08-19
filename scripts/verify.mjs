@@ -31,9 +31,9 @@ for (const s of ['typecheck', 'test', 'build', 'start', 'verify', 'smoke:plugin'
   check(`脚本存在: ${s}`, typeof pkg.scripts?.[s] === 'string')
 }
 
-// 3) 渲染层四 Tab 契约
+// 3) 渲染层五 Tab 契约
 const html = readFileSync(req('src/renderer/index.html'), 'utf8')
-for (const tab of ['harness', 'plugin', 'mcp', 'skills']) {
+for (const tab of ['harness', 'plugin', 'mcp', 'skills', 'feedback']) {
   check(`Tab 存在: ${tab}`, html.includes(`data-tab="${tab}"`) && html.includes(`id="panel-${tab}"`))
 }
 
