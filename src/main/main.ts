@@ -1,6 +1,6 @@
 // Electron 主进程：窗口安全边界 + IPC（来源校验）+ harness 生命周期 + 插件/MCP/Skills 管理
 import { type ChildProcess } from 'node:child_process'
-import { app, BrowserWindow, ipcMain, Menu, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, relative, isAbsolute, basename } from 'node:path'
 import { realpathSync } from 'node:fs'
@@ -17,6 +17,7 @@ import {
 } from '../core/harness.js'
 import {
   activatePlugin,
+  classifyInstallSpec,
   deactivatePlugin,
   deactivatePluginIfActive,
   isPluginActive,
@@ -158,9 +159,29 @@ const pluginOps = new PluginOpRunner({
   onFinalizeError: (message) => log(`plugin remove: patch 激活行清理失败 —— ${message}`),
 })
 
+async function requestPluginBuildApproval(keys: string[]): Promise<boolean> {
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined
+  for (const key of keys) {
+    const options = {
+      type: 'warning' as const,
+      title: '授权插件构建脚本',
+      message: `插件安装需要执行构建脚本：${key}`,
+      detail: '该脚本会在本机沙箱之外执行，并写入当前 profile 的 allowBuilds。是否允许并重试？',
+      buttons: ['取消安装', '允许并重试'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    }
+    const result = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options)
+    if (result.response !== 1) return false
+  }
+  return true
+}
+
 function startPluginOp(action: PluginOpAction, args: string[], finalize?: () => void) {
   const exec = resolveDshExec()
   if (!exec) return { ok: false as const, error: '未找到 dsh 可执行文件' }
+  const profile = activeProfile()
   return pluginOps.start({
     profile: ACTIVE_PROFILE,
     action,
@@ -172,6 +193,8 @@ function startPluginOp(action: PluginOpAction, args: string[], finalize?: () => 
       action,
       args,
       env: runtimePathEnv(),
+      autoApproveBuilds: profile ? { workspaceFile: join(profile.dir, 'pnpm-workspace.yaml') } : undefined,
+      requestBuildApproval: requestPluginBuildApproval,
     }),
     finalize,
   })
@@ -285,6 +308,16 @@ function registerIpc(): void {
     }
   })
 
+  ipcMain.handle(IPC.pluginsPrepareInstall, (event, spec: unknown) => {
+    assertRendererSender(event)
+    if (typeof spec !== 'string' || !spec.trim()) return { ok: false as const, error: '插件 spec 无效' }
+    const plan = classifyInstallSpec(spec.slice(0, 500))
+    if (plan.kind === 'routing-suite') {
+      return { ok: false as const, kind: plan.kind, normalized: plan.normalized, error: plan.message }
+    }
+    return { ok: true as const, kind: plan.kind, normalized: plan.normalized }
+  })
+
   ipcMain.handle(IPC.pluginsStartOp, (event, action: unknown, args: unknown) => {
     assertRendererSender(event)
     if (action !== 'add' && action !== 'remove' && action !== 'update') {
@@ -294,8 +327,16 @@ function registerIpc(): void {
       return { ok: false as const, error: 'args 无效' }
     }
     if (action === 'add' && args.length !== 1) return { ok: false as const, error: '安装需要 spec 参数' }
-    const removeName = action === 'remove' ? (args as string[])[0] : undefined
-    return startPluginOp(action, args as string[], removeName === undefined ? undefined : () => {
+    let operationArgs = args as string[]
+    if (action === 'add') {
+      const plan = classifyInstallSpec(operationArgs[0])
+      if (plan.kind === 'routing-suite') return { ok: false as const, error: plan.message }
+      if (!plan.normalized) return { ok: false as const, error: '插件 spec 无效' }
+      // Renderer 已经预处理过一次；主进程仍再次归一化，防止绕过 UI 的调用把网页 URL 送进 pnpm。
+      operationArgs = [plan.normalized]
+    }
+    const removeName = action === 'remove' ? operationArgs[0] : undefined
+    return startPluginOp(action, operationArgs, removeName === undefined ? undefined : () => {
       // 已在 PluginOpRunner 的 profile mutation 串行区内，不能再次进入 serializeMutation。
       const profile = activeProfile()
       if (!profile) throw new Error(`profile「${ACTIVE_PROFILE}」不存在，无法清理插件激活行`)

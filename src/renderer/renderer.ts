@@ -28,6 +28,13 @@ interface PluginOpStarted {
   error?: string
 }
 
+interface PluginInstallPlan {
+  ok: boolean
+  kind?: 'plugin' | 'routing-suite'
+  normalized?: string
+  error?: string
+}
+
 interface PluginOpDone {
   token: string
   exitCode: number | null
@@ -112,6 +119,7 @@ interface DesktopApi {
     list: () => Promise<PluginListResult>
     activate: (name: string) => Promise<{ ok: boolean; output?: string; error?: string }>
     deactivate: (name: string) => Promise<{ ok: boolean; output?: string; error?: string }>
+    prepareInstall: (spec: string) => Promise<PluginInstallPlan>
     startOp: (action: 'add' | 'remove' | 'update', args: string[]) => Promise<PluginOpStarted>
     cancelOp: (token: string) => Promise<{ ok: boolean }>
     opStatus: (token: string) => Promise<PluginOpStatus>
@@ -437,12 +445,19 @@ async function runPluginOpUi(
 async function installPlugin(): Promise<void> {
   const input = document.getElementById('plugin-spec') as HTMLInputElement | null
   if (!input || !api) return
-  const spec = input.value.trim()
-  if (!spec) {
-    setStatus('请输入包名或 github:owner/repo#commit', 'error')
+  const raw = input.value.trim()
+  if (!raw) {
+    setStatus('请输入包名、GitHub 链接或 github:owner/repo#commit', 'error')
     return
   }
-  if (!confirm(`确认安装插件「${spec}」到 profile「web」？\n安装完成后会自动重启 Harness，使插件生效。\n插件代码将在本机执行（沙箱之外）。`)) return
+  const plan = await api.plugins.prepareInstall(raw)
+  if (!plan.ok || !plan.normalized) {
+    setStatus(`安装前检查失败: ${plan.error ?? '插件 spec 无效'}`, 'error')
+    return
+  }
+  const spec = plan.normalized
+  const display = raw === spec ? spec : `${raw}\n归一化为：${spec}`
+  if (!confirm(`确认安装插件「${display}」到 profile「web」？\n安装完成后会自动重启 Harness，使插件生效。\n插件代码将在本机执行（沙箱之外）。\n若 pnpm 拒绝构建脚本，会列出明确报告的包并逐包再次确认；允许后才写入 allowBuilds 并重试。`)) return
   await runPluginOpUi('add', [spec], '安装', async () => {
     await refreshPlugins()
     await restartHarnessForPluginChange(`插件「${spec}」安装`)
@@ -459,7 +474,7 @@ async function removePlugin(name: string): Promise<void> {
 
 async function updateAllPlugins(): Promise<void> {
   if (!api) return
-  if (!confirm('确认更新 profile「web」的全部插件？\n将执行 dsh plugin update，完成后会自动重启 Harness。')) return
+  if (!confirm('确认更新 profile「web」的全部插件？\n将执行 dsh plugin update，完成后会自动重启 Harness。\n更新可能执行第三方 pnpm 构建脚本；如需授权会逐包再次确认。')) return
   await runPluginOpUi('update', [], '更新', async () => {
     await refreshPlugins()
     await restartHarnessForPluginChange('插件更新')
@@ -800,7 +815,7 @@ async function installMarketPlugin(item: PluginMarketItem): Promise<void> {
   const lockedSpec = preflight.normalizedSpec
   const versionText = preflight.version ? `\n版本：${preflight.version}` : ''
   const warningText = preflight.warning ? `\n注意：${preflight.warning}` : ''
-  if (!confirm(`确认安装并激活「${item.name}」？\n安装来源：${lockedSpec}${versionText}${warningText}\n安装完成后会自动重启 Harness，使插件出现在运行中的 Web 界面。\n插件代码将在本机执行（沙箱之外）。`)) return
+  if (!confirm(`确认安装并激活「${item.name}」？\n安装来源：${lockedSpec}${versionText}${warningText}\n安装完成后会自动重启 Harness，使插件出现在运行中的 Web 界面。\n插件代码将在本机执行（沙箱之外）。\n若 pnpm 拒绝构建脚本，会列出明确报告的包并逐包再次确认；允许后才写入 allowBuilds 并重试。`)) return
   setMarketMode('plugin', 'manage')
   await runPluginOpUi('add', [lockedSpec], '安装', async () => {
     const packageName = preflight.packageName ?? item.packageName
