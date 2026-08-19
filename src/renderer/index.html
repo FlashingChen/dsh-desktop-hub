@@ -6,7 +6,7 @@
     <title>DSH Desktop Hub</title>
     <style>
       :root {
-        color-scheme: light;
+        color-scheme: light dark;
         --canvas: #f3f5f8;
         --canvas-deep: #edf0f5;
         --surface: #ffffff;
@@ -19,6 +19,7 @@
         --line-strong: #d5dbe5;
         --brand: #4d6bfe;
         --brand-dark: #3957dc;
+        --brand-hover: #3957dc;
         --brand-soft: #edf1ff;
         --brand-wash: #f7f8ff;
         --success: #218b61;
@@ -27,12 +28,71 @@
         --danger-bg: #fff1f3;
         --warn: #9b651d;
         --warn-bg: #fff7e8;
+        --line-hover: #c5ccd8;
+        --tab-hover: #eef1f6;
+        --active-line: #dce3ff;
+        --active-muted: #7488dc;
+        --accent-line: #dfe5ff;
+        --verified-line: #c9ead8;
+        --trust-bg: #f1f3ff;
+        --trust-line: #dce1ff;
+        --trust-ink: #4d5eb0;
+        --env-line: #f0d9a3;
+        --input-surface: #fbfcfe;
+        --frame-surface: #ffffff;
+        --overlay-surface: rgb(255 255 255 / 94%);
+        --overlay-hover: rgb(255 255 255 / 96%);
+        --overlay-badge: rgb(255 255 255 / 72%);
         --shadow-sm: 0 1px 2px rgb(31 41 55 / 4%);
         --shadow-md: 0 12px 30px rgb(31 41 55 / 6%);
         --radius-sm: 8px;
         --radius-md: 14px;
         --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
         --font-code: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+      /* 壳层跟随系统外观；这样 Harness 的深色页面不会再与左侧导航形成强烈反差。 */
+      @media (prefers-color-scheme: dark) {
+        :root {
+          color-scheme: dark;
+          --canvas: #0f1115;
+          --canvas-deep: #0b0d11;
+          --surface: #14161c;
+          --surface-subtle: #191c23;
+          --surface-blue: rgb(57 100 254 / 14%);
+          --ink: #e9ecf1;
+          --ink-soft: #a1a9b7;
+          --ink-faint: #747d8d;
+          --line: rgb(255 255 255 / 8%);
+          --line-strong: rgb(255 255 255 / 14%);
+          --brand: #4d6bfe;
+          --brand-dark: #99c8ff;
+          --brand-hover: #5580ff;
+          --brand-soft: rgb(57 100 254 / 14%);
+          --brand-wash: rgb(255 255 255 / 3.5%);
+          --success: #69db7c;
+          --success-bg: rgb(105 219 124 / 12%);
+          --danger: #ff6b6b;
+          --danger-bg: rgb(255 107 107 / 12%);
+          --warn: #ffa94d;
+          --warn-bg: rgb(255 169 77 / 12%);
+          --line-hover: rgb(255 255 255 / 22%);
+          --tab-hover: rgb(255 255 255 / 6%);
+          --active-line: rgb(77 107 254 / 35%);
+          --active-muted: #99c8ff;
+          --accent-line: rgb(77 107 254 / 28%);
+          --verified-line: rgb(105 219 124 / 28%);
+          --trust-bg: rgb(57 100 254 / 14%);
+          --trust-line: rgb(77 107 254 / 28%);
+          --trust-ink: #a8b9ff;
+          --env-line: #705323;
+          --input-surface: #191c23;
+          --frame-surface: #0f1115;
+          --overlay-surface: rgb(20 22 28 / 94%);
+          --overlay-hover: rgb(20 22 28 / 96%);
+          --overlay-badge: rgb(20 22 28 / 72%);
+          --shadow-sm: 0 1px 2px rgb(0 0 0 / 25%);
+          --shadow-md: 0 12px 30px rgb(0 0 0 / 35%);
+        }
       }
       * { box-sizing: border-box; margin: 0; padding: 0; }
       html, body { height: 100%; }
@@ -59,7 +119,7 @@
         padding: 8px 13px;
         transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
       }
-      button:hover { background: var(--surface-subtle); border-color: #c5ccd8; }
+      button:hover { background: var(--surface-subtle); border-color: var(--line-hover); }
       button:focus-visible, input:focus-visible, textarea:focus-visible {
         outline: 3px solid rgb(77 107 254 / 20%);
         outline-offset: 1px;
@@ -71,7 +131,7 @@
         color: #fff;
         box-shadow: 0 2px 5px rgb(77 107 254 / 18%);
       }
-      button.primary:hover { background: var(--brand-dark); border-color: var(--brand-dark); }
+      button.primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
       button.quiet { background: transparent; border-color: transparent; color: var(--ink-soft); }
       button.quiet:hover { background: var(--brand-soft); border-color: transparent; color: var(--brand-dark); }
       button:disabled { cursor: not-allowed; opacity: 0.5; }
@@ -94,7 +154,7 @@
         min-width: 0;
       }
       .sidebar {
-        background: #f8f9fb;
+        background: var(--surface-subtle);
         border-right: 1px solid var(--line);
         display: flex;
         flex-direction: column;
@@ -136,10 +196,10 @@
         transition: opacity 140ms ease;
         width: 3px;
       }
-      .tab:hover { background: #eef1f6; border-color: transparent; color: var(--ink); }
+      .tab:hover { background: var(--tab-hover); border-color: transparent; color: var(--ink); }
       .tab.active {
         background: var(--brand-soft);
-        border-color: #dce3ff;
+        border-color: var(--active-line);
         color: var(--brand-dark);
       }
       .tab.active::before { opacity: 1; }
@@ -156,7 +216,7 @@
       .tab-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
       .tab-copy > span { font-size: 13px; font-weight: 620; }
       .tab-copy > small { color: var(--ink-faint); font-size: 10px; }
-      .tab.active .tab-copy > small { color: #7488dc; }
+      .tab.active .tab-copy > small { color: var(--active-muted); }
       .sidebar-spacer { flex: 1; min-height: 18px; }
       .sidebar-profile { color: var(--ink-soft); padding: 4px 10px; }
       .sidebar-profile-label {
@@ -259,20 +319,20 @@
         padding: 15px;
         transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
       }
-      .market-card:hover { border-color: #cbd5ff; box-shadow: var(--shadow-md); transform: translateY(-1px); }
+      .market-card:hover { border-color: var(--active-line); box-shadow: var(--shadow-md); transform: translateY(-1px); }
       .market-card-head { align-items: flex-start; display: flex; gap: 10px; justify-content: space-between; }
       .market-card-title { color: var(--ink); font-size: 14px; font-weight: 680; line-height: 1.35; }
       .market-card-author { color: var(--ink-faint); font-size: 10px; margin-top: 4px; }
       .market-verified, .market-trust {
         background: var(--success-bg);
-        border: 1px solid #c9ead8;
+        border: 1px solid var(--verified-line);
         border-radius: 5px;
         color: var(--success);
         flex: none;
         font-size: 10px;
         padding: 3px 6px;
       }
-      .market-trust { background: #f1f3ff; border-color: #dce1ff; color: #4d5eb0; }
+      .market-trust { background: var(--trust-bg); border-color: var(--trust-line); color: var(--trust-ink); }
       .market-card-description { color: var(--ink-soft); font-size: 11px; line-height: 1.55; margin-top: 12px; }
       .market-source-link { color: var(--brand-dark); display: inline-block; font-size: 10px; margin-top: 8px; text-decoration: none; }
       .market-source-link:hover { text-decoration: underline; }
@@ -287,7 +347,7 @@
       .market-card-footer .status { font-size: 11px; min-height: 0; }
       .market-card-footer button { font-size: 11px; min-height: 30px; padding: 6px 10px; }
       .market-permissions { color: var(--warn); display: flex; flex-wrap: wrap; font-size: 10px; gap: 5px; line-height: 1.35; margin-top: 9px; }
-      .market-env-fields { background: var(--surface-subtle); border: 1px solid #f0d9a3; border-radius: 8px; display: grid; gap: 7px; margin-top: 10px; padding: 9px; }
+      .market-env-fields { background: var(--surface-subtle); border: 1px solid var(--env-line); border-radius: 8px; display: grid; gap: 7px; margin-top: 10px; padding: 9px; }
       .market-env-title { color: var(--warn); font-size: 10px; font-weight: 680; line-height: 1.35; }
       .market-env-field { display: grid; gap: 4px; }
       .market-env-field label { color: var(--ink-soft); font-size: 10px; font-weight: 620; }
@@ -385,7 +445,7 @@
       .row { align-items: center; display: flex; flex-wrap: wrap; gap: 9px; }
       .row + .row { margin-top: 10px; }
       textarea {
-        background: #fbfcfe;
+        background: var(--input-surface);
         border: 1px solid var(--line-strong);
         border-radius: var(--radius-sm);
         color: var(--ink);
@@ -418,7 +478,7 @@
       .notice {
         align-items: flex-start;
         background: var(--brand-wash);
-        border: 1px solid #dfe5ff;
+        border: 1px solid var(--accent-line);
         border-radius: 9px;
         color: var(--ink-soft);
         display: flex;
@@ -463,7 +523,7 @@
       .source-label strong { color: var(--ink); font-weight: 650; }
       .source-label span {
         background: var(--surface-blue);
-        border: 1px solid #dfe5ff;
+        border: 1px solid var(--accent-line);
         border-radius: 5px;
         color: var(--brand-dark);
         font-size: 10px;
@@ -502,10 +562,10 @@
         position: relative;
       }
       .panel#panel-harness { background: var(--canvas-deep); overflow: hidden; padding: 0; }
-      #harness-frame { background: #fff; border: 0; flex: 1; min-height: 0; width: 100%; }
+      #harness-frame { background: var(--frame-surface); border: 0; flex: 1; min-height: 0; width: 100%; }
       .harness-fullscreen-toggle {
         align-items: center;
-        background: rgb(255 255 255 / 94%);
+        background: var(--overlay-surface);
         border: 1px solid var(--line-strong);
         border-radius: 9px;
         bottom: 14px;
@@ -520,7 +580,7 @@
         width: 36px;
         z-index: 10;
       }
-      .harness-fullscreen-toggle:hover { background: var(--brand-soft); border-color: #cbd5ff; color: var(--brand-dark); }
+      .harness-fullscreen-toggle:hover { background: var(--brand-soft); border-color: var(--active-line); color: var(--brand-dark); }
       .harness-fullscreen-toggle svg { fill: none; height: 17px; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; width: 17px; }
       .harness-fullscreen-toggle .fullscreen-exit { display: none; }
       /* 状态箭头：缩到 WebView 左侧边缘的极小块（>），点击展开菜单；
@@ -569,7 +629,7 @@
       }
       .harness-badge {
         align-items: center;
-        background: rgb(255 255 255 / 72%);
+        background: var(--overlay-badge);
         border: 1px solid var(--line-strong);
         border-left: 0;
         border-radius: 0 8px 8px 0;
@@ -591,7 +651,7 @@
         stroke-width: 2.2;
         width: 11px;
       }
-      .harness-badge:hover { background: rgb(255 255 255 / 96%); color: var(--ink); }
+      .harness-badge:hover { background: var(--overlay-hover); color: var(--ink); }
       .harness-badge-dot {
         background: var(--ink-faint);
         border-radius: 50%;
