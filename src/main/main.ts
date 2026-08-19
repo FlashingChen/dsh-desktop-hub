@@ -41,6 +41,7 @@ import { IPC, type PluginOpAction, type HarnessStatus } from '../core/ipc.js'
 import { initLog, log } from '../core/log.js'
 import { fetchMarketItems, preflightPluginSpec, type MarketKind } from '../core/market.js'
 import { wireSmoke } from './smoke.js'
+import { createPermissionHandlers } from './permissions.js'
 
 const APP_NAME = 'DSH Desktop Hub'
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -524,6 +525,15 @@ function isAllowedNavigation(url: string): boolean {
   return /^http:\/\/127\.0\.0\.1:\d+/.test(url)
 }
 
+function currentHarnessOrigin(): string | null {
+  if (!harness) return null
+  try {
+    return new URL(harness.url).origin
+  } catch {
+    return null
+  }
+}
+
 function hardenWindow(win: BrowserWindow): void {
   // 拒绝任意 popup：http(s) 外部链接交给系统浏览器，其余一律 deny（P2-9）
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -536,9 +546,16 @@ function hardenWindow(win: BrowserWindow): void {
   win.webContents.on('will-navigate', (event, url) => {
     if (!isAllowedNavigation(url)) event.preventDefault()
   })
-  // 权限请求全拒（摄像头/麦克风/地理位置等与壳无关）
-  win.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false))
-  win.webContents.session.setPermissionCheckHandler(() => false)
+  // 权限默认拒绝，但必须放行可信 Harness iframe 的剪贴板读写。
+  // Electron 会分别走 permission check 与 permission request 两条路径；两者必须使用同一策略，
+  // 否则即使 request 放行，check 仍返回 false，navigator.clipboard 也会静默失败。
+  const permissionHandlers = createPermissionHandlers(currentHarnessOrigin)
+  win.webContents.session.setPermissionRequestHandler((_wc, permission, callback, details) => {
+    permissionHandlers.request(permission, callback, details)
+  })
+  win.webContents.session.setPermissionCheckHandler((_wc, permission, requestingOrigin, details) =>
+    permissionHandlers.check(permission, requestingOrigin, details),
+  )
 }
 
 function createWindow(url: string): void {
