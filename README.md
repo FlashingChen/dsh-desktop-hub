@@ -152,8 +152,8 @@ dsh-desktop-hub/
 │   ├── main/main.ts            # Electron 主进程：窗口 + IPC + harness 进程生命周期
 │   ├── preload/preload.ts      # contextBridge 白名单 API（sandbox，编译为 preload.cjs）
 │   ├── renderer/               # 四 Tab 壳：index.html + renderer.ts（纯脚本，无模块）
-│   └── core/                   # 纯逻辑（可单测）：harness.ts / plugins.ts / mcp.ts / skills.ts
-├── tests/                      # node --test 单测 ×58（从 dist/ 导入，需先 build）
+│   └── core/                   # 纯逻辑（可单测）：harness.ts / plugins.ts / plugin-ops.ts / pnpm.ts / mcp.ts / skills.ts
+├── tests/                      # node --test 单测 ×81（从 dist/ 导入，需先 build）
 ├── scripts/
 │   ├── build-preload.mjs       # preload 以 CJS 编译并重命名为 .cjs
 │   ├── copy-renderer.mjs       # 拷贝 index.html → dist/renderer
@@ -221,11 +221,13 @@ git push origin v0.3.0
 
 | 层级 | 内容 |
 |---|---|
-| 契约测试 `tests/skeleton.test.mjs`（9 例） | 骨架文件齐全；package.json 脚本与 devDependencies；四 Tab 契约；contextIsolation + sandbox + nodeIntegration:false；tsconfig strict |
+| 契约测试 `tests/skeleton.test.mjs`（13 例） | 骨架文件齐全；package.json 脚本与 devDependencies；四 Tab 契约；contextIsolation + sandbox + nodeIntegration:false；tsconfig strict |
 | Harness `tests/harness.test.mjs`（5 例，不依赖真实 dsh） | `findDsh` 可解析；`dshHome` 默认/覆盖；真实 web profile 发现（首个 bundle = dsh-base）；忽略非 profile 目录；`parseHarnessUrl` |
-| Plugin `tests/plugins.test.mjs`（9 例） | bundles ∪ dependencies 分类；排序稳定；`buildPluginCommand` 命令形态；`normalizeInstallSpec` GitHub 链接归一化；聚合仓库识别/拦截；`runPluginOp` 退出码 + 取消；`deactivatePluginIfActive` 幂等清理（remove 后残留激活行） |
+| Plugin `tests/plugins.test.mjs`（17 例） | bundles ∪ dependencies 分类；排序稳定；`buildPluginCommand` 命令形态；`normalizeInstallSpec` GitHub 链接归一化；聚合仓库识别/拦截；pnpm ignored builds 与 Git prepare 授权、显式拒绝保护；`runPluginOp` 退出码 + 取消；`deactivatePluginIfActive` 幂等清理（remove 后残留激活行） |
+| Plugin 生命周期 `tests/plugin-ops.test.mjs`（2 例） | 启动立即返回 token；完成推送失败时仍可查询终态 |
+| 权限策略 `tests/permissions.test.mjs`（7 例） | Harness iframe 剪贴板权限精确放行；主帧、其他来源与未知权限继续拒绝 |
 | MCP `tests/mcp.test.mjs`（18 例） | 混合 stdio+http 解析；sse / 非法 serverName 警告；格式拒绝；YAML 与官方示例同构；`${VAR}` → `!!js process.env.VAR`；patch 提取 / 替换 / 编辑 / 删除保留注释；空 patch 新建 / 备份事务；`!!js` 行在 merge/update/delete 后保真（AST 行级操作 + `$js` 哨兵） |
-| Skills `tests/skills.test.mjs`（14 例） | rank 合并 + shadowed；custom/bundled 根扫描；frontmatter 往返一致；kebab-case 校验落盘；可见性切换（含扁平 skill 文件名回退）；zip/.skill 导入（含资源文件、包裹目录剥离、拒绝无 SKILL.md、目录穿越拒绝）；GitHub URL 解析；ClawHub 固定版本导入 |
+| Skills `tests/skills.test.mjs`（15 例） | rank 合并 + shadowed；custom/bundled 根扫描；frontmatter 往返一致；kebab-case 校验落盘；可见性切换（含扁平 skill 文件名回退）；zip/.skill 导入（含资源文件、包裹目录剥离、拒绝无 SKILL.md、目录穿越拒绝）；GitHub URL 解析；ClawHub 固定版本导入 |
 | `npm run smoke` | 四 Tab 就绪；Plugin/Skills 面板加载完成；MCP 转换端到端（preview 含 `dsh-mcp-client` / `streamable-http`）；不依赖特定 profile 数据 |
 | `npm run smoke:plugin` | 临时 `DSH_HOME` 中执行真实 `dsh plugin remove`，确认退出码与 package.json 依赖删除；不触碰用户 profile |
 | `npm run smoke:harness` | harness 就绪；iframe 挂载 `http://127.0.0.1:PORT`；状态条「已连接」（`#harness-status`）；重启后 iframe 重挂载到新端口 |
@@ -237,7 +239,7 @@ git push origin v0.3.0
 - **市场目录**：Plugin 使用 DSH Plugin Market / Awesome DSH Plugin 清单，MCP 使用官方 MCP Registry + DSH MCP Market，Skills 使用 ClawHub + SkillsMP；在线结果经过 schema 校验并缓存到本地。Plugin 安装前校验 `dsh.bundle`，npm 锁定精确版本，GitHub 尽量锁定 commit；ClawHub Skills 锁定版本后只写入 `SKILL.md`。
 - **Routing Suite 聚合仓库**：`https://github.com/yjh051108/dsh-routing-suite` 不是单一 DSH bundle，根目录缺 `package.json/dsh.bundle`；Plugin Tab 会拒绝直接安装。应按仓库说明分别装配 injector、router-standard preset 与可选 mode-boost。
 - **无 Settings / 第四系统**：Settings（API Key / 模型 / 更新）与第四系统占位本期未实现，API Key/模型配置请使用官方 Web UI 内能力。
-- **git 来源插件无 allowBuilds 授权向导**：pnpm ≥10 默认拒绝运行 git 依赖的 `prepare` 脚本；需用户手动在 profile 的 `pnpm-workspace.yaml` 写 `allowBuilds`（UI 未包装该流程）。
+- **git 来源插件的构建授权**：pnpm ≥10 拒绝依赖构建脚本时，Hub 会解析 pnpm 给出的包名或完整 Git depPath，逐包请求用户确认；确认后才原子写入 profile 的 `pnpm-workspace.yaml.allowBuilds` 并重试一次。该授权仍属于在本机执行第三方代码。
 - **MCP `!!js` backtick 模板兼容**：patch 中以反引号模板写 `Bearer ${...}`（官方 README 示例写法）超出 yaml 解析器语法，MCP 面板会拒绝解析并提示；请改用单引号字符串 `!!js 'Bearer ${...}'`（语义为字面字符串）或行级 `process.env.X`。
 - **MCP 无文件导入**：MCP 面板支持粘贴 JSON（`${VAR}` 自动转 `!!js process.env.VAR`；默认合并写入，可选全量替换），暂无 `.mcp.json` 文件选择器。
 - **退出边界**：正常退出走 SIGTERM 进程组清理 + 单实例锁；Harness 意外退出可在 UI 一键重启；强杀（timeout / group-kill）仍可能遗留 dsh 子进程。

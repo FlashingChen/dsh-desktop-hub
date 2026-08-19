@@ -56,6 +56,14 @@ test('package.json 已重命名为 dsh-desktop-hub 并锁定 Electron 43.4.0', (
   assert.ok(!pkg.devDependencies.electron.includes('^'), 'electron 不得使用 semver range')
 })
 
+test('pluginOpDone IPC 使用单个 PluginOpDone payload', () => {
+  const main = readFileSync(join(root, 'src', 'main', 'main.ts'), 'utf8')
+  const preload = readFileSync(join(root, 'src', 'preload', 'preload.ts'), 'utf8')
+  assert.ok(main.includes('onDone: (done) => sendPluginEvent(IPC.pluginOpDone, done)'), '主进程必须只发送 done 对象')
+  assert.ok(!main.includes('sendPluginEvent(IPC.pluginOpDone, done.token, done)'), '不得把 token 作为额外的第一个 payload')
+  assert.ok(preload.includes('ipcRenderer.on(CH.pluginOpDone, (_e, done: PluginOpDone) => cb(done))'), 'preload 必须转发完整 done 对象')
+})
+
 test('preload channel 与 src/core/ipc.ts 契约逐字符一致', () => {
   const ipcSrc = readFileSync(join(root, 'src/core/ipc.ts'), 'utf8')
   const preloadSrc = readFileSync(join(root, 'src/preload/preload.ts'), 'utf8')
@@ -87,4 +95,25 @@ test('渲染层 skills 表格使用 DOM API（textContent）而非 innerHTML 拼
   assert.ok(renderer.includes('tdDesc.textContent'), 'skill 描述必须经 textContent 渲染')
   const skillsBlock = renderer.slice(renderer.indexOf('async function refreshSkills'), renderer.indexOf('async function toggleSkill'))
   assert.ok(!skillsBlock.includes('innerHTML'), 'skills 渲染不得使用 innerHTML')
+})
+
+test('手动插件安装先经主进程归一化，再把规范 spec 交给 dsh', () => {
+  const renderer = readFileSync(join(root, 'src/renderer/renderer.ts'), 'utf8')
+  const installBlock = renderer.slice(renderer.indexOf('async function installPlugin'), renderer.indexOf('async function removePlugin'))
+  assert.ok(installBlock.includes('api.plugins.prepareInstall(raw)'), '手动输入必须先走安装 spec 预处理')
+  assert.ok(installBlock.includes("runPluginOpUi('add', [spec]"), 'dsh 必须接收归一化后的 spec')
+  assert.ok(!installBlock.includes("runPluginOpUi('add', [raw]"), '不得把原始 GitHub URL 直接交给 dsh')
+})
+
+test('插件操作 IPC 先返回 token，不能等待完成后才让 renderer 获得 token', () => {
+  const main = readFileSync(join(root, 'src/main/main.ts'), 'utf8')
+  const handler = main.slice(main.indexOf('ipcMain.handle(IPC.pluginsStartOp'), main.indexOf('ipcMain.handle(IPC.pluginsCancelOp'))
+  assert.ok(handler.includes('startPluginOp('), 'start handler 必须立即创建并返回操作 token')
+  assert.ok(!handler.includes('await streamPluginOp('), 'start handler 不得等待整个插件操作完成')
+})
+
+test('所有可能执行构建脚本的插件操作都要向用户披露授权风险', () => {
+  const renderer = readFileSync(join(root, 'src/renderer/renderer.ts'), 'utf8')
+  const updateBlock = renderer.slice(renderer.indexOf('async function updateAllPlugins'), renderer.indexOf('async function cancelPluginOp'))
+  assert.match(updateBlock, /pnpm.*构建脚本/, '更新确认必须说明 pnpm 构建脚本授权风险')
 })

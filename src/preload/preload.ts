@@ -10,8 +10,10 @@ const CH = {
   pluginsList: 'plugins:list',
   pluginsActivate: 'plugins:activate',
   pluginsDeactivate: 'plugins:deactivate',
+  pluginsPrepareInstall: 'plugins:prepare-install',
   pluginsStartOp: 'plugins:start-op',
   pluginsCancelOp: 'plugins:cancel-op',
+  pluginsOpStatus: 'plugins:op-status',
   pluginOpChunk: 'plugin-op:chunk',
   pluginOpDone: 'plugin-op:done',
   mcpList: 'mcp:list',
@@ -50,6 +52,11 @@ interface PluginOpDone {
   output: string
 }
 
+type PluginOpStatus =
+  | { state: 'running' }
+  | { state: 'done'; done: PluginOpDone }
+  | { state: 'unknown' }
+
 contextBridge.exposeInMainWorld('dshDesktop', {
   harness: {
     url: (): Promise<string | null> => ipcRenderer.invoke(CH.harnessUrl),
@@ -65,9 +72,11 @@ contextBridge.exposeInMainWorld('dshDesktop', {
     list: () => ipcRenderer.invoke(CH.pluginsList),
     activate: (name: string) => ipcRenderer.invoke(CH.pluginsActivate, name),
     deactivate: (name: string) => ipcRenderer.invoke(CH.pluginsDeactivate, name),
+    prepareInstall: (spec: string) => ipcRenderer.invoke(CH.pluginsPrepareInstall, spec),
     startOp: (action: 'add' | 'remove' | 'update', args: string[]): Promise<PluginOpStarted> =>
       ipcRenderer.invoke(CH.pluginsStartOp, action, args),
     cancelOp: (token: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(CH.pluginsCancelOp, token),
+    opStatus: (token: string): Promise<PluginOpStatus> => ipcRenderer.invoke(CH.pluginsOpStatus, token),
     onOpChunk: (cb: (token: string, text: string) => void): void => {
       ipcRenderer.on(CH.pluginOpChunk, (_e, token: string, text: string) => cb(token, text))
     },

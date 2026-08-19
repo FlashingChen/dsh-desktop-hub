@@ -2,9 +2,13 @@
 import { readFileSync } from 'node:fs'
 import { parseDocument, stringify } from 'yaml'
 import { join } from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { PassThrough } from 'node:stream'
 import type { DshProfile } from './harness.js'
 import { terminateTree } from './harness.js'
+import { approveIgnoredBuilds, parseBuildApprovalKeys, parseIgnoredBuildPackages } from './pnpm.js'
+
+export { approveIgnoredBuilds, parseBuildApprovalKeys, parseIgnoredBuildPackages } from './pnpm.js'
 
 export interface PluginEntry {
   name: string
@@ -161,7 +165,7 @@ export function buildPluginCommand(
 
 /**
  * 归一化安装 spec：支持直接粘贴 GitHub 链接。
- * - https://github.com/owner/repo           → github:owner/repo
+ * - https://github.com/owner/repo 或 github.com/owner/repo → github:owner/repo
  * - https://github.com/owner/repo.git       → github:owner/repo
  * - https://github.com/owner/repo/tree/main → github:owner/repo#main
  * - https://github.com/owner/repo/commit/x  → github:owner/repo#x（commit 锁定）
@@ -169,15 +173,16 @@ export function buildPluginCommand(
  */
 export function normalizeInstallSpec(spec: string): string {
   const s = spec.trim()
-  const m = s.match(/^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:\/|$)/)
+  // 手动输入框允许用户粘贴浏览器地址，也允许省略协议；两者必须在进入 CLI 前归一化。
+  const m = s.match(/^(?:(?:https?:[/][/]))?(?:www[.])?github[.]com[/]([A-Za-z0-9_.-]+)[/]([A-Za-z0-9_.-]+?)(?:[.]git)?(?:[/]|[?#]|$)/i)
   if (!m) return s
   const owner = m[1]
-  let repo = m[2]
-  const rest = s.slice(m[0].length)
+  const repo = m[2]
+  const rest = s.slice(m[0].length).replace(/[?#].*$/, '').replace(/^[/]+|[/]+$/g, '')
   if (!rest) return `github:${owner}/${repo}`
-  const tree = rest.match(/^tree\/(.+)$/)
+  const tree = rest.match(/^tree[/](.+)$/i)
   if (tree) return `github:${owner}/${repo}#${tree[1]}`
-  const commit = rest.match(/^commit\/([0-9a-fA-F]{7,40})$/)
+  const commit = rest.match(/^commit[/]([0-9a-fA-F]{7,40})$/i)
   if (commit) return `github:${owner}/${repo}#${commit[1]}`
   return `github:${owner}/${repo}`
 }
@@ -204,7 +209,10 @@ export interface PluginOpHandle {
   cancel: () => void
 }
 
-/** 执行 dsh plugin 操作（真实改动 profile，须由显式用户动作触发） */
+/** 执行 dsh plugin 操作（真实改动 profile，须由显式用户动作触发）。
+ * pnpm ≥10 可能在第一次安装时拒绝 native 依赖的构建脚本；若 pnpm 明确报告
+ * ERR_PNPM_IGNORED_BUILDS，则只授权它报告的包并自动重试一次，避免把失败的半安装状态留给用户。
+ */
 export function runPluginOp(opts: {
   dsh: string
   node?: string
@@ -214,28 +222,120 @@ export function runPluginOp(opts: {
   cwd?: string
   signal?: AbortSignal
   env?: NodeJS.ProcessEnv
+  autoApproveBuilds?: { workspaceFile: string }
+  requestBuildApproval?: (keys: string[]) => Promise<boolean>
 }): PluginOpHandle {
-  const cmd = buildPluginCommand(opts.profile, opts.action, opts.args ?? [])
-  const spawnArgs = opts.node ? [opts.dsh, ...cmd] : cmd
-  const child = spawn(opts.node ?? opts.dsh, spawnArgs, {
-    cwd: opts.cwd,
-    env: opts.env ?? process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  })
+  const stdout = new PassThrough()
+  const stderr = new PassThrough()
   const { promise, resolve } = Promise.withResolvers<{
     exitCode: number | null
     signal: NodeJS.Signals | null
   }>()
-  child.on('close', (code, signal) => resolve({ exitCode: code, signal }))
-  child.on('error', () => resolve({ exitCode: -1, signal: null }))
-  // 取消必须终止整棵进程树（Windows 上 dsh 用 cmd /c pnpm，子进程 pnpm 持有 profile node_modules 锁；
-  // 只杀直接子进程会让 pnpm 残留并锁住后续操作）
-  opts.signal?.addEventListener('abort', () => terminateTree(child.pid))
-  return {
-    stdout: child.stdout!,
-    stderr: child.stderr!,
-    done: promise,
-    cancel: () => terminateTree(child.pid),
+  const retryBuildApproval = (opts.action === 'add' || opts.action === 'update') && opts.autoApproveBuilds
+  let currentChild: ChildProcess | null = null
+  let attempt = 0
+  let settled = false
+  let cancelled = false
+  const RETRY_OUTPUT_CAP = 256 * 1024
+
+  const finish = (result: { exitCode: number | null; signal: NodeJS.Signals | null }): void => {
+    if (settled) return
+    settled = true
+    currentChild = null
+    opts.signal?.removeEventListener('abort', onAbort)
+    stdout.end()
+    stderr.end()
+    resolve(result)
   }
+
+  const cancel = (): void => {
+    cancelled = true
+    if (currentChild) terminateTree(currentChild.pid)
+    else finish({ exitCode: null, signal: 'SIGTERM' })
+  }
+
+  const onAbort = (): void => cancel()
+  if (opts.signal?.aborted) cancel()
+  else opts.signal?.addEventListener('abort', onAbort, { once: true })
+
+  const startAttempt = (): void => {
+    if (settled || cancelled) {
+      finish({ exitCode: null, signal: 'SIGTERM' })
+      return
+    }
+    const cmd = buildPluginCommand(opts.profile, opts.action, opts.args ?? [])
+    const spawnArgs = opts.node ? [opts.dsh, ...cmd] : cmd
+    let child: ChildProcess
+    try {
+      child = spawn(opts.node ?? opts.dsh, spawnArgs, {
+        cwd: opts.cwd,
+        env: opts.env ?? process.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+    } catch (err) {
+      stderr.write(`${err instanceof Error ? err.message : String(err)}\n`)
+      finish({ exitCode: -1, signal: null })
+      return
+    }
+    currentChild = child
+    let attemptOutput = ''
+    let spawnError = false
+    const forward = (stream: NodeJS.ReadableStream | null, target: PassThrough): void => {
+      stream?.on('data', (chunk: Buffer | string) => {
+        attemptOutput = (attemptOutput + String(chunk)).slice(-RETRY_OUTPUT_CAP)
+        target.write(chunk)
+      })
+    }
+    forward(child.stdout, stdout)
+    forward(child.stderr, stderr)
+    child.once('error', () => {
+      spawnError = true
+    })
+    child.once('close', (code, signal) => {
+      void (async () => {
+        if (settled) return
+        currentChild = null
+        const exitCode = code === null && spawnError ? -1 : code
+        if (
+          !cancelled &&
+          attempt === 0 &&
+          exitCode !== 0 &&
+          signal === null &&
+          retryBuildApproval
+        ) {
+          const approvalKeys = parseBuildApprovalKeys(attemptOutput)
+          if (approvalKeys.length > 0) {
+            try {
+              if (!opts.requestBuildApproval) {
+                stderr.write(`\n构建脚本需要显式授权；未修改 allowBuilds。请通过桌面端确认后重试安装。\n`)
+                finish({ exitCode, signal })
+                return
+              }
+              const requested = await opts.requestBuildApproval(approvalKeys)
+              if (settled || cancelled) return
+              if (!requested) {
+                stderr.write(`\n构建脚本授权已取消，未修改 allowBuilds。请确认后重试安装。\n`)
+                finish({ exitCode, signal })
+                return
+              }
+              const approval = approveIgnoredBuilds(retryBuildApproval.workspaceFile, approvalKeys)
+              if (approval.changed) {
+                stdout.write(`\n已获用户授权构建脚本：${approval.approved.join(', ')}；正在重试安装…\n`)
+                attempt = 1
+                startAttempt()
+                return
+              }
+            } catch (err) {
+              stderr.write(`\npnpm 构建授权更新失败：${err instanceof Error ? err.message : String(err)}\n`)
+            }
+          }
+        }
+        if (!settled) finish({ exitCode, signal })
+      })()
+    })
+  }
+
+  if (!settled) startAttempt()
+  return { stdout, stderr, done: promise, cancel }
 }

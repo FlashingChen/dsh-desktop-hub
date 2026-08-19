@@ -28,12 +28,24 @@ interface PluginOpStarted {
   error?: string
 }
 
+interface PluginInstallPlan {
+  ok: boolean
+  kind?: 'plugin' | 'routing-suite'
+  normalized?: string
+  error?: string
+}
+
 interface PluginOpDone {
   token: string
   exitCode: number | null
   signal: string | null
   output: string
 }
+
+type PluginOpStatus =
+  | { state: 'running' }
+  | { state: 'done'; done: PluginOpDone }
+  | { state: 'unknown' }
 
 type MarketKind = 'plugin' | 'mcp' | 'skill'
 
@@ -107,8 +119,10 @@ interface DesktopApi {
     list: () => Promise<PluginListResult>
     activate: (name: string) => Promise<{ ok: boolean; output?: string; error?: string }>
     deactivate: (name: string) => Promise<{ ok: boolean; output?: string; error?: string }>
+    prepareInstall: (spec: string) => Promise<PluginInstallPlan>
     startOp: (action: 'add' | 'remove' | 'update', args: string[]) => Promise<PluginOpStarted>
     cancelOp: (token: string) => Promise<{ ok: boolean }>
+    opStatus: (token: string) => Promise<PluginOpStatus>
     onOpChunk: (cb: (token: string, text: string) => void) => void
     onOpDone: (cb: (done: PluginOpDone) => void) => void
   }
@@ -248,8 +262,17 @@ const SOURCE_LABEL: Record<PluginEntry['source'], string> = {
 }
 
 let activeOpToken: string | null = null
+let pluginOpStarting = false
 let opResultText = ''
 let activeOpAfterDone: ((done: PluginOpDone) => void | Promise<void>) | null = null
+let opRecoveryTimer: number | null = null
+const OP_RECOVERY_DELAY_MS = 5 * 60_000
+
+function clearOpRecoveryTimer(): void {
+  if (opRecoveryTimer === null) return
+  window.clearTimeout(opRecoveryTimer)
+  opRecoveryTimer = null
+}
 
 function setOpControls(running: boolean): void {
   const cancel = document.getElementById('plugin-cancel') as HTMLButtonElement | null
@@ -353,6 +376,38 @@ async function deactivatePlugin(name: string): Promise<void> {
   }
 }
 
+function scheduleOpRecovery(token: string): void {
+  clearOpRecoveryTimer()
+  opRecoveryTimer = window.setTimeout(() => {
+    opRecoveryTimer = null
+    void recoverPluginOp(token)
+  }, OP_RECOVERY_DELAY_MS)
+}
+
+async function recoverPluginOp(token: string, announceRunning = true): Promise<void> {
+  if (!api || token !== activeOpToken) return
+  try {
+    const status = await api.plugins.opStatus(token)
+    if (token !== activeOpToken) return
+    if (status.state === 'done' && status.done) {
+      handlePluginOpDone(status.done)
+      return
+    }
+    if (status.state === 'unknown') {
+      // 主进程已没有该操作：继续保持 token 只会把前端永久锁死，安全地回到可重试状态。
+      activeOpToken = null
+      activeOpAfterDone = null
+      setOpControls(false)
+      setStatus('插件操作状态已丢失，已解除锁定，请重试', 'error')
+      return
+    }
+    if (announceRunning) setStatus('插件操作仍在进行中，请等待完成或取消', 'ok')
+  } catch {
+    // 查询失败不擅自放行，稍后重试；取消仍可由用户主动触发。
+  }
+  if (token === activeOpToken) scheduleOpRecovery(token)
+}
+
 async function runPluginOpUi(
   action: 'add' | 'remove' | 'update',
   args: string[],
@@ -360,32 +415,49 @@ async function runPluginOpUi(
   afterDone?: (done: PluginOpDone) => void | Promise<void>,
 ): Promise<void> {
   if (!api) return
-  if (activeOpToken) {
+  if (activeOpToken || pluginOpStarting) {
     setStatus('已有插件操作进行中，请等待完成或取消', 'error')
     return
   }
+  pluginOpStarting = true
   activeOpAfterDone = afterDone ?? null
-  const started = await api.plugins.startOp(action, args)
-  if (!started.ok || !started.token) {
+  try {
+    const started = await api.plugins.startOp(action, args)
+    if (!started.ok || !started.token) {
+      activeOpAfterDone = null
+      setStatus(`启动失败: ${started.error ?? ''}`, 'error')
+      return
+    }
+    activeOpToken = started.token
+    opResultText = ''
+    setOpControls(true)
+    setStatus(`${label}中…（输出如下，可取消）`, 'ok')
+    // done push 可能早于 invoke 响应；立即查询一次权威终态，避免等到 watchdog。
+    void recoverPluginOp(started.token, false)
+  } catch (error) {
     activeOpAfterDone = null
-    setStatus(`启动失败: ${started.error ?? ''}`, 'error')
-    return
+    setStatus(`启动失败: ${error instanceof Error ? error.message : String(error)}`, 'error')
+  } finally {
+    pluginOpStarting = false
   }
-  activeOpToken = started.token
-  opResultText = ''
-  setOpControls(true)
-  setStatus(`${label}中…（输出如下，可取消）`, 'ok')
 }
 
 async function installPlugin(): Promise<void> {
   const input = document.getElementById('plugin-spec') as HTMLInputElement | null
   if (!input || !api) return
-  const spec = input.value.trim()
-  if (!spec) {
-    setStatus('请输入包名或 github:owner/repo#commit', 'error')
+  const raw = input.value.trim()
+  if (!raw) {
+    setStatus('请输入包名、GitHub 链接或 github:owner/repo#commit', 'error')
     return
   }
-  if (!confirm(`确认安装插件「${spec}」到 profile「web」？\n安装完成后会自动重启 Harness，使插件生效。\n插件代码将在本机执行（沙箱之外）。`)) return
+  const plan = await api.plugins.prepareInstall(raw)
+  if (!plan.ok || !plan.normalized) {
+    setStatus(`安装前检查失败: ${plan.error ?? '插件 spec 无效'}`, 'error')
+    return
+  }
+  const spec = plan.normalized
+  const display = raw === spec ? spec : `${raw}\n归一化为：${spec}`
+  if (!confirm(`确认安装插件「${display}」到 profile「web」？\n安装完成后会自动重启 Harness，使插件生效。\n插件代码将在本机执行（沙箱之外）。\n若 pnpm 拒绝构建脚本，会列出明确报告的包并逐包再次确认；允许后才写入 allowBuilds 并重试。`)) return
   await runPluginOpUi('add', [spec], '安装', async () => {
     await refreshPlugins()
     await restartHarnessForPluginChange(`插件「${spec}」安装`)
@@ -402,7 +474,7 @@ async function removePlugin(name: string): Promise<void> {
 
 async function updateAllPlugins(): Promise<void> {
   if (!api) return
-  if (!confirm('确认更新 profile「web」的全部插件？\n将执行 dsh plugin update，完成后会自动重启 Harness。')) return
+  if (!confirm('确认更新 profile「web」的全部插件？\n将执行 dsh plugin update，完成后会自动重启 Harness。\n更新可能执行第三方 pnpm 构建脚本；如需授权会逐包再次确认。')) return
   await runPluginOpUi('update', [], '更新', async () => {
     await refreshPlugins()
     await restartHarnessForPluginChange('插件更新')
@@ -411,21 +483,22 @@ async function updateAllPlugins(): Promise<void> {
 
 async function cancelPluginOp(): Promise<void> {
   if (!api || !activeOpToken) return
-  await api.plugins.cancelOp(activeOpToken)
+  const token = activeOpToken
+  const res = await api.plugins.cancelOp(token)
+  if (!res.ok) {
+    // 进程可能已经结束但 done push 丢失；立即向主进程查询一次，避免还要等 watchdog。
+    await recoverPluginOp(token)
+    return
+  }
   setStatus('已发送取消请求（SIGTERM）', 'ok')
 }
 
-api?.plugins.onOpChunk((token, text) => {
-  if (token !== activeOpToken) return
-  appendOpOutput(text)
-  setStatus(opResultText, 'ok')
-})
-
-api?.plugins.onOpDone((done) => {
+function handlePluginOpDone(done: PluginOpDone): void {
   if (done.token !== activeOpToken) return
   const afterDone = activeOpAfterDone
   activeOpAfterDone = null
   activeOpToken = null
+  clearOpRecoveryTimer()
   setOpControls(false)
   appendOpOutput(done.output)
   const head = done.exitCode === 0 ? '操作成功' : `操作失败（exit=${done.exitCode ?? 'signal ' + (done.signal ?? '?')}）`
@@ -434,7 +507,15 @@ api?.plugins.onOpDone((done) => {
     await refreshPlugins()
     if (done.exitCode === 0 && afterDone) await afterDone(done)
   })()
+}
+
+api?.plugins.onOpChunk((token, text) => {
+  if (token !== activeOpToken) return
+  appendOpOutput(text)
+  setStatus(opResultText, 'ok')
 })
+
+api?.plugins.onOpDone(handlePluginOpDone)
 
 document.getElementById('plugin-install')?.addEventListener('click', () => void installPlugin())
 document.getElementById('plugin-refresh')?.addEventListener('click', () => void refreshPlugins())
@@ -734,7 +815,7 @@ async function installMarketPlugin(item: PluginMarketItem): Promise<void> {
   const lockedSpec = preflight.normalizedSpec
   const versionText = preflight.version ? `\n版本：${preflight.version}` : ''
   const warningText = preflight.warning ? `\n注意：${preflight.warning}` : ''
-  if (!confirm(`确认安装并激活「${item.name}」？\n安装来源：${lockedSpec}${versionText}${warningText}\n安装完成后会自动重启 Harness，使插件出现在运行中的 Web 界面。\n插件代码将在本机执行（沙箱之外）。`)) return
+  if (!confirm(`确认安装并激活「${item.name}」？\n安装来源：${lockedSpec}${versionText}${warningText}\n安装完成后会自动重启 Harness，使插件出现在运行中的 Web 界面。\n插件代码将在本机执行（沙箱之外）。\n若 pnpm 拒绝构建脚本，会列出明确报告的包并逐包再次确认；允许后才写入 allowBuilds 并重试。`)) return
   setMarketMode('plugin', 'manage')
   await runPluginOpUi('add', [lockedSpec], '安装', async () => {
     const packageName = preflight.packageName ?? item.packageName

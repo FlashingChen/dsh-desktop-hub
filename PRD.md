@@ -115,7 +115,7 @@ dsh plugin --profile <name> update
 ```
 
 - 安装来源：npm 包名（`dsh plugin add your-package`）、本地 checkout（`add ./path`）、tarball（`pnpm pack` 产物）、`github:owner/repo#commit`。
-- **git 安装有构建坎**：拉的是源码，pnpm ≥10 默认拒绝运行 git 依赖的 `prepare` 脚本；需用户在 profile 的 `pnpm-workspace.yaml` 写入 `allowBuilds` 显式授权（= 允许该包代码在本机执行，**不在沙箱内**）。UI 必须走授权流程。
+- **git 安装有构建授权边界**：拉的是源码，pnpm ≥10 可能拒绝依赖的 `prepare`/构建脚本。用户确认安装后，Hub 会解析 pnpm 给出的包名或完整 Git depPath，并逐包再次请求确认；用户允许后才写入 profile `pnpm-workspace.yaml` 的 `allowBuilds` 并重试一次。这仍等价于允许第三方代码在本机执行（**不在沙箱内**）。
 - **生效配置层顺序**（后层按 `id` 整行覆盖，非深合并）：
   1. profile 的 `dsh.profile.bundles` 各 bundle patch（按列表顺序）
   2. profile 自己的 `cordis.patch.yml`
@@ -315,7 +315,7 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四�
 - BrowserWindow：`sandbox: true` + `contextIsolation: true` + `nodeIntegration: false`；preload 仅经 `contextBridge` 暴露白名单 API（`window.dshDesktop`）。
 - 渲染层 CSP：`default-src 'self'`；`script-src 'self'`；`frame-src http://127.0.0.1:*`（仅允许 loopback 内嵌）；`connect-src 'self' http://127.0.0.1:*`。
 - harness 只监听 loopback（`dsh web --port 0` 由 dsh 自选端口，官方无认证设计，**绝不**开放 `0.0.0.0`）。
-- 插件安装 / MCP 写入 = 全部显式用户确认（官方明示：这些都是沙箱外受信代码）；git 来源插件的 `allowBuilds` 授权流程见 §2.3。
+- 插件安装 / MCP 写入 = 全部显式用户确认（官方明示：这些都是沙箱外受信代码）；git 来源插件若触发 pnpm 构建拦截，只展示 pnpm 明确报告的包并逐包请求确认，用户允许后才写入 `allowBuilds` 并重试，见 §2.3。
 - MCP 写入前自动备份（`.bak-<ts>`），原子写（tmp + rename）失败不落盘。
 - 转换器只做解析与映射，不执行任何命令。
 - API Key 走官方通道（`$DSH_HOME/.credentials.yaml`，只写），壳层不触碰。
@@ -337,13 +337,13 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），四�
 |---|---|---|
 | M0 壳骨架 | Electron + TypeScript 三端工程（main/preload/renderer）；四 Tab 契约；`typecheck` / `test` / `verify` 脚本 | ✅ 已完成：`npm run verify` 全绿；`npm run smoke` 四 Tab DOM 断言（截屏 `artifacts/m0-smoke.png`） |
 | M1 Harness 启动与加载 | `dsh` / `$DSH_HOME` / profiles 检测；spawn `dsh web`（`--port 0`，detached 进程组）；轮询 HTTP 200；Harness Tab iframe 内嵌官方 Web UI（`did-frame-navigate` 状态推送）；退出清理进程树 | ✅ 已完成：`npm run verify:m1`（真实启动 → HTTP 200 → 优雅停止 → 端口关闭无孤儿）；`npm run smoke:harness`（iframe 挂载 + 状态「已连接」，截屏 `artifacts/m1-harness.png`） |
-| M2 Plugin Tab | profile 发现 + 插件列表（`dsh.profile.bundles` ∪ dependencies）；封装 `dsh plugin --profile web add|remove|update`（支持 npm 包名 / `github:owner/repo#commit` / 本地路径 / 直接粘贴 GitHub 链接） | ✅ 已完成：单测 9 例（分类/排序/命令形态/链接归一化/聚合仓库拦截/退出码+取消/幂等激活行清理）；冒烟断言真实 web profile ≥4 项含 dsh-base |
+| M2 Plugin Tab | profile 发现 + 插件列表（`dsh.profile.bundles` ∪ dependencies）；封装 `dsh plugin --profile web add|remove|update`（支持 npm 包名 / `github:owner/repo#commit` / 本地路径 / 直接粘贴 GitHub 链接） | ✅ 已完成：单测 17 例（分类/排序/命令形态/带协议与裸 GitHub 链接归一化/聚合仓库拦截/pnpm ignored builds 与 Git prepare 授权/显式拒绝保护/退出码+取消/幂等激活行清理）；冒烟断言真实 web profile ≥4 项含 dsh-base |
 | M3 MCP Tab | JSON→YAML 转换器 + profile `cordis.patch.yml` 事务读写（备份/回滚）+ 服务器列表 | ✅ 已完成：单测 18 例（混合输入/sse 警告/格式拒绝/YAML 同构/提取/替换/编辑/删除保留注释/空 patch 新建/备份事务/`!!js` 行级保真）；UI 支持读取、编辑、删除已有 MCP 行 |
-| M4 Skills Tab | rank 400-600 目录扫描（用户级 + 随包）；SKILL.md/扁平 md 解析 + frontmatter；新建（kebab-case 校验）；模型/用户可见性切换 | ✅ 已完成：单测 13 例（rank 合并/shadowed/custom+bundled 根/往返一致/创建校验/可见性切换/扁平名回退/zip 导入与穿越拒绝）；冒烟真实数据 huashu-design + media-use |
+| M4 Skills Tab | rank 400-600 目录扫描（用户级 + 随包）；SKILL.md/扁平 md 解析 + frontmatter；新建（kebab-case 校验）；模型/用户可见性切换 | ✅ 已完成：单测 15 例（rank 合并/shadowed/custom+bundled 根/往返一致/创建校验/可见性切换/扁平名回退/zip 导入与穿越拒绝）；冒烟真实数据 huashu-design + media-use |
 | M5 桌面整合与打包 | 四 Tab 主窗口整合（Harness iframe 内嵌官方 Web UI）+ electron-builder 出 DMG | ✅ 已完成：默认模式＝启动 harness + 四 Tab 壳；`release/DSH-Desktop-Hub-0.1.0-arm64.dmg` 产物存在；打包 app 在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）下用捆绑运行时启动，HTTP 200；TERM 退出无孤儿 |
 | M6 扩展中心 MVP | Plugin / MCP / Skills 三类市场 + 在线目录搜索 + 精选安装链路 | ✅ 已完成：DSH Plugin Market / Awesome DSH Plugin / 官方 MCP Registry / DSH MCP Market / ClawHub / SkillsMP 接入，来源等级与权限展示，插件 CLI 安装，MCP patch 合并写入，Skills GitHub / ClawHub / 模板安装；账号/评论/社区提交未纳入本期 |
 
-> 后续演进（未在本期范围）：Settings Tab（API Key/模型/更新）、profile 切换、插件 `allowBuilds` 授权向导、MCP/Skills 文件导入、Windows/Linux 打包、自动更新 —— 详见 plan.md「下一步」。
+> 后续演进（未在本期范围）：Settings Tab（API Key/模型/更新）、profile 切换、更细粒度的插件构建授权向导、MCP/Skills 文件导入、Windows/Linux 打包、自动更新 —— 详见 plan.md「下一步」。
 
 ---
 

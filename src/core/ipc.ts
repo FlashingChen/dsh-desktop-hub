@@ -9,8 +9,10 @@ export const IPC = {
   pluginsList: 'plugins:list',
   pluginsActivate: 'plugins:activate',
   pluginsDeactivate: 'plugins:deactivate',
+  pluginsPrepareInstall: 'plugins:prepare-install',
   pluginsStartOp: 'plugins:start-op',
   pluginsCancelOp: 'plugins:cancel-op',
+  pluginsOpStatus: 'plugins:op-status',
   pluginOpChunk: 'plugin-op:chunk',
   pluginOpDone: 'plugin-op:done',
   mcpList: 'mcp:list',
@@ -42,6 +44,11 @@ export interface PluginOpDone {
   signal: string | null
   output: string
 }
+
+export type PluginOpStatus =
+  | { state: 'running' }
+  | { state: 'done'; done: PluginOpDone }
+  | { state: 'unknown' }
 
 export interface HarnessStatus {
   state: 'starting' | 'ready' | 'exited' | 'restarting'
