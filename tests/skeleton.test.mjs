@@ -56,6 +56,14 @@ test('package.json 已重命名为 dsh-desktop-hub 并锁定 Electron 43.4.0', (
   assert.ok(!pkg.devDependencies.electron.includes('^'), 'electron 不得使用 semver range')
 })
 
+test('pluginOpDone IPC 使用单个 PluginOpDone payload', () => {
+  const main = readFileSync(join(root, 'src', 'main', 'main.ts'), 'utf8')
+  const preload = readFileSync(join(root, 'src', 'preload', 'preload.ts'), 'utf8')
+  assert.ok(main.includes('onDone: (done) => sendPluginEvent(IPC.pluginOpDone, done)'), '主进程必须只发送 done 对象')
+  assert.ok(!main.includes('sendPluginEvent(IPC.pluginOpDone, done.token, done)'), '不得把 token 作为额外的第一个 payload')
+  assert.ok(preload.includes('ipcRenderer.on(CH.pluginOpDone, (_e, done: PluginOpDone) => cb(done))'), 'preload 必须转发完整 done 对象')
+})
+
 test('preload channel 与 src/core/ipc.ts 契约逐字符一致', () => {
   const ipcSrc = readFileSync(join(root, 'src/core/ipc.ts'), 'utf8')
   const preloadSrc = readFileSync(join(root, 'src/preload/preload.ts'), 'utf8')
