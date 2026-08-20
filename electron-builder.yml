@@ -20,7 +20,7 @@ mac:
   identity: null
 dmg:
   artifactName: DSH-Desktop-Hub-${version}-${arch}.${ext}
-# Windows：NSIS 安装包，oneClick 免向导（双击 → 进度 → 自动启动）；per-user 免管理员
+# Windows：NSIS 安装包，显示安装向导并允许用户选择安装目录；per-user 免管理员
 # 注意：CLI 带平台参数（--win）时 arch 以 CLI 为准（默认本机 arch），yml 的 arch 仅作声明/无 CLI 参数时生效；
 # CI 显式传 --x64 / --arm64 保证与 runner 架构解耦。
 win:
@@ -30,7 +30,8 @@ win:
       arch: [x64]
   artifactName: DSH-Desktop-Hub-${version}-${arch}.${ext}
 nsis:
-  oneClick: true
+  oneClick: false
+  allowToChangeInstallationDirectory: true
   perMachine: false
   # 自定义「运行中应用查杀」：修默认实现盲区（目录内 node.exe 孤儿、域账户 USERNAME 过滤失配）
   include: installer.nsh
