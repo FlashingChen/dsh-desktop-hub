@@ -4,12 +4,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const mod = await import(pathToFileURL(join(root, 'dist', 'core', 'harness.js')).href)
-const { findDsh, dshHome, listProfiles, parseHarnessUrl, runtimePathEnv, resolveDshExec } = mod
+const { findDsh, dshHome, listProfiles, parseHarnessUrl, repairDirectoryPickerRows, runtimePathEnv, resolveDshExec } = mod
 
 test('findDsh 优先 DSH_BIN，并总能解析到存在的可执行文件', () => {
   const bin = mkdtempSync(join(tmpdir(), 'dsh-bin-'))
@@ -94,4 +94,83 @@ test('runtimePathEnv 在捆绑 runtime 存在时把 node/bin 与 .bin 加入 PAT
   }
   // 不破坏原有 PATH 内容
   assert.ok(env[pathKey].includes(process.env[pathKey] ?? ''), '原 PATH 应保留')
+})
+
+test('repairDirectoryPickerRows 移除用户层重复 picker 并留下备份', () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-picker-repair-'))
+  try {
+    const profile = join(home, 'profiles', 'web')
+    mkdirSync(profile, { recursive: true })
+    writeFileSync(
+      join(profile, 'package.json'),
+      JSON.stringify({ dsh: { profile: { bundles: ['@deepseek-ai/dsh-web-app'] } } }),
+    )
+    const patch = `# keep this comment\n- insert:\n    - id: custom-picker\n      name: '@deepseek-ai/dsh-host-directory-picker-native'\n    - id: keep-me\n      name: some-plugin\n`
+    const patchFile = join(profile, 'cordis.patch.yml')
+    writeFileSync(patchFile, patch)
+    const repairs = repairDirectoryPickerRows(home)
+    assert.equal(repairs.length, 1)
+    assert.match(readFileSync(patchFile, 'utf8'), /keep-me/)
+    assert.doesNotMatch(readFileSync(patchFile, 'utf8'), /dsh-host-directory-picker-native/)
+    assert.match(repairs[0], /cordis\.patch\.yml\.bak-/)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('repairDirectoryPickerRows 不确认官方 bundle 或遇到显式覆盖时不改用户配置', () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-picker-safe-'))
+  try {
+    const profile = join(home, 'profiles', 'web')
+    mkdirSync(profile, { recursive: true })
+    const patchFile = join(profile, 'cordis.patch.yml')
+    const patch = `- insert:\n    - id: custom-picker\n      name: '@deepseek-ai/dsh-host-directory-picker-native'\n`
+    writeFileSync(patchFile, patch)
+    assert.deepEqual(repairDirectoryPickerRows(home), [])
+    assert.match(readFileSync(patchFile, 'utf8'), /dsh-host-directory-picker-native/)
+
+    writeFileSync(join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['@deepseek-ai/dsh-web-app'] } } }))
+    writeFileSync(patchFile, `- insert:\n    - id: directory-picker\n      disabled: true\n    - id: custom-picker\n      name: '@deepseek-ai/dsh-host-directory-picker-native'\n`)
+    assert.deepEqual(repairDirectoryPickerRows(home), [])
+    assert.match(readFileSync(patchFile, 'utf8'), /disabled: true/)
+    assert.match(readFileSync(patchFile, 'utf8'), /dsh-host-directory-picker-native/)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('runtimePathEnv(profile) 为缺失的直接 !!js process.env 引用补空字符串，不修改父环境', () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-profile-env-'))
+  const name = 'DESKTOP_HUB_TEST_MISSING_ENV'
+  const fallbackName = 'DESKTOP_HUB_TEST_DEFAULT_EXPR'
+  const previousHome = process.env.DSH_HOME
+  const previousValue = process.env[name]
+  const previousFallback = process.env[fallbackName]
+  try {
+    mkdirSync(join(home, 'profiles', 'web'), { recursive: true })
+    writeFileSync(
+      join(home, 'profiles', 'web', 'cordis.patch.yml'),
+      `- insert:\n    - id: mcp-test\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        env:\n          TOKEN: !!js process.env.${name}\n          DEFAULTED: !!js process.env.${fallbackName} ?? 'fallback'\n`,
+    )
+    delete process.env[name]
+    delete process.env[fallbackName]
+    process.env.DSH_HOME = home
+    writeFileSync(join(home, '.env'), `${name}=from-profile-file\n`)
+    const fromEnvFile = runtimePathEnv('web')
+    assert.equal(fromEnvFile[name], undefined, '不得用空字符串遮蔽 DSH_HOME/.env')
+    assert.equal(fromEnvFile[fallbackName], undefined, '带 ?? 默认值的表达式不得被改写')
+    rmSync(join(home, '.env'), { force: true })
+    const env = runtimePathEnv('web')
+    assert.equal(env[name], '', '子进程环境应把缺失引用补为空字符串')
+    assert.equal(env[fallbackName], undefined, '带 ?? 默认值的表达式不得被改写')
+    assert.equal(process.env[name], undefined, '父进程环境不得被修改')
+  } finally {
+    if (previousValue === undefined) delete process.env[name]
+    else process.env[name] = previousValue
+    if (previousFallback === undefined) delete process.env[fallbackName]
+    else process.env[fallbackName] = previousFallback
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
 })

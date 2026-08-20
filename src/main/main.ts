@@ -252,7 +252,7 @@ function startPluginOp(action: PluginOpAction, args: string[], finalize?: () => 
       profile: ACTIVE_PROFILE,
       action,
       args,
-      env: runtimePathEnv(),
+      env: runtimePathEnv(ACTIVE_PROFILE),
       autoApproveBuilds: profile ? { workspaceFile: join(profile.dir, 'pnpm-workspace.yaml') } : undefined,
       requestBuildApproval: requestPluginBuildApproval,
     }),
@@ -757,6 +757,7 @@ async function startHarnessAndWatch(): Promise<void> {
       log('harness: resolveDshExec 返回 null —— 捆绑运行时缺失且系统无 dsh')
       throw new Error('未找到 dsh 运行时（捆绑运行时缺失且系统未安装 dsh），错误详情见运行日志')
     }
+    log(`harness: 使用${exec.node ? '捆绑' : 'PATH 回退'}运行时（node=${exec.node ?? 'PATH'}，dsh=${exec.exec}）`)
     const next = await startHarness({
       profile: ACTIVE_PROFILE,
       readyTimeoutMs: 180_000,
@@ -944,7 +945,16 @@ app.on('will-quit', (e) => {
         startingProc = null
       }
       if (harness) await stopHarness()
-      app.quit()
+      // app.quit() does not guarantee propagation of Node's process.exitCode
+      // through Electron's native quit path. Cleanup is complete now, so use
+      // app.exit() to return the smoke result deterministically.
+      app.exit(typeof process.exitCode === 'number' ? process.exitCode : 0)
     })()
+  } else if (typeof process.exitCode === 'number' && !quitting) {
+    // Skeleton smoke has no Harness child to clean up, but it still needs its
+    // assertion result to reach CI instead of being flattened to zero.
+    quitting = true
+    e.preventDefault()
+    app.exit(process.exitCode)
   }
 })

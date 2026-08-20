@@ -3,6 +3,9 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
+import { parseEnv } from 'node:util'
+import { parseDocument } from 'yaml'
+import { atomicWriteWithBackup } from './mcp.js'
 
 export interface DshProfile {
   name: string
@@ -32,11 +35,14 @@ const NODE_DIRNAME = 'nd'
 /** 解析 dsh 执行方式：优先打包内 runtime，回退系统 PATH */
 export function resolveDshExec(): DshExec | null {
   const base = process.resourcesPath ?? join(process.cwd(), 'resources')
-  // 打包布局（asar:false）：{resources}/app/resources/{rt,nd}；兼容旧 asar 布局与开发模式直下
+  // 打包布局（asar:false）：{resources}/app/resources/{rt,nd}；兼容旧 asar 布局。
+  // Electron 开发模式的 process.resourcesPath 指向项目根而非项目的 resources/，
+  // 因此显式补 cwd/resources，避免本地有捆绑 runtime 时错误回退到 PATH。
   const roots = [
     ...(process.resourcesPath
       ? [join(base, 'app', 'resources'), join(base, 'app.asar.unpacked', 'resources'), base]
       : [base]),
+    ...((process as NodeJS.Process & { defaultApp?: boolean }).defaultApp === true ? [join(process.cwd(), 'resources')] : []),
   ]
   for (const root of roots) {
     const runtimeBin = join(root, RUNTIME_DIRNAME, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -50,13 +56,178 @@ export function resolveDshExec(): DshExec | null {
   return dsh ? { exec: dsh } : null
 }
 
+const JS_ENV_REF_RE = /!!js[ \t]+process\.env\.([A-Za-z_][A-Za-z0-9_]*)[ \t]*(?:(?:#[^\r\n]*)?(?:\r?\n|$))/g
+const DIRECTORY_PICKER_HOST_PLUGINS = new Set([
+  '@deepseek-ai/dsh-host-directory-picker',
+  '@deepseek-ai/dsh-host-directory-picker-auto',
+  '@deepseek-ai/dsh-host-directory-picker-native',
+  '@deepseek-ai/dsh-host-directory-picker-browse',
+])
+
+/**
+ * The shipped web bundle owns one adaptive `directory-picker` row. Older or
+ * custom profiles may add another host implementation, which makes Cordis
+ * register the `directoryPicker` service twice. Repair only when the profile
+ * declares the official web bundle and has not explicitly overridden/disabled
+ * its `directory-picker` row; otherwise leave user configuration untouched.
+ */
+export function repairDirectoryPickerRows(home: string = dshHome(), profile = 'web'): string[] {
+  let profilePackage: { dsh?: { profile?: { bundles?: unknown } } }
+  try {
+    profilePackage = JSON.parse(readFileSync(join(home, 'profiles', profile, 'package.json'), 'utf8'))
+  } catch {
+    return []
+  }
+  const bundles = profilePackage.dsh?.profile?.bundles
+  if (!Array.isArray(bundles) || !bundles.includes('@deepseek-ai/dsh-web-app')) return []
+
+  const valueOf = (pair: unknown): string | undefined => {
+    const p = pair as { value?: unknown } | null
+    const value = p?.value
+    if (value && typeof value === 'object' && 'value' in value) return String((value as { value: unknown }).value)
+    return typeof value === 'string' ? value : undefined
+  }
+  const field = (row: unknown, key: string): string | undefined => {
+    const items = (row as { items?: unknown[] } | null)?.items
+    if (!Array.isArray(items)) return undefined
+    const pair = items.find((candidate) => {
+      const k = (candidate as { key?: { value?: unknown } } | null)?.key?.value
+      return k === key
+    })
+    return valueOf(pair)
+  }
+  type PickerRow = { node: unknown; id?: string; name?: string; disabled?: string }
+  type PatchLayer = { file: string; doc: ReturnType<typeof parseDocument>; entries: unknown[]; rows: PickerRow[] }
+  const layers: PatchLayer[] = []
+  for (const file of [join(home, 'profiles', profile, 'cordis.patch.yml'), join(home, 'cordis.patch.yml')]) {
+    let text: string
+    try {
+      text = readFileSync(file, 'utf8')
+    } catch {
+      continue
+    }
+    let doc: ReturnType<typeof parseDocument>
+    try {
+      doc = parseDocument(text)
+    } catch {
+      continue
+    }
+    if (doc.errors.length > 0) continue
+    const entries = (doc.contents as { items?: unknown[] } | null)?.items
+    if (!Array.isArray(entries)) continue
+    const rows: PickerRow[] = []
+    const collect = (node: unknown): void => {
+      rows.push({ node, id: field(node, 'id'), name: field(node, 'name'), disabled: field(node, 'disabled') })
+    }
+    for (const entry of entries) {
+      const pairs = (entry as { items?: unknown[] } | null)?.items
+      const insert = Array.isArray(pairs)
+        ? pairs.find((candidate) => (candidate as { key?: { value?: unknown } } | null)?.key?.value === 'insert')
+        : undefined
+      const sequence = (insert as { value?: { items?: unknown[] } } | null)?.value?.items
+      if (Array.isArray(sequence)) sequence.forEach(collect)
+      else collect(entry)
+    }
+    layers.push({ file, doc, entries, rows })
+  }
+
+  const allRows = layers.flatMap((layer) => layer.rows)
+  // An explicit row with the official id means the user has intentionally
+  // changed or disabled the shipped provider. Do not guess its desired backend.
+  if (allRows.some((row) => row.id === 'directory-picker' && (row.name !== undefined || row.disabled === 'true'))) return []
+  const candidates = allRows.filter((row) => row.id !== 'directory-picker' && DIRECTORY_PICKER_HOST_PLUGINS.has(row.name ?? ''))
+  if (candidates.length === 0) return []
+  const candidateNodes = new Set(candidates.map((row) => row.node))
+  const repaired: string[] = []
+
+  for (const layer of layers) {
+    const removed: string[] = []
+    const removeFrom = (rows: unknown[]): void => {
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i]
+        if (!candidateNodes.has(row)) continue
+        removed.push(`${field(row, 'id') ?? '<anonymous>'} (${field(row, 'name')})`)
+        rows.splice(i, 1)
+      }
+    }
+    for (let i = layer.entries.length - 1; i >= 0; i--) {
+      const entry = layer.entries[i]
+      const pairs = (entry as { items?: unknown[] } | null)?.items
+      const insert = Array.isArray(pairs)
+        ? pairs.find((candidate) => (candidate as { key?: { value?: unknown } } | null)?.key?.value === 'insert')
+        : undefined
+      const sequence = (insert as { value?: { items?: unknown[] } } | null)?.value?.items
+      if (Array.isArray(sequence)) removeFrom(sequence)
+      else if (candidateNodes.has(entry)) {
+        removed.push(`${field(entry, 'id') ?? '<anonymous>'} (${field(entry, 'name')})`)
+        layer.entries.splice(i, 1)
+      }
+    }
+    if (removed.length === 0) continue
+    try {
+      const backup = atomicWriteWithBackup(layer.file, layer.doc.toString())
+      repaired.push(`${layer.file}: ${removed.join(', ')}${backup ? `；备份 ${backup}` : ''}`)
+    } catch {
+      // A read-only profile should still reach the normal DSH error path.
+    }
+  }
+  return repaired
+}
+
+/**
+ * DSH 的 `!!js process.env.NAME` 在 NAME 不存在时求值为 undefined；
+ * dsh-mcp-client 的字符串 schema 会把这个 undefined 判为非法，进而让整个
+ * `dsh web` 以 code=1 退出。把缺失的直接环境引用补成空字符串只作用于
+ * Harness 子进程，不会修改用户 profile 或父进程环境；MCP 服务器仍会自行
+ * 报告缺少凭据，但不会阻断其他插件和 Web UI 启动。
+ */
+function addMissingProfileEnvRefs(env: NodeJS.ProcessEnv, profile: string | undefined, cwd: string): void {
+  if (!profile) return
+  const patches: string[] = []
+  for (const file of [join(dshHome(), 'profiles', profile, 'cordis.patch.yml'), join(dshHome(), 'cordis.patch.yml')]) {
+    try {
+      patches.push(readFileSync(file, 'utf8'))
+    } catch {
+      /* Optional patch layer. */
+    }
+  }
+  const names = new Set<string>()
+  for (const patch of patches) for (const match of patch.matchAll(JS_ENV_REF_RE)) names.add(match[1])
+  if (names.size === 0) return
+  const keys = Object.keys(env)
+  const normalizeEnvKey = (key: string): string => process.platform === 'win32' ? key.toLowerCase() : key
+  const hasKey = (name: string): boolean => {
+    const present = keys.find((key) => normalizeEnvKey(key) === normalizeEnvKey(name))
+    return present !== undefined && env[present] !== undefined
+  }
+  // DSH applies cwd/.env and then $DSH_HOME/.env only when the inherited
+  // environment does not already define the name. Respect either layer so a
+  // fallback does not mask a token deliberately kept in a profile environment file.
+  const fileKeys = new Set<string>()
+  for (const file of [join(cwd, '.env'), join(dshHome(), '.env')]) {
+    try {
+      for (const key of Object.keys(parseEnv(readFileSync(file, 'utf8')))) fileKeys.add(normalizeEnvKey(key))
+    } catch {
+      /* DSH will report malformed/unreadable .env files itself. */
+    }
+  }
+  for (const name of names) {
+    // Windows environment keys are case-insensitive; do not add a duplicate
+    // key when the inherited environment used a different casing.
+    if (!hasKey(name) && !fileKeys.has(normalizeEnvKey(name))) env[name] = ''
+  }
+}
+
 /**
  * 构造统一 runtime PATH：捆绑 node/bin（node/npm/npx）+ dsh-runtime node_modules/.bin（dsh/pnpm）
  * + 原 PATH。`dsh plugin` 内部 spawnSync("pnpm") 依赖 PATH，npx MCP 也依赖 PATH 中的捆绑 npx；
  * 必须显式传给 Harness 与 Plugin 子进程（仅捆绑 node 存在时）。
+ * `profile` 用于为缺失的 `!!js process.env.NAME` 引用提供非破坏性的空字符串默认值，
+ * `cwd` 用于保留 DSH 分层 `.env` 中的值。
  */
-export function runtimePathEnv(): NodeJS.ProcessEnv {
+export function runtimePathEnv(profile?: string, cwd: string = process.cwd()): NodeJS.ProcessEnv {
   const env = { ...process.env }
+  addMissingProfileEnvRefs(env, profile, cwd)
   const exec = resolveDshExec()
   if (!exec?.node) return env
   const extra = [
@@ -137,8 +308,9 @@ async function waitForHttp(url: string, timeoutMs = 60_000): Promise<boolean> {
 
 /** dsh 启动期致命错误的 stderr 标记（installFailLoud 输出，随后 exit 1） */
 const DSK_FATAL_RE = /dsh: fatal load failure: (.+)/
+const DIRECTORY_PICKER_DUP_RE = /service ["']directoryPicker["'] has been registered/i
 
-/** 启动 dsh web：spawn 独立进程组，解析端口，轮询就绪 */
+/** 启动 dsh web：POSIX 用独立进程组；Windows 由 taskkill /T 管理进程树 */
 export function startHarness(opts: {
   profile?: string
   cwd?: string
@@ -151,15 +323,23 @@ export function startHarness(opts: {
   const exec = resolveDshExec()
   if (!exec) return Promise.reject(new Error('未找到 dsh 可执行文件（请先安装 DeepSeek Harness）'))
   const cwd = opts.cwd ?? homedir()
+  const profile = opts.profile ?? 'web'
+  const repairs = repairDirectoryPickerRows(dshHome(), profile)
+  if (repairs.length > 0) opts.onLog?.(`harness: 已移除重复 DirectoryPicker 配置：${repairs.join(' | ')}`)
   const args = ['web', '--port', String(opts.port ?? 0)]
-  // M1 统一走官方 web profile；port 0 = 由 dsh 自选
+  // M1 统一走官方 web profile；port 0 = 由 dsh 自选。
+  // Windows 的 PATH 回退通常是 dsh.cmd；cmd shim 不能可靠地由 shell:false 直接启动。
   const spawnArgs = exec.node ? [exec.exec, ...args] : args
+  const useWindowsShim = process.platform === 'win32' && !exec.node && /\.(?:cmd|bat)$/i.test(exec.exec)
   const proc = spawn(exec.node ?? exec.exec, spawnArgs, {
     cwd,
-    detached: true,
-    env: runtimePathEnv(),
+    // Windows 的 cmd.exe + pipe 在 detached 模式下不会转发 shim 的 stdout；
+    // taskkill /T 已覆盖整棵树，因此 Windows 不需要 detached。
+    detached: process.platform !== 'win32',
+    env: runtimePathEnv(profile, cwd),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
+    shell: useWindowsShim,
   })
   opts.onSpawn?.(proc)
 
@@ -167,6 +347,7 @@ export function startHarness(opts: {
     let url: string | null = null
     let settled = false
     let polling = false
+    const outputTail: string[] = []
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true
@@ -178,6 +359,8 @@ export function startHarness(opts: {
     const onData = (buf: Buffer): void => {
       for (const line of buf.toString().split('\n')) {
         if (!line.trim()) continue
+        outputTail.push(line)
+        if (outputTail.length > 80) outputTail.shift()
         opts.onLog?.(line)
         // dsh 启动期致命错误：立即失败并携带原因，不等 180s 轮询超时
         const fatal = line.match(DSK_FATAL_RE)
@@ -217,6 +400,10 @@ export function startHarness(opts: {
       if (!settled) {
         settled = true
         clearTimeout(timer)
+        if (outputTail.some((line) => DIRECTORY_PICKER_DUP_RE.test(line))) {
+          reject(new Error(`dsh web 提前退出（code=${code}）：DirectoryPicker 服务重复注册；请删除 profile/home patch 中额外的 dsh-host-directory-picker-native、browse 或 auto 行，仅保留官方 directory-picker auto 行`))
+          return
+        }
         reject(new Error(`dsh web 提前退出（code=${code}）`))
       }
     })
