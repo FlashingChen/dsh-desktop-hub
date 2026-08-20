@@ -106,6 +106,22 @@ async function waitFor(win: BrowserWindow, probe: () => Promise<boolean>, timeou
   return false
 }
 
+/**
+ * `createSkeletonWindow()` starts loading before `wireSmoke()` is attached.
+ * A very fast local-file load can finish in that gap (notably on Windows), so
+ * also handle an already-finished shell without running the callback twice.
+ */
+function onShellDidFinishLoad(win: BrowserWindow, callback: () => void): void {
+  let called = false
+  const run = (): void => {
+    if (called) return
+    called = true
+    callback()
+  }
+  win.webContents.once('did-finish-load', run)
+  if (!win.webContents.isLoading() && win.webContents.getURL().startsWith('file:')) queueMicrotask(run)
+}
+
 export function wireSmoke(ctx: SmokeContext): void {
   const win = ctx.mainWindow()
   if (!win) {
@@ -123,7 +139,7 @@ export function wireSmoke(ctx: SmokeContext): void {
 
   if (!ctx.harnessSmoke) {
     // ---- 骨架冒烟：四 Tab + 数据面板加载（不依赖特定 profile 数据）----
-    win.webContents.once('did-finish-load', () => {
+    onShellDidFinishLoad(win, () => {
       void (async () => {
         const ready = await waitFor(
           win,
@@ -212,7 +228,7 @@ export function wireSmoke(ctx: SmokeContext): void {
       console.log(`frame loaded: ${frameURL}`)
     }
   })
-  win.webContents.once('did-finish-load', () => {
+  onShellDidFinishLoad(win, () => {
     void (async () => {
       const mounted = await waitFor(
         win,
