@@ -1382,6 +1382,13 @@ function setHarnessStatusText(status: { state: string; url?: string; code?: numb
   else if (status.state === 'exited') setHarnessMenuOpen(true)
 }
 
+// Browser canonicalizes a loopback origin to a trailing slash, while the Harness
+// process output is slashless. Compare the normalized form to avoid reloading the
+// iframe on every did-frame-navigate/status pair (especially visible in Windows smoke).
+function sameHarnessUrl(left: string, right: string): boolean {
+  return left.replace(/\/+$/, '') === right.replace(/\/+$/, '')
+}
+
 async function mountHarness(): Promise<void> {
   const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
   if (!frame || !api) return
@@ -1451,14 +1458,14 @@ if (api) {
   api.harness.onFrameLoaded((url) => {
     setHarnessStatusText({ state: 'ready', url })
     const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
-    if (frame && frame.src !== url) frame.src = url
+    if (frame && !sameHarnessUrl(frame.src, url)) frame.src = url
   })
   // 窗口先行：收到 ready 时必须把 iframe 挂到新 URL（首次 mount 时 harness 可能未就绪）
   api.harness.onStatus((status) => {
     setHarnessStatusText(status)
     if (status.state === 'ready' && status.url) {
       const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
-      if (frame && frame.src !== status.url) frame.src = status.url
+      if (frame && !sameHarnessUrl(frame.src, status.url)) frame.src = status.url
     }
   })
   document.getElementById('harness-reconnect')?.addEventListener('click', () => void reconnectHarness())
