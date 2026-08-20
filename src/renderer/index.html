@@ -6,7 +6,7 @@
     <title>DSH Desktop Hub</title>
     <style>
       :root {
-        color-scheme: light;
+        color-scheme: light dark;
         --canvas: #f3f5f8;
         --canvas-deep: #edf0f5;
         --surface: #ffffff;
@@ -19,6 +19,7 @@
         --line-strong: #d5dbe5;
         --brand: #4d6bfe;
         --brand-dark: #3957dc;
+        --brand-hover: #3957dc;
         --brand-soft: #edf1ff;
         --brand-wash: #f7f8ff;
         --success: #218b61;
@@ -27,12 +28,71 @@
         --danger-bg: #fff1f3;
         --warn: #9b651d;
         --warn-bg: #fff7e8;
+        --line-hover: #c5ccd8;
+        --tab-hover: #eef1f6;
+        --active-line: #dce3ff;
+        --active-muted: #7488dc;
+        --accent-line: #dfe5ff;
+        --verified-line: #c9ead8;
+        --trust-bg: #f1f3ff;
+        --trust-line: #dce1ff;
+        --trust-ink: #4d5eb0;
+        --env-line: #f0d9a3;
+        --input-surface: #fbfcfe;
+        --frame-surface: #ffffff;
+        --overlay-surface: rgb(255 255 255 / 94%);
+        --overlay-hover: rgb(255 255 255 / 96%);
+        --overlay-badge: rgb(255 255 255 / 72%);
         --shadow-sm: 0 1px 2px rgb(31 41 55 / 4%);
         --shadow-md: 0 12px 30px rgb(31 41 55 / 6%);
         --radius-sm: 8px;
         --radius-md: 14px;
         --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
         --font-code: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+      /* 壳层跟随系统外观；这样 Harness 的深色页面不会再与左侧导航形成强烈反差。 */
+      @media (prefers-color-scheme: dark) {
+        :root {
+          color-scheme: dark;
+          --canvas: #0f1115;
+          --canvas-deep: #0b0d11;
+          --surface: #14161c;
+          --surface-subtle: #191c23;
+          --surface-blue: rgb(57 100 254 / 14%);
+          --ink: #e9ecf1;
+          --ink-soft: #a1a9b7;
+          --ink-faint: #747d8d;
+          --line: rgb(255 255 255 / 8%);
+          --line-strong: rgb(255 255 255 / 14%);
+          --brand: #4d6bfe;
+          --brand-dark: #99c8ff;
+          --brand-hover: #5580ff;
+          --brand-soft: rgb(57 100 254 / 14%);
+          --brand-wash: rgb(255 255 255 / 3.5%);
+          --success: #69db7c;
+          --success-bg: rgb(105 219 124 / 12%);
+          --danger: #ff6b6b;
+          --danger-bg: rgb(255 107 107 / 12%);
+          --warn: #ffa94d;
+          --warn-bg: rgb(255 169 77 / 12%);
+          --line-hover: rgb(255 255 255 / 22%);
+          --tab-hover: rgb(255 255 255 / 6%);
+          --active-line: rgb(77 107 254 / 35%);
+          --active-muted: #99c8ff;
+          --accent-line: rgb(77 107 254 / 28%);
+          --verified-line: rgb(105 219 124 / 28%);
+          --trust-bg: rgb(57 100 254 / 14%);
+          --trust-line: rgb(77 107 254 / 28%);
+          --trust-ink: #a8b9ff;
+          --env-line: #705323;
+          --input-surface: #191c23;
+          --frame-surface: #0f1115;
+          --overlay-surface: rgb(20 22 28 / 94%);
+          --overlay-hover: rgb(20 22 28 / 96%);
+          --overlay-badge: rgb(20 22 28 / 72%);
+          --shadow-sm: 0 1px 2px rgb(0 0 0 / 25%);
+          --shadow-md: 0 12px 30px rgb(0 0 0 / 35%);
+        }
       }
       * { box-sizing: border-box; margin: 0; padding: 0; }
       html, body { height: 100%; }
@@ -59,7 +119,7 @@
         padding: 8px 13px;
         transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
       }
-      button:hover { background: var(--surface-subtle); border-color: #c5ccd8; }
+      button:hover { background: var(--surface-subtle); border-color: var(--line-hover); }
       button:focus-visible, input:focus-visible, textarea:focus-visible {
         outline: 3px solid rgb(77 107 254 / 20%);
         outline-offset: 1px;
@@ -71,7 +131,7 @@
         color: #fff;
         box-shadow: 0 2px 5px rgb(77 107 254 / 18%);
       }
-      button.primary:hover { background: var(--brand-dark); border-color: var(--brand-dark); }
+      button.primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
       button.quiet { background: transparent; border-color: transparent; color: var(--ink-soft); }
       button.quiet:hover { background: var(--brand-soft); border-color: transparent; color: var(--brand-dark); }
       button:disabled { cursor: not-allowed; opacity: 0.5; }
@@ -94,7 +154,7 @@
         min-width: 0;
       }
       .sidebar {
-        background: #f8f9fb;
+        background: var(--surface-subtle);
         border-right: 1px solid var(--line);
         display: flex;
         flex-direction: column;
@@ -136,10 +196,10 @@
         transition: opacity 140ms ease;
         width: 3px;
       }
-      .tab:hover { background: #eef1f6; border-color: transparent; color: var(--ink); }
+      .tab:hover { background: var(--tab-hover); border-color: transparent; color: var(--ink); }
       .tab.active {
         background: var(--brand-soft);
-        border-color: #dce3ff;
+        border-color: var(--active-line);
         color: var(--brand-dark);
       }
       .tab.active::before { opacity: 1; }
@@ -156,7 +216,7 @@
       .tab-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
       .tab-copy > span { font-size: 13px; font-weight: 620; }
       .tab-copy > small { color: var(--ink-faint); font-size: 10px; }
-      .tab.active .tab-copy > small { color: #7488dc; }
+      .tab.active .tab-copy > small { color: var(--active-muted); }
       .sidebar-spacer { flex: 1; min-height: 18px; }
       .sidebar-profile { color: var(--ink-soft); padding: 4px 10px; }
       .sidebar-profile-label {
@@ -259,20 +319,20 @@
         padding: 15px;
         transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
       }
-      .market-card:hover { border-color: #cbd5ff; box-shadow: var(--shadow-md); transform: translateY(-1px); }
+      .market-card:hover { border-color: var(--active-line); box-shadow: var(--shadow-md); transform: translateY(-1px); }
       .market-card-head { align-items: flex-start; display: flex; gap: 10px; justify-content: space-between; }
       .market-card-title { color: var(--ink); font-size: 14px; font-weight: 680; line-height: 1.35; }
       .market-card-author { color: var(--ink-faint); font-size: 10px; margin-top: 4px; }
       .market-verified, .market-trust {
         background: var(--success-bg);
-        border: 1px solid #c9ead8;
+        border: 1px solid var(--verified-line);
         border-radius: 5px;
         color: var(--success);
         flex: none;
         font-size: 10px;
         padding: 3px 6px;
       }
-      .market-trust { background: #f1f3ff; border-color: #dce1ff; color: #4d5eb0; }
+      .market-trust { background: var(--trust-bg); border-color: var(--trust-line); color: var(--trust-ink); }
       .market-card-description { color: var(--ink-soft); font-size: 11px; line-height: 1.55; margin-top: 12px; }
       .market-source-link { color: var(--brand-dark); display: inline-block; font-size: 10px; margin-top: 8px; text-decoration: none; }
       .market-source-link:hover { text-decoration: underline; }
@@ -287,7 +347,7 @@
       .market-card-footer .status { font-size: 11px; min-height: 0; }
       .market-card-footer button { font-size: 11px; min-height: 30px; padding: 6px 10px; }
       .market-permissions { color: var(--warn); display: flex; flex-wrap: wrap; font-size: 10px; gap: 5px; line-height: 1.35; margin-top: 9px; }
-      .market-env-fields { background: var(--surface-subtle); border: 1px solid #f0d9a3; border-radius: 8px; display: grid; gap: 7px; margin-top: 10px; padding: 9px; }
+      .market-env-fields { background: var(--surface-subtle); border: 1px solid var(--env-line); border-radius: 8px; display: grid; gap: 7px; margin-top: 10px; padding: 9px; }
       .market-env-title { color: var(--warn); font-size: 10px; font-weight: 680; line-height: 1.35; }
       .market-env-field { display: grid; gap: 4px; }
       .market-env-field label { color: var(--ink-soft); font-size: 10px; font-weight: 620; }
@@ -321,7 +381,7 @@
       .field-hint { color: var(--ink-faint); font-size: 10px; line-height: 1.45; margin-top: 6px; }
       .install-row, .file-row { align-items: flex-end; display: flex; gap: 9px; }
       .install-row .field, .file-row .field { flex: 1; min-width: 0; }
-      input[type="text"], input[type="url"], input[type="password"], input[type="file"] {
+      input[type="text"], input[type="url"], input[type="password"], input[type="file"], select {
         background: var(--surface-subtle);
         border: 1px solid var(--line-strong);
         border-radius: var(--radius-sm);
@@ -333,6 +393,7 @@
         width: 100%;
       }
       input[type="text"]::placeholder, input[type="url"]::placeholder, input[type="password"]::placeholder, textarea::placeholder { color: var(--ink-faint); }
+      select { outline: none; width: 100%; }
       input[type="file"] { color: var(--ink-soft); padding: 6px 8px; }
       input[type="file"]::file-selector-button {
         background: var(--surface);
@@ -385,7 +446,7 @@
       .row { align-items: center; display: flex; flex-wrap: wrap; gap: 9px; }
       .row + .row { margin-top: 10px; }
       textarea {
-        background: #fbfcfe;
+        background: var(--input-surface);
         border: 1px solid var(--line-strong);
         border-radius: var(--radius-sm);
         color: var(--ink);
@@ -418,7 +479,7 @@
       .notice {
         align-items: flex-start;
         background: var(--brand-wash);
-        border: 1px solid #dfe5ff;
+        border: 1px solid var(--accent-line);
         border-radius: 9px;
         color: var(--ink-soft);
         display: flex;
@@ -463,7 +524,7 @@
       .source-label strong { color: var(--ink); font-weight: 650; }
       .source-label span {
         background: var(--surface-blue);
-        border: 1px solid #dfe5ff;
+        border: 1px solid var(--accent-line);
         border-radius: 5px;
         color: var(--brand-dark);
         font-size: 10px;
@@ -492,6 +553,76 @@
       .skills-actions .row { align-items: flex-end; }
       .skills-actions .row > * { flex: 1; min-width: 0; }
       .skills-actions .row > button { flex: none; }
+      .feedback-mode-switcher {
+        align-items: center;
+        background: var(--surface-subtle);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        display: inline-flex;
+        gap: 3px;
+        margin-bottom: 14px;
+        padding: 3px;
+      }
+      .feedback-mode-switcher button {
+        background: transparent;
+        border-color: transparent;
+        color: var(--ink-soft);
+        font-size: 12px;
+        min-height: 30px;
+        padding: 6px 13px;
+      }
+      .feedback-mode-switcher button.active {
+        background: var(--surface);
+        border-color: var(--line);
+        box-shadow: var(--shadow-sm);
+        color: var(--brand-dark);
+        font-weight: 650;
+      }
+      .feedback-signature-field[hidden] { display: none; }
+      .feedback-privacy {
+        align-items: flex-start;
+        background: var(--surface-blue);
+        border: 1px solid #dfe5ff;
+        border-radius: 9px;
+        color: var(--ink-soft);
+        display: flex;
+        font-size: 11px;
+        gap: 8px;
+        line-height: 1.55;
+        margin-top: 12px;
+        padding: 9px 11px;
+      }
+      .feedback-privacy input { flex: none; margin-top: 3px; }
+      .feedback-diagnostics {
+        background: #202938;
+        border: 1px solid #202938;
+        border-radius: var(--radius-sm);
+        color: #dbe4ff;
+        font-family: var(--font-code);
+        font-size: 11px;
+        line-height: 1.6;
+        max-height: 280px;
+        min-height: 120px;
+        overflow: auto;
+        padding: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .feedback-diagnostics.empty { color: #9da9c6; }
+      .feedback-community {
+        align-items: center;
+        display: flex;
+        gap: 22px;
+      }
+      .feedback-community-copy { flex: 1; min-width: 0; }
+      .feedback-community-copy p { color: var(--ink-soft); font-size: 11px; line-height: 1.6; margin-top: 7px; }
+      .feedback-qr { flex: none; text-align: center; width: 148px; }
+      .feedback-qr img { background: #fff; border: 1px solid var(--line); border-radius: 8px; height: 148px; object-fit: contain; padding: 5px; width: 148px; }
+      .feedback-qr figcaption { color: var(--ink-faint); font-size: 10px; margin-top: 5px; }
+      @media (max-width: 640px) {
+        .feedback-community { align-items: stretch; flex-direction: column; }
+        .feedback-qr { margin: 0 auto; }
+      }
       .harness-wrap {
         background: var(--canvas-deep);
         display: flex;
@@ -502,10 +633,10 @@
         position: relative;
       }
       .panel#panel-harness { background: var(--canvas-deep); overflow: hidden; padding: 0; }
-      #harness-frame { background: #fff; border: 0; flex: 1; min-height: 0; width: 100%; }
+      #harness-frame { background: var(--frame-surface); border: 0; flex: 1; min-height: 0; width: 100%; }
       .harness-fullscreen-toggle {
         align-items: center;
-        background: rgb(255 255 255 / 94%);
+        background: var(--overlay-surface);
         border: 1px solid var(--line-strong);
         border-radius: 9px;
         bottom: 14px;
@@ -520,7 +651,7 @@
         width: 36px;
         z-index: 10;
       }
-      .harness-fullscreen-toggle:hover { background: var(--brand-soft); border-color: #cbd5ff; color: var(--brand-dark); }
+      .harness-fullscreen-toggle:hover { background: var(--brand-soft); border-color: var(--active-line); color: var(--brand-dark); }
       .harness-fullscreen-toggle svg { fill: none; height: 17px; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; width: 17px; }
       .harness-fullscreen-toggle .fullscreen-exit { display: none; }
       /* 状态箭头：缩到 WebView 左侧边缘的极小块（>），点击展开菜单；
@@ -569,7 +700,7 @@
       }
       .harness-badge {
         align-items: center;
-        background: rgb(255 255 255 / 72%);
+        background: var(--overlay-badge);
         border: 1px solid var(--line-strong);
         border-left: 0;
         border-radius: 0 8px 8px 0;
@@ -591,7 +722,7 @@
         stroke-width: 2.2;
         width: 11px;
       }
-      .harness-badge:hover { background: rgb(255 255 255 / 96%); color: var(--ink); }
+      .harness-badge:hover { background: var(--overlay-hover); color: var(--ink); }
       .harness-badge-dot {
         background: var(--ink-faint);
         border-radius: 50%;
@@ -718,6 +849,12 @@
               <svg viewBox="0 0 24 24"><path d="M5 7.5 12 4l7 3.5v9L12 20l-7-3.5z"></path><path d="m5 7.5 7 3.5 7-3.5M12 11v9"></path></svg>
             </span>
             <span class="tab-copy"><span>Skills</span></span>
+          </button>
+          <button class="tab" id="tab-feedback" type="button" data-tab="feedback" role="tab" aria-selected="false" aria-controls="panel-feedback">
+            <span class="tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6a2.5 2.5 0 0 1-2.5 2.5h-5.7L7 19v-4H7.5A2.5 2.5 0 0 1 5 12.5z"></path><path d="M8 8.5h8M8 11.5h5"></path></svg>
+            </span>
+            <span class="tab-copy"><span>反馈</span><small>问题与建议</small></span>
           </button>
         </nav>
         <div class="sidebar-spacer"></div>
@@ -1004,6 +1141,95 @@
                 </div>
               </section>
             </div>
+            </section>
+          </div>
+        </section>
+        <section class="panel" id="panel-feedback" role="tabpanel" aria-labelledby="tab-feedback">
+          <div class="page">
+            <div class="page-header">
+              <div>
+                <div class="eyebrow">Support / Privacy first</div>
+                <h1>反馈</h1>
+                <p class="page-description">反馈会发送到反馈服务，再由 bot 整理到 GitHub Issue。你不需要访问 GitHub；诊断信息也只有在明确勾选后才会随反馈发送。</p>
+              </div>
+            </div>
+            <div class="notice">
+              <span class="notice-mark" aria-hidden="true">i</span>
+              <span>匿名模式不收集署名；署名模式只使用你手填的署名。应用不会打开 GitHub。服务端暂未配置时，仍可复制内容发送到 QQ 群。</span>
+            </div>
+            <div class="feedback-mode-switcher" role="tablist" aria-label="反馈提交方式">
+              <button class="active" id="feedback-mode-anonymous" type="button" data-feedback-mode="anonymous" role="tab" aria-selected="true">匿名 / 不署名</button>
+              <button id="feedback-mode-signed" type="button" data-feedback-mode="signed" role="tab" aria-selected="false">署名提交</button>
+            </div>
+            <div class="two-column">
+              <section class="surface">
+                <div class="surface-head">
+                  <div>
+                    <h2 class="surface-title">写下你的反馈</h2>
+                    <p class="surface-caption">描述越具体，越容易复现和处理。</p>
+                  </div>
+                </div>
+                <div class="surface-body">
+                  <div class="row">
+                    <div class="field" style="flex: 1; min-width: 180px">
+                      <label class="field-label" for="feedback-category">类型</label>
+                      <select id="feedback-category" aria-label="反馈类型">
+                        <option value="bug">问题反馈</option>
+                        <option value="feature">功能建议</option>
+                        <option value="other">其他</option>
+                      </select>
+                    </div>
+                    <div class="field feedback-signature-field" id="feedback-signature-field" style="flex: 1.4; min-width: 220px" hidden>
+                      <label class="field-label" for="feedback-signature">署名</label>
+                      <input id="feedback-signature" type="text" maxlength="80" autocomplete="nickname" placeholder="请输入希望显示的署名" />
+                    </div>
+                  </div>
+                  <div class="field" style="margin-top: 12px">
+                    <label class="field-label" for="feedback-title">标题</label>
+                    <input id="feedback-title" type="text" maxlength="160" placeholder="一句话概括问题或建议" />
+                  </div>
+                  <div class="field" style="margin-top: 12px">
+                    <label class="field-label" for="feedback-body">详细描述</label>
+                    <textarea id="feedback-body" rows="10" maxlength="20000" placeholder="发生了什么？如何复现？你期望的结果是什么？"></textarea>
+                  </div>
+                  <label class="feedback-privacy" for="feedback-include-diagnostics">
+                    <input id="feedback-include-diagnostics" type="checkbox" />
+                    <span>附加诊断信息（不含账号、路径和密钥）。默认不附加，你可以先查看下方内容再决定。</span>
+                  </label>
+                  <div class="surface-actions" style="margin-top: 14px">
+                    <button id="feedback-submit" class="primary" type="button">提交反馈</button>
+                    <button id="feedback-copy-full" type="button">复制完整反馈</button>
+                    <button id="feedback-copy-diagnostics" class="quiet" type="button">复制诊断信息</button>
+                  </div>
+                  <div id="feedback-status" class="status inline-status" aria-live="polite"></div>
+                </div>
+              </section>
+              <section class="surface">
+                <div class="surface-head">
+                  <div>
+                    <h2 class="surface-title">诊断环境信息</h2>
+                    <p class="surface-caption">低敏白名单信息，仅用于定位版本和运行环境问题。</p>
+                  </div>
+                  <button id="feedback-refresh-diagnostics" class="quiet" type="button">刷新</button>
+                </div>
+                <div class="surface-body">
+                  <pre id="feedback-diagnostics" class="feedback-diagnostics empty" aria-live="polite">读取中…</pre>
+                  <p class="field-hint">不会包含用户名、主机名、文件路径、环境变量、API Key、MCP 配置、会话内容或原始日志。</p>
+                </div>
+              </section>
+            </div>
+            <section class="surface">
+              <div class="surface-body feedback-community">
+                <div class="feedback-community-copy">
+                  <h2 class="surface-title">加入交流群</h2>
+                  <p>如果当前网络无法提交反馈，或你想和其他用户交流，可以复制上面的内容后发送到 QQ 群。</p>
+                  <p><strong>群号：1106611027</strong></p>
+                </div>
+                <figure class="feedback-qr">
+                  <img src="community/qq-group.png" alt="dsh-desktop-hub QQ 交流群二维码" />
+                  <figcaption>扫码加入 QQ 群</figcaption>
+                </figure>
+              </div>
             </section>
           </div>
         </section>

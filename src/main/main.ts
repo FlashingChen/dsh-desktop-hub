@@ -1,10 +1,10 @@
 // Electron 主进程：窗口安全边界 + IPC（来源校验）+ harness 生命周期 + 插件/MCP/Skills 管理
 import { type ChildProcess } from 'node:child_process'
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, relative, isAbsolute, basename } from 'node:path'
-import { realpathSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { homedir, release as osRelease } from 'node:os'
 import {
   startHarness,
   resolveDshExec,
@@ -39,6 +39,9 @@ import {
 } from '../core/mcp.js'
 import { scanSkills, createSkill, setInvocation, importSkillFromZip, importSkillFromGitHub, importSkillFromClawHub, type SkillSummary } from '../core/skills.js'
 import { IPC, type PluginOpAction, type HarnessStatus } from '../core/ipc.js'
+import { DIAGNOSTIC_FORMAT_VERSION, formatDiagnostics, type DiagnosticHarnessState } from '../core/diagnostics.js'
+import { normalizeFeedbackInput, toFeedbackPayload } from '../core/feedback.js'
+import { submitFeedback } from '../core/feedback-client.js'
 import { initLog, log } from '../core/log.js'
 import { fetchMarketItems, preflightPluginSpec, type MarketKind } from '../core/market.js'
 import { wireSmoke } from './smoke.js'
@@ -67,6 +70,7 @@ if (process.platform === 'win32') app.setAppUserModelId('com.dshdesktophub.app')
 
 let mainWindow: BrowserWindow | null = null
 let harness: HarnessHandle | null = null
+let lastHarnessStatus: HarnessStatus = { state: 'starting' }
 let restarting = false
 let stoppingHarness = false
 /** 退出标志：将在退出清理期间抑制 harness 自动重启（防关闭竞态 respawn 出孤儿） */
@@ -106,6 +110,62 @@ if (!gotSingleInstanceLock) {
 
 function activeProfile(): DshProfile | null {
   return listProfiles(dshHome()).find((p) => p.name === ACTIVE_PROFILE) ?? null
+}
+
+interface RuntimeManifest {
+  dshVersion?: unknown
+  pnpmVersion?: unknown
+}
+
+function readRuntimeManifest(): RuntimeManifest | null {
+  const base = process.resourcesPath ?? join(process.cwd(), 'resources')
+  const roots = process.resourcesPath
+    ? [join(base, 'app', 'resources'), join(base, 'app.asar.unpacked', 'resources'), base]
+    : [base]
+  for (const root of roots) {
+    const file = join(root, 'runtime-manifest.json')
+    if (!existsSync(file)) continue
+    try {
+      const value = JSON.parse(readFileSync(file, 'utf8')) as unknown
+      if (value && typeof value === 'object') return value as RuntimeManifest
+    } catch {
+      /* optional diagnostic metadata; ignore malformed/missing manifest */
+    }
+  }
+  return null
+}
+
+function diagnosticHarnessState(state: HarnessStatus['state']): DiagnosticHarnessState {
+  return state === 'starting' || state === 'ready' || state === 'exited' || state === 'restarting' ? state : 'unknown'
+}
+
+function buildDiagnosticText(): string {
+  const manifest = readRuntimeManifest()
+  const dshVersion = typeof manifest?.dshVersion === 'string' ? manifest.dshVersion : null
+  const pnpmVersion = typeof manifest?.pnpmVersion === 'string' ? manifest.pnpmVersion : null
+  return formatDiagnostics({
+    formatVersion: DIAGNOSTIC_FORMAT_VERSION,
+    generatedAt: new Date().toISOString(),
+    appVersion: app.getVersion(),
+    packaged: app.isPackaged,
+    profile: ACTIVE_PROFILE,
+    platform: process.platform,
+    osRelease: osRelease(),
+    arch: process.arch,
+    electronVersion: process.versions.electron ?? 'unknown',
+    chromeVersion: process.versions.chrome ?? 'unknown',
+    nodeVersion: process.versions.node ?? 'unknown',
+    dshVersion,
+    pnpmVersion,
+    harnessState: diagnosticHarnessState(lastHarnessStatus.state),
+    harnessExitCode: typeof lastHarnessStatus.code === 'number' ? lastHarnessStatus.code : null,
+  })
+}
+
+const DEFAULT_FEEDBACK_ENDPOINT = 'https://feedback.flashingchen.xyz/v1/feedback'
+
+function feedbackEndpoint(): string {
+  return (process.env.DSH_FEEDBACK_ENDPOINT ?? DEFAULT_FEEDBACK_ENDPOINT).trim()
 }
 
 // ---- IPC 来源校验（P1-2 / P2-9）：只接受壳层主帧，拒绝 harness iframe / 外部页 ----
@@ -243,6 +303,36 @@ function registerIpc(): void {
   ipcMain.handle(IPC.harnessRestart, (event) => {
     assertRendererSender(event)
     return restartHarness()
+  })
+
+  ipcMain.handle(IPC.feedbackDiagnostics, (event) => {
+    assertRendererSender(event)
+    return { ok: true as const, text: buildDiagnosticText() }
+  })
+
+  ipcMain.handle(IPC.feedbackCopy, (event, text: unknown) => {
+    assertRendererSender(event)
+    if (typeof text !== 'string' || !text.trim()) return { ok: false as const, error: '没有可复制的内容' }
+    if (text.length > 64 * 1024) return { ok: false as const, error: '复制内容超过 64KB 上限' }
+    try {
+      clipboard.writeText(text)
+      return { ok: true as const }
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.feedbackSubmit, async (event, input: unknown) => {
+    assertRendererSender(event)
+    const normalized = normalizeFeedbackInput(input)
+    if (!normalized.ok) return { ok: false as const, code: 'invalid_request' as const, message: normalized.error }
+    const payload = toFeedbackPayload(normalized.input, {
+      appVersion: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch,
+      profile: ACTIVE_PROFILE,
+    })
+    return submitFeedback(payload, { endpoint: feedbackEndpoint() })
   })
 
   ipcMain.handle(IPC.pluginsList, (event) => {
@@ -625,7 +715,7 @@ function createSkeletonWindow(): void {
   mainWindow?.webContents.on('did-frame-navigate', (_e, frameURL, _code, _status, isMainFrame) => {
     if (!isMainFrame && harness && frameURL.startsWith(harness.url)) {
       mainWindow?.webContents.send(IPC.harnessFrameLoaded, frameURL)
-      mainWindow?.webContents.send(IPC.harnessStatus, { state: 'ready', url: harness.url } satisfies HarnessStatus)
+      sendHarnessStatus({ state: 'ready', url: harness.url })
     }
   })
 }
@@ -649,6 +739,7 @@ function watchHarness(proc: HarnessHandle['proc']): void {
 }
 
 function sendHarnessStatus(status: HarnessStatus): void {
+  lastHarnessStatus = status
   try {
     shellWebContents()?.send(IPC.harnessStatus, status)
   } catch {

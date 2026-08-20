@@ -28,9 +28,9 @@ test('package.json 提供全部脚本与 devDependencies', () => {
   }
 })
 
-test('渲染层包含四个系统 Tab（Harness/Plugin/MCP/Skills）', () => {
+test('渲染层包含五个系统 Tab（Harness/Plugin/MCP/Skills/Feedback）', () => {
   const html = readFileSync(join(root, 'src/renderer/index.html'), 'utf8')
-  for (const tab of ['harness', 'plugin', 'mcp', 'skills']) {
+  for (const tab of ['harness', 'plugin', 'mcp', 'skills', 'feedback']) {
     assert.ok(html.includes(`data-tab="${tab}"`), `缺少 tab ${tab}`)
     assert.ok(html.includes(`id="panel-${tab}"`), `缺少面板 ${tab}`)
   }
