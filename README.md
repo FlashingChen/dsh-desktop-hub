@@ -101,6 +101,8 @@ Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH �
 
 # 开发者 / Architecture
 
+> 想参与开发？请先阅读 [贡献指南](CONTRIBUTING.md)。
+
 ## 架构
 
 ```
