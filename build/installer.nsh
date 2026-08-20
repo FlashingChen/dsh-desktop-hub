@@ -20,9 +20,32 @@
 
 !include "getProcessInfo.nsh"   ; 定义 customCheckAppRunning 后模板不再包含它（有 include guard，安全）
 
+; assisted 模式默认改用 productName 作为目录名；重设为旧 oneClick 安装器使用的
+; package name，避免全新安装默认路径从 Programs\dsh-desktop-hub 漂移。
+!undef APP_FILENAME
+!define APP_FILENAME "dsh-desktop-hub"
+
 Var /GLOBAL DshCheckRound
 Var /GLOBAL DshSelfName
 Var /GLOBAL DshDummy
+
+; ---- 保持旧版 per-user 语义，同时兼容已有 per-machine 安装 ----
+; 交互安装/卸载：没有真实 HKLM 安装时跳过安装范围页，固定当前用户。
+!macro customInstallMode
+  ${if} $perMachineInstallationFolder == ""
+    StrCpy $isForceCurrentInstall "1"
+  ${endIf}
+!macroend
+
+; 静默安装不会进入安装范围页，需在 initMultiUser 之后同样恢复 per-user；
+; 若机器上确有 HKLM 安装，则保留模板检测到的范围以便正确升级。
+!macro customInit
+  ${if} $perMachineInstallationFolder == ""
+    StrCpy $hasPerMachineInstallation "0"
+    StrCpy $hasPerUserInstallation "1"
+    !insertmacro setInstallModePerUser
+  ${endIf}
+!macroend
 
 ; ---- 查杀：主程序按镜像名（不带用户名过滤）；安装目录下进程按路径前缀 ----
 !macro DSH_KILL_APP_TREE
