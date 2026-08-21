@@ -77,6 +77,8 @@ let restarting = false
 let stoppingHarness = false
 /** 已收到用户退出请求；普通关闭按钮只隐藏到托盘，显式退出时才真正关闭窗口。 */
 let quitRequested = false
+/** Windows 正在关机/重启/注销；此时必须放行窗口 close，不能再隐藏到托盘。 */
+let sessionEnding = false
 /** 退出标志：将在退出清理期间抑制 harness 自动重启（防关闭竞态 respawn 出孤儿） */
 let quitting = false
 let autoRestartTimer: NodeJS.Timeout | null = null
@@ -671,9 +673,10 @@ function currentHarnessOrigin(): string | null {
 
 function resolveTrayIconPath(): string | null {
   // resources/ 会被 electron-builder 一起打进 app；开发模式下 app.getAppPath() 则是仓库根目录。
+  const fileName = process.platform === 'darwin' ? 'trayTemplate.png' : 'tray.png'
   const candidates = [
-    join(app.getAppPath(), 'resources', 'tray.png'),
-    join(process.resourcesPath, 'tray.png'),
+    join(app.getAppPath(), 'resources', fileName),
+    join(process.resourcesPath, fileName),
     join(app.getAppPath(), 'build', 'icon.png'),
   ]
   return candidates.find((path) => existsSync(path)) ?? null
@@ -724,6 +727,7 @@ function createTray(): void {
   if (tray || SMOKE || HARNESS_SMOKE) return
   const iconPath = resolveTrayIconPath()
   const icon = iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty()
+  if (process.platform === 'darwin' && iconPath && basename(iconPath) === 'trayTemplate.png') icon.setTemplateImage(true)
   let nextTray: Tray | null = null
   try {
     nextTray = new Tray(icon)
@@ -783,12 +787,18 @@ function createWindow(url: string): void {
   void mainWindow.loadURL(url)
   mainWindow.on('close', (event) => {
     // 普通点右上角关闭只隐藏窗口，Harness 与后台进程继续运行；托盘菜单「退出」才真正退出。
-    if (SMOKE || HARNESS_SMOKE || quitRequested || !tray) return
+    if (SMOKE || HARNESS_SMOKE || quitRequested || sessionEnding || !tray) return
     event.preventDefault()
     mainWindow?.hide()
   })
+  if (process.platform === 'win32') {
+    mainWindow.on('query-session-end', handleWindowsQuerySessionEnd)
+    mainWindow.on('session-end', handleWindowsSessionEnd)
+  }
   mainWindow.on('show', updateTrayMenu)
   mainWindow.on('hide', updateTrayMenu)
+  mainWindow.on('minimize', updateTrayMenu)
+  mainWindow.on('restore', updateTrayMenu)
   mainWindow.on('closed', () => {
     mainWindow = null
     updateTrayMenu()
@@ -1012,6 +1022,58 @@ app.whenReady().then(async () => {
   })
 })
 
+function releaseExitResources(): void {
+  clearTimeout(autoRestartTimer ?? undefined)
+  autoRestartTimer = null
+  if (!tray) return
+  const currentTray = tray
+  tray = null
+  try {
+    currentTray.destroy()
+  } catch {
+    /* 退出阶段的托盘销毁失败不应阻止进程清理 */
+  }
+}
+
+/** 停止退出时仍在途的 dsh 进程；Windows session-end 也复用同一条清理路径。 */
+async function stopHarnessForExit(): Promise<void> {
+  if (startingProc) {
+    try {
+      await stopTree(startingProc)
+    } catch {
+      /* 已退出 */
+    }
+    startingProc = null
+  }
+  if (harness) await stopHarness()
+}
+
+function currentExitCode(): number {
+  return typeof process.exitCode === 'number' ? process.exitCode : 0
+}
+
+function markWindowsSessionEnding(): void {
+  sessionEnding = true
+  quitRequested = true
+  releaseExitResources()
+}
+
+function handleWindowsQuerySessionEnd(event: { preventDefault: () => void }): void {
+  markWindowsSessionEnding()
+  // query-session-end 是唯一可以在 Windows 关机/重启/注销前争取清理时间的事件。
+  if (!(harness || startingProc) || quitting) return
+  quitting = true
+  event.preventDefault()
+  void stopHarnessForExit()
+    .catch((err) => log(`session-end: Harness 清理失败 —— ${err instanceof Error ? err.message : String(err)}`))
+    .finally(() => app.exit(currentExitCode()))
+}
+
+function handleWindowsSessionEnd(): void {
+  // session-end 无法再阻止系统退出；至少确保任何后续 close 不会被托盘逻辑拦截。
+  markWindowsSessionEnding()
+}
+
 app.on('before-quit', () => {
   // app.quit()（包括应用菜单）会先触发 before-quit，再触发 BrowserWindow close。
   // 记录该状态后，close handler 才会放行真正的窗口关闭。
@@ -1024,31 +1086,19 @@ app.on('window-all-closed', () => {
 })
 
 app.on('will-quit', (e) => {
-  if (tray) {
-    tray.destroy()
-    tray = null
-  }
-  clearTimeout(autoRestartTimer ?? undefined)
-  autoRestartTimer = null
+  releaseExitResources()
   // 启动在途的子进程也要清理（detached 的 dsh web 无主存活会占用 profile 与 watcher）
   if ((harness || startingProc) && !quitting) {
     quitting = true
     e.preventDefault()
-    void (async () => {
-      if (startingProc) {
-        try {
-          await stopTree(startingProc)
-        } catch {
-          /* 已退出 */
-        }
-        startingProc = null
-      }
-      if (harness) await stopHarness()
-      // app.quit() does not guarantee propagation of Node's process.exitCode
-      // through Electron's native quit path. Cleanup is complete now, so use
-      // app.exit() to return the smoke result deterministically.
-      app.exit(typeof process.exitCode === 'number' ? process.exitCode : 0)
-    })()
+    void stopHarnessForExit()
+      .catch((err) => log(`will-quit: Harness 清理失败 —— ${err instanceof Error ? err.message : String(err)}`))
+      .finally(() => {
+        // app.quit() does not guarantee propagation of Node's process.exitCode
+        // through Electron's native quit path. Cleanup is complete now, so use
+        // app.exit() to return the smoke result deterministically.
+        app.exit(currentExitCode())
+      })
   } else if (typeof process.exitCode === 'number' && !quitting) {
     // Skeleton smoke has no Harness child to clean up, but it still needs its
     // assertion result to reach CI instead of being flattened to zero.
