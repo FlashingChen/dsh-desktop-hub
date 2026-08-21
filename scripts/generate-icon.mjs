@@ -27,11 +27,16 @@ const SVG = (color1, color2, whaleBody, whaleTail, nodeColor) => `<!doctype html
       <stop offset="0" stop-color="#ffffff"/>
       <stop offset="1" stop-color="${whaleTail}"/>
     </linearGradient>
+    <clipPath id="icon-clip" clipPathUnits="userSpaceOnUse">
+      <rect x="32" y="32" width="960" height="960" rx="216"/>
+    </clipPath>
   </defs>
 
   <!-- 圆角方块底 -->
   <rect x="32" y="32" width="960" height="960" rx="216" fill="url(#bg)"/>
 
+  <!-- 所有装饰裁切在圆角底内，避免透明图标边缘出现白色溢出 -->
+  <g clip-path="url(#icon-clip)">
   <!-- 顶部高光 -->
   <ellipse cx="330" cy="220" rx="420" ry="260" fill="#ffffff" opacity="0.08"/>
 
@@ -78,6 +83,7 @@ const SVG = (color1, color2, whaleBody, whaleTail, nodeColor) => `<!doctype html
     <circle cx="392" cy="685" r="40" fill="none" stroke="${nodeColor}" stroke-width="10"/>
     <circle cx="632" cy="685" r="40" fill="none" stroke="${nodeColor}" stroke-width="10"/>
   </g>
+  </g>
 </svg>
 </body></html>`
 
@@ -95,15 +101,20 @@ app.whenReady().then(async () => {
     height: 1024,
     show: false,
     useContentSize: true,
+    transparent: true,
+    backgroundColor: '#00000000',
     webPreferences: { offscreen: true, backgroundThrottling: false },
   })
   await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(design))
   await new Promise((r) => setTimeout(r, 800))
-  const image = await win.webContents.capturePage()
+  // Retina runners may capture at 2x; normalize the artifact while preserving
+  // the transparent corners of the rounded-square background.
+  const captured = await win.webContents.capturePage()
+  const image = captured.resize({ width: 1024, height: 1024 })
   const outDir = join(root, 'build')
   mkdirSync(outDir, { recursive: true })
   const out = join(outDir, 'icon.png')
   writeFileSync(out, image.toPNG())
-  console.log(`icon written: ${out} (${image.getSize().width}x${image.getSize().height})`)
+  console.log(`icon written: ${out} (${image.getSize().width}x${image.getSize().height}, alpha corners preserved)`)
   app.exit(0)
 })

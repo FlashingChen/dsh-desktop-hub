@@ -42,6 +42,24 @@ interface PluginOpDone {
   output: string
 }
 
+type UpdateState = 'idle' | 'unsupported' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'not-available' | 'error'
+
+interface UpdateStatus {
+  state: UpdateState
+  currentVersion: string
+  version?: string
+  releaseName?: string
+  releaseDate?: string
+  percent?: number
+  error?: string
+}
+
+interface UpdateActionResult {
+  ok: boolean
+  status: UpdateStatus
+  error?: string
+}
+
 type PluginOpStatus =
   | { state: 'running' }
   | { state: 'done'; done: PluginOpDone }
@@ -123,6 +141,13 @@ interface DesktopApi {
     restart: () => Promise<{ ok: boolean; url?: string; error?: string }>
     onFrameLoaded: (cb: (url: string) => void) => void
     onStatus: (cb: (status: { state: string; url?: string; code?: number | null }) => void) => void
+  }
+  updates: {
+    status: () => Promise<UpdateStatus>
+    check: () => Promise<UpdateActionResult>
+    download: () => Promise<UpdateActionResult>
+    install: () => Promise<UpdateActionResult>
+    onStatus: (cb: (status: UpdateStatus) => void) => void
   }
   plugins: {
     list: () => Promise<PluginListResult>
@@ -1484,6 +1509,143 @@ document.getElementById('feedback-copy-full')?.addEventListener('click', () => v
 document.getElementById('feedback-submit')?.addEventListener('click', () => void submitFeedbackUi())
 setFeedbackMode('anonymous')
 
+// ---- 应用更新：启动自动检查，下载与重启安装由用户确认 ----
+const appUpdateVersion = document.getElementById('app-version')
+const appUpdateBadge = document.getElementById('app-update-badge')
+const appUpdateStatus = document.getElementById('app-update-status')
+const appUpdateCheck = document.getElementById('app-update-check') as HTMLButtonElement | null
+const appUpdateDownload = document.getElementById('app-update-download') as HTMLButtonElement | null
+const appUpdateInstall = document.getElementById('app-update-install') as HTMLButtonElement | null
+let appUpdateInstalling = false
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function updateVersionLabel(version: string | undefined): string {
+  if (!version) return '—'
+  return version.startsWith('v') ? version : `v${version}`
+}
+
+function setUpdateStatus(status: UpdateStatus): void {
+  // quitAndInstall 异步失败时主进程只会推 error 状态，这里复位安装锁，
+  // 避免「重启更新」按钮永久不可点。
+  if (status.state === 'error') appUpdateInstalling = false
+  if (appUpdateVersion) appUpdateVersion.textContent = updateVersionLabel(status.currentVersion)
+  if (!appUpdateStatus) return
+  if (appUpdateBadge) {
+    appUpdateBadge.hidden = status.state !== 'available' && status.state !== 'downloaded'
+    appUpdateBadge.textContent = status.state === 'downloaded' ? '待安装' : '有新版本'
+  }
+  if (appUpdateDownload) appUpdateDownload.hidden = status.state !== 'available'
+  if (appUpdateInstall) {
+    appUpdateInstall.hidden = status.state !== 'downloaded'
+    appUpdateInstall.disabled = appUpdateInstalling
+  }
+  if (appUpdateCheck) {
+    appUpdateCheck.hidden = status.state === 'downloaded'
+    appUpdateCheck.disabled = status.state === 'checking' || status.state === 'downloading' || status.state === 'unsupported'
+    appUpdateCheck.textContent = status.state === 'error' ? '重新检查' : '检查更新'
+  }
+
+  let text = '启动后自动检查'
+  let kind: '' | 'ok' | 'error' | 'warn' = ''
+  switch (status.state) {
+    case 'unsupported':
+      text = status.error ?? '当前版本不支持应用内更新'
+      kind = 'warn'
+      break
+    case 'checking':
+      text = '正在检查更新…'
+      break
+    case 'available':
+      text = `发现新版本 ${updateVersionLabel(status.version)}`
+      kind = 'ok'
+      break
+    case 'downloading':
+      text = `下载更新中… ${Math.round(status.percent ?? 0)}%`
+      break
+    case 'downloaded':
+      text = `${updateVersionLabel(status.version)} 已下载，重启后安装`
+      kind = 'ok'
+      break
+    case 'not-available':
+      text = '当前已是最新版本'
+      kind = 'ok'
+      break
+    case 'error':
+      text = `更新失败：${status.error ?? '未知错误'}`
+      kind = 'error'
+      break
+  }
+  appUpdateStatus.textContent = text
+  appUpdateStatus.className = `sidebar-update-status${kind ? ` ${kind}` : ''}`
+}
+
+async function refreshUpdateStatus(): Promise<void> {
+  if (!api) return
+  try {
+    setUpdateStatus(await api.updates.status())
+  } catch {
+    setUpdateStatus({ state: 'error', currentVersion: 'unknown', error: '更新状态暂时不可用' })
+  }
+}
+
+async function checkForAppUpdate(): Promise<void> {
+  if (!api || !appUpdateCheck) return
+  appUpdateCheck.disabled = true
+  try {
+    const result = await api.updates.check()
+    setUpdateStatus(result.status)
+  } catch (error) {
+    setUpdateStatus({
+      state: 'error',
+      currentVersion: appUpdateVersion?.textContent?.replace(/^v/, '') ?? 'unknown',
+      error: errorText(error),
+    })
+  }
+}
+
+async function downloadAppUpdate(): Promise<void> {
+  if (!api || !appUpdateDownload) return
+  if (!confirm('确认下载新版本？下载完成后可选择重启安装。')) return
+  try {
+    const result = await api.updates.download()
+    setUpdateStatus(result.status)
+  } catch (error) {
+    setUpdateStatus({
+      state: 'error',
+      currentVersion: appUpdateVersion?.textContent?.replace(/^v/, '') ?? 'unknown',
+      error: errorText(error),
+    })
+  }
+}
+
+async function installAppUpdate(): Promise<void> {
+  if (!api || !appUpdateInstall || appUpdateInstalling) return
+  if (!confirm('更新已下载，确认退出并重启安装？')) return
+  appUpdateInstalling = true
+  appUpdateInstall.disabled = true
+  try {
+    const result = await api.updates.install()
+    if (!result.ok) {
+      appUpdateInstalling = false
+      setUpdateStatus(result.status)
+    }
+  } catch (error) {
+    appUpdateInstalling = false
+    setUpdateStatus({
+      state: 'error',
+      currentVersion: appUpdateVersion?.textContent?.replace(/^v/, '') ?? 'unknown',
+      error: errorText(error),
+    })
+  }
+}
+
+appUpdateCheck?.addEventListener('click', () => void checkForAppUpdate())
+appUpdateDownload?.addEventListener('click', () => void downloadAppUpdate())
+appUpdateInstall?.addEventListener('click', () => void installAppUpdate())
+
 // ---- Harness 面板：内嵌官方 Web UI + 折叠式状态徽章（点击展开 已连接/重新连接/重新启动）----
 
 const harnessOverlay = document.querySelector<HTMLElement>('.harness-overlay')
@@ -1635,6 +1797,8 @@ async function reconnectHarness(): Promise<void> {
 }
 
 if (api) {
+  api.updates.onStatus((status) => setUpdateStatus(status))
+  void refreshUpdateStatus()
   api.harness.onFrameLoaded((url) => {
     setHarnessStatusText({ state: 'ready', url })
     const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null

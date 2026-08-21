@@ -7,6 +7,11 @@ const CH = {
   harnessStatus: 'harness:status',
   harnessFrameLoaded: 'harness:frame-loaded',
   harnessRestart: 'harness:restart',
+  updatesStatus: 'updates:status',
+  updatesGetStatus: 'updates:get-status',
+  updatesCheck: 'updates:check',
+  updatesDownload: 'updates:download',
+  updatesInstall: 'updates:install',
   pluginsList: 'plugins:list',
   pluginsActivate: 'plugins:activate',
   pluginsDeactivate: 'plugins:deactivate',
@@ -42,6 +47,24 @@ interface HarnessStatus {
   error?: string
 }
 
+type UpdateState = 'idle' | 'unsupported' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'not-available' | 'error'
+
+interface UpdateStatus {
+  state: UpdateState
+  currentVersion: string
+  version?: string
+  releaseName?: string
+  releaseDate?: string
+  percent?: number
+  error?: string
+}
+
+interface UpdateActionResult {
+  ok: boolean
+  status: UpdateStatus
+  error?: string
+}
+
 interface PluginOpStarted {
   ok: boolean
   token?: string
@@ -69,6 +92,15 @@ contextBridge.exposeInMainWorld('dshDesktop', {
     },
     onStatus: (cb: (status: HarnessStatus) => void): void => {
       ipcRenderer.on(CH.harnessStatus, (_e, status: HarnessStatus) => cb(status))
+    },
+  },
+  updates: {
+    status: (): Promise<UpdateStatus> => ipcRenderer.invoke(CH.updatesGetStatus),
+    check: (): Promise<UpdateActionResult> => ipcRenderer.invoke(CH.updatesCheck),
+    download: (): Promise<UpdateActionResult> => ipcRenderer.invoke(CH.updatesDownload),
+    install: (): Promise<UpdateActionResult> => ipcRenderer.invoke(CH.updatesInstall),
+    onStatus: (cb: (status: UpdateStatus) => void): void => {
+      ipcRenderer.on(CH.updatesStatus, (_e, status: UpdateStatus) => cb(status))
     },
   },
   plugins: {

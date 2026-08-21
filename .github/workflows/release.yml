@@ -50,9 +50,10 @@ jobs:
       - name: Bundle runtime (Node + DSH, darwin)
         run: node scripts/bundle-runtime.mjs
 
-      - name: Package DMG
+      - name: Package macOS installers
+        # DMG 给首次安装；正式签名后 zip + blockmap 供 electron-updater 下载更新。
         # 显式 arch 与 runner 架构解耦（CLI 平台参数会覆盖 yml 的 arch 配置）
-        run: npx electron-builder --mac dmg --arm64 --publish never
+        run: npx electron-builder --mac dmg zip --arm64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
@@ -60,7 +61,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" release/*.dmg release/*.dmg.blockmap release/latest-mac.yml \
+          gh release upload "$GITHUB_REF_NAME" release/*.dmg release/*.dmg.blockmap release/*.zip release/*.zip.blockmap release/latest-mac.yml \
             --clobber --repo "$GITHUB_REPOSITORY"
 
   # 2b) Windows（NSIS 在 Windows runner 上构建）——与 macOS 并行

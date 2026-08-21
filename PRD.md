@@ -267,7 +267,7 @@ dsh plugin --profile <name> update
 | **MCP** | JSON → YAML 转换器 + 服务器管理 | 粘贴 Claude Code / Cursor 风格 JSON → 转换预览（含警告：`type: sse` 仅按 HTTP 处理、非法 serverName 跳过）→ 确认后写入 profile「web」的 `cordis.patch.yml`（**写入前自动 `.bak-<ts>` 备份**，原子写，官方 HMR 热生效）；市场条目声明环境变量时，在安装卡片先填写并写入该 MCP 行，用户无需自行设置系统环境；显示现有服务器数 |
 | **Skills** | skills 目录管理 | 按 DSH rank 规则扫描（用户 `~/.dsh/skills` / `~/.agents/skills` + `$DSH_BUNDLED_SKILL_DIR` 存在时的随包根，rank 400/500/600）；列表按来源标注，同名低 rank 生效、高 rank 标「被遮蔽」；可见性切换仅对用户级生效（项目/自定义/随包只读展示）；**新建**（kebab-case 名称校验 + 描述 + 正文表单，落盘 `~/.dsh/skills/<name>/SKILL.md`）；模型可见 / 用户可见切换（写 frontmatter `disable-model-invocation` / `user-invocable`），改动即时生效 |
 | **反馈** | 匿名/署名反馈、低敏诊断、复制和 QQ 群 | 通过配置的 HTTPS feedback API 提交，不打开 GitHub；服务端由私有 Cloudflare Worker + GitHub Bot 异步创建 Issue；服务端未配置或网络失败时复制内容仍可用 |
-| **Settings（壳级）** | API Key、模型、profile、更新 | 本期未实现（预留；API Key/模型配置复用官方 Web UI 内能力） |
+| **Settings（壳级）** | API Key、模型、profile、更新 | 完整 Settings 仍预留；更新入口已在侧边栏实现（Windows 发布版自动检查 GitHub Releases，确认后下载/重启安装；未签名 macOS 明确回退手动 DMG）；API Key/模型配置复用官方 Web UI |
 | **其他系统（占位）** | 预留入口 | 本期未实现 |
 
 UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），五个系统 Tab 与官方会话界面并列切换。
@@ -347,8 +347,9 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），五�
 | M5 桌面整合与打包 | 五 Tab 主窗口整合（Harness iframe 内嵌官方 Web UI）+ electron-builder 出 DMG | ✅ 已完成：默认模式＝启动 harness + 五 Tab 壳；`release/DSH-Desktop-Hub-0.1.0-arm64.dmg` 产物存在；打包 app 在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）下用捆绑运行时启动，HTTP 200；TERM 退出无孤儿 |
 | M6 扩展中心 MVP | Plugin / MCP / Skills 三类市场 + 在线目录搜索 + 精选安装链路 | ✅ 已完成：DSH Plugin Market / Awesome DSH Plugin / 官方 MCP Registry / DSH MCP Market / ClawHub / SkillsMP 接入，来源等级与权限展示，插件 CLI 安装，MCP patch 合并写入，Skills GitHub / ClawHub / 模板安装；账号/评论/社区提交未纳入本期 |
 | M7 反馈与社区入口 | 第五个反馈 Tab + 低敏诊断/复制 + 私有 Cloudflare Worker 接收 + GitHub Bot Issue | 🚧 客户端与 Cloudflare Worker 私有工程已实现；正式 endpoint、Cloudflare 资源和 GitHub App 凭据需部署配置后启用；未配置时不伪造提交成功 |
+| M8 应用更新与图标 | GitHub Releases 更新检查/下载/安装 + 透明圆角图标 | ✅ 已完成：Windows 发布版启动后自动检查，侧边栏提供手动检查、下载与重启安装；未签名 macOS 自动回退手动 DMG；图标透明角落并裁切装饰溢出 |
 
-> 后续演进（未在本期范围）：Settings Tab（API Key/模型/更新）、profile 切换、更细粒度的插件构建授权向导、MCP/Skills 文件导入、Windows/Linux 打包、自动更新 —— 详见 plan.md「下一步」。
+> 后续演进（未在本期范围）：完整 Settings Tab（API Key/模型/profile）、profile 切换、更细粒度的插件构建授权向导、MCP/Skills 文件导入、Linux 打包 —— 详见 plan.md「下一步」。
 
 ---
 
@@ -359,7 +360,7 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），五�
 3. **插件生态安全**：第三方插件执行本机代码。→ UI 授权流程 + 安装前展示来源/commit 锁定。
 4. **MCP JSON 格式多样性**：Claude Code / Cursor / mcporter 字段有差异（`url` vs `baseUrl`、`type: sse` 等）。→ 探测器 + 未知字段保留警告。
 5. **Skill 管理粒度**：官方无「启停」概念，只能靠 frontmatter 策略（`disable-model-invocation`/`user-invocable`）与文件移除表达。→ UI 语义需明确为「模型可见/用户可见/隐藏」三态。
-6. **重启体验**：bundle 安装/移除必须重启 harness，会打断会话。→ 变更前明确提示 + 一键重启 + 会话持久化（官方会话存 `$DSH_HOME/sessions`，重启可恢复）。
+6. **重启体验**：bundle 安装/移除和应用更新都会重启进程，会打断当前窗口。→ 变更前明确提示；更新由用户确认后安装，Harness 会话仍由 `$DSH_HOME/sessions` 持久化。
 
 ---
 

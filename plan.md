@@ -51,6 +51,6 @@
 - **Settings Tab（壳级）**：API Key / 模型 / profile / 更新入口（复用官方 Web UI 设置能力 + 壳级项，PRD §3.3）。
 - **扩展中心增强**：签名远程 registry、插件详情/依赖图、安装回滚与一键重启；MCP 连接测试与凭据管理；Skills 正文编辑与项目级安装。
 - **插件安全增强**：当前会解析 pnpm 的 ignored builds / Git prepare 请求，逐包再次确认后才写入 `allowBuilds` 并重试；后续补充更细粒度的依赖权限展示。
-- **打包矩阵**：Windows（NSIS）与 Linux（AppImage）；应用图标；自动更新（electron-updater 或自建版本服务）。
+- **打包矩阵**：Windows（NSIS）与 Linux（AppImage）；Linux 目标与签名仍待补齐。应用更新已用 electron-updater + GitHub Releases 落地，应用图标已改为透明圆角 PNG。
 - **稳定性**：单实例锁；渲染崩溃自愈；`dsh web` 意外退出后的重连/重启策略。
 

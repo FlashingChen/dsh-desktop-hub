@@ -6,6 +6,11 @@ export const IPC = {
   harnessStatus: 'harness:status',
   harnessFrameLoaded: 'harness:frame-loaded',
   harnessRestart: 'harness:restart',
+  updatesStatus: 'updates:status',
+  updatesGetStatus: 'updates:get-status',
+  updatesCheck: 'updates:check',
+  updatesDownload: 'updates:download',
+  updatesInstall: 'updates:install',
   pluginsList: 'plugins:list',
   pluginsActivate: 'plugins:activate',
   pluginsDeactivate: 'plugins:deactivate',
@@ -32,6 +37,24 @@ export const IPC = {
   feedbackCopy: 'feedback:copy',
   feedbackSubmit: 'feedback:submit',
 } as const
+
+export type UpdateState = 'idle' | 'unsupported' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'not-available' | 'error'
+
+export interface UpdateStatus {
+  state: UpdateState
+  currentVersion: string
+  version?: string
+  releaseName?: string
+  releaseDate?: string
+  percent?: number
+  error?: string
+}
+
+export interface UpdateActionResult {
+  ok: boolean
+  status: UpdateStatus
+  error?: string
+}
 
 export type PluginOpAction = 'add' | 'remove' | 'update'
 
