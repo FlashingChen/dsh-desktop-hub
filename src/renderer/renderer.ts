@@ -62,6 +62,7 @@ interface MarketBaseItem {
   permissions: string[]
   source?: string
   sourceUrl?: string
+  githubStars?: number
   popularity?: number
   trust?: 'bundled' | 'official' | 'curated' | 'community' | 'unreviewed'
 }
@@ -669,6 +670,38 @@ function appendMarketText(parent: HTMLElement, className: string, text: string):
   return node
 }
 
+function createMarketLink(url: string | undefined, className: string, text: string, title?: string): HTMLAnchorElement | null {
+  if (!url || !/^https?:\/\//i.test(url)) return null
+  const link = document.createElement('a')
+  link.className = className
+  link.href = url
+  link.target = '_blank'
+  link.rel = 'noreferrer noopener'
+  if (title) link.title = title
+  link.textContent = text
+  return link
+}
+
+const marketNumberFormatter = new Intl.NumberFormat('zh-CN')
+const GITHUB_REPOSITORY_URL = /^https:\/\/(?:www\.)?github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/|$)/i
+
+function marketGithubUrl(item: MarketItem): string | undefined {
+  const url = item.kind === 'plugin'
+    ? item.sourceUrl
+    : item.kind === 'skill' && item.install.type === 'github'
+      ? item.install.url
+      : undefined
+  return url && GITHUB_REPOSITORY_URL.test(url) ? url : undefined
+}
+
+function appendMarketGithubStars(parent: HTMLElement, item: MarketItem): void {
+  if (item.kind === 'mcp' || item.githubStars === undefined) return
+  const label = `GitHub ★ ${marketNumberFormatter.format(item.githubStars)}`
+  const link = createMarketLink(marketGithubUrl(item), 'market-github-stars', label, '查看 GitHub 仓库')
+  if (link) parent.appendChild(link)
+  else appendMarketText(parent, 'market-github-stars', label)
+}
+
 function createMarketCard(item: MarketItem): HTMLElement {
   const card = document.createElement('article')
   card.className = 'market-card'
@@ -692,20 +725,16 @@ function createMarketCard(item: MarketItem): HTMLElement {
   card.appendChild(head)
 
   appendMarketText(card, 'market-card-description', item.description)
-  if (item.sourceUrl && /^https?:\/\//i.test(item.sourceUrl)) {
-    const sourceLink = document.createElement('a')
-    sourceLink.className = 'market-source-link'
-    sourceLink.href = item.sourceUrl
-    sourceLink.target = '_blank'
-    sourceLink.rel = 'noreferrer noopener'
-    sourceLink.textContent = '查看来源 ↗'
-    card.appendChild(sourceLink)
-  }
+  const sourceLink = createMarketLink(item.sourceUrl, 'market-source-link', '查看来源 ↗')
+  if (sourceLink) card.appendChild(sourceLink)
   const meta = document.createElement('div')
   meta.className = 'market-card-meta'
   appendMarketText(meta, '', item.category)
   if (item.source) appendMarketText(meta, '', item.source)
-  if (typeof item.popularity === 'number' && item.popularity > 0) appendMarketText(meta, '', `热度 ${Math.round(item.popularity)}`)
+  appendMarketGithubStars(meta, item)
+  if (typeof item.popularity === 'number' && item.popularity > 0) {
+    appendMarketText(meta, '', `热度 ${Math.round(item.popularity)}`)
+  }
   item.tags.slice(0, 4).forEach((tag) => appendMarketText(meta, '', `#${tag}`))
   card.appendChild(meta)
 
