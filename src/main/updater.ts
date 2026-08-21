@@ -142,9 +142,9 @@ export function createUpdater(): UpdaterController {
       log(`updater: 新版本 ${info.version} 已下载`)
     })
     autoUpdater.on('error', (error) => {
-      // quitAndInstall 失败时允许用户从「重启更新」再次尝试；检查/下载错误
-      // 则不影响当前已下载状态的正常展示。
-      if (installRequested) installRequested = false
+      // 仅在「已下载待安装」状态下复位安装锁（quitAndInstall 异步失败）；
+      // 安装等待期无关的定时检查错误不应重新放开双重点击。
+      if (installRequested && currentStatus.state === 'downloaded') installRequested = false
       const message = errorText(error)
       publish('error', {
         ...(pendingUpdate ? infoFields(pendingUpdate) : {}),

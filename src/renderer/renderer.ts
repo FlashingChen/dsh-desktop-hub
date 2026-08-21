@@ -1517,9 +1517,14 @@ const appUpdateCheck = document.getElementById('app-update-check') as HTMLButton
 const appUpdateDownload = document.getElementById('app-update-download') as HTMLButtonElement | null
 const appUpdateInstall = document.getElementById('app-update-install') as HTMLButtonElement | null
 let appUpdateInstalling = false
+let lastUpdateStatus: UpdateStatus | null = null
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function lastKnownVersion(): string {
+  return lastUpdateStatus?.currentVersion ?? 'unknown'
 }
 
 function updateVersionLabel(version: string | undefined): string {
@@ -1531,13 +1536,17 @@ function setUpdateStatus(status: UpdateStatus): void {
   // quitAndInstall 异步失败时主进程只会推 error 状态，这里复位安装锁，
   // 避免「重启更新」按钮永久不可点。
   if (status.state === 'error') appUpdateInstalling = false
+  lastUpdateStatus = status
   if (appUpdateVersion) appUpdateVersion.textContent = updateVersionLabel(status.currentVersion)
   if (!appUpdateStatus) return
   if (appUpdateBadge) {
     appUpdateBadge.hidden = status.state !== 'available' && status.state !== 'downloaded'
     appUpdateBadge.textContent = status.state === 'downloaded' ? '待安装' : '有新版本'
   }
-  if (appUpdateDownload) appUpdateDownload.hidden = status.state !== 'available'
+  if (appUpdateDownload) {
+    // 下载失败后新版本信息仍在：保留下载按钮，免去先重新检查才能重试。
+    appUpdateDownload.hidden = status.state !== 'available' && !(status.state === 'error' && status.version)
+  }
   if (appUpdateInstall) {
     appUpdateInstall.hidden = status.state !== 'downloaded'
     appUpdateInstall.disabled = appUpdateInstalling
@@ -1600,7 +1609,7 @@ async function checkForAppUpdate(): Promise<void> {
   } catch (error) {
     setUpdateStatus({
       state: 'error',
-      currentVersion: appUpdateVersion?.textContent?.replace(/^v/, '') ?? 'unknown',
+      currentVersion: lastKnownVersion(),
       error: errorText(error),
     })
   }
@@ -1615,7 +1624,7 @@ async function downloadAppUpdate(): Promise<void> {
   } catch (error) {
     setUpdateStatus({
       state: 'error',
-      currentVersion: appUpdateVersion?.textContent?.replace(/^v/, '') ?? 'unknown',
+      currentVersion: lastKnownVersion(),
       error: errorText(error),
     })
   }
@@ -1636,7 +1645,7 @@ async function installAppUpdate(): Promise<void> {
     appUpdateInstalling = false
     setUpdateStatus({
       state: 'error',
-      currentVersion: appUpdateVersion?.textContent?.replace(/^v/, '') ?? 'unknown',
+      currentVersion: lastKnownVersion(),
       error: errorText(error),
     })
   }
