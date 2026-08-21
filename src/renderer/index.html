@@ -228,6 +228,28 @@
         text-transform: uppercase;
       }
       .sidebar-profile strong { color: var(--ink); display: block; font-size: 13px; margin-top: 3px; }
+      .sidebar-update {
+        border-top: 1px solid var(--line);
+        margin-top: 8px;
+        padding: 12px 10px 8px;
+      }
+      .sidebar-update-head { align-items: center; display: flex; gap: 6px; margin-top: 4px; }
+      .sidebar-update-head strong { color: var(--ink); font-size: 13px; font-weight: 680; }
+      .sidebar-update-badge {
+        background: var(--success-bg);
+        border: 1px solid var(--verified-line);
+        border-radius: 5px;
+        color: var(--success);
+        font-size: 9px;
+        padding: 2px 5px;
+      }
+      .sidebar-update-badge[hidden] { display: none; }
+      .sidebar-update-status { color: var(--ink-faint); font-size: 10px; line-height: 1.45; margin-top: 5px; overflow-wrap: anywhere; }
+      .sidebar-update-status.ok { color: var(--success); }
+      .sidebar-update-status.warn { color: var(--warn); }
+      .sidebar-update-status.error { color: var(--danger); }
+      .sidebar-update-actions { display: flex; gap: 5px; margin-top: 8px; }
+      .sidebar-update-actions button { flex: 1; font-size: 10px; min-height: 28px; padding: 5px 6px; }
       main { background: var(--canvas); min-height: 0; min-width: 0; overflow: hidden; }
       .panel { display: none; height: 100%; min-height: 0; overflow: auto; padding: 26px clamp(20px, 3.5vw, 48px) 36px; }
       .panel.active { display: block; }
@@ -799,7 +821,7 @@
       @media (max-width: 900px) {
         .app-shell { grid-template-columns: 74px minmax(0, 1fr); }
         .sidebar { padding-left: 10px; padding-right: 10px; }
-        .sidebar-label, .tab-copy, .sidebar-profile { display: none; }
+        .sidebar-label, .tab-copy, .sidebar-profile, .sidebar-update { display: none; }
         .tab { justify-content: center; padding: 7px; }
         .tab::before { left: -10px; }
         .two-column { grid-template-columns: 1fr; }
@@ -860,6 +882,19 @@
           </button>
         </nav>
         <div class="sidebar-spacer"></div>
+        <section class="sidebar-update" id="app-update" aria-label="应用更新">
+          <span class="sidebar-profile-label">Application</span>
+          <div class="sidebar-update-head">
+            <strong id="app-version">v—</strong>
+            <span class="sidebar-update-badge" id="app-update-badge" hidden>有新版本</span>
+          </div>
+          <p class="sidebar-update-status" id="app-update-status" aria-live="polite">启动后自动检查</p>
+          <div class="sidebar-update-actions">
+            <button id="app-update-check" type="button">检查更新</button>
+            <button id="app-update-download" class="primary" type="button" hidden>下载更新</button>
+            <button id="app-update-install" class="primary" type="button" hidden>重启更新</button>
+          </div>
+        </section>
         <div class="sidebar-profile">
           <span class="sidebar-profile-label">Profile</span>
           <strong>web</strong>

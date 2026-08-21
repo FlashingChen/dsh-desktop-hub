@@ -11,11 +11,20 @@ files:
   - '!**/*.map'
 # asar: false —— 去掉 app.asar.unpacked 层（-29 字符），NSIS 安装路径深度彻底低于 260 上限
 asar: false
+publish:
+  provider: github
+  owner: FlashingChen
+  repo: dsh-desktop-hub
 mac:
   category: public.app-category.developer-tools
   icon: build/icon.png
+  # 与 latest-mac.yml 中的安全文件名保持一致；默认 ProductName 含空格会导致更新 404。
+  artifactName: DSH-Desktop-Hub-${version}-${arch}-mac.${ext}
   target:
     - target: dmg
+      arch: [arm64]
+    # DMG 用于首次下载安装；正式签名后 zip 才作为 electron-updater 的 macOS 更新载荷。
+    - target: zip
       arch: [arm64]
   identity: null
 dmg:

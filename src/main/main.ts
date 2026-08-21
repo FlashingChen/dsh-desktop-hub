@@ -47,6 +47,7 @@ import { fetchMarketItems, preflightPluginSpec, type MarketKind } from '../core/
 import { getTrayWindowAction } from '../core/tray.js'
 import { wireSmoke } from './smoke.js'
 import { createPermissionHandlers } from './permissions.js'
+import { createUpdater } from './updater.js'
 
 const APP_NAME = 'DSH Desktop Hub'
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -191,6 +192,26 @@ function shellWebContents(): WebContents | null {
   return null
 }
 
+// ---- 应用更新：启动后自动检查，下载/安装必须由用户确认 ----
+const updater = createUpdater()
+const UPDATE_CHECK_DELAY_MS = 8_000
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60_000
+let updateInitialTimer: NodeJS.Timeout | null = null
+let updateInterval: NodeJS.Timeout | null = null
+
+function scheduleUpdateChecks(): void {
+  if (!app.isPackaged) return
+  clearTimeout(updateInitialTimer ?? undefined)
+  clearInterval(updateInterval ?? undefined)
+  updateInitialTimer = setTimeout(() => {
+    updateInitialTimer = null
+    void updater.check()
+  }, UPDATE_CHECK_DELAY_MS)
+  updateInitialTimer.unref?.()
+  updateInterval = setInterval(() => void updater.check(), UPDATE_CHECK_INTERVAL_MS)
+  updateInterval.unref?.()
+}
+
 // ---- profile 写操作串行化：插件 patch 与 MCP patch 都落在同一文件上（P1-5）----
 let mutationChain: Promise<unknown> = Promise.resolve()
 function serializeMutation<T>(task: () => Promise<T> | T): Promise<T> {
@@ -301,6 +322,26 @@ function resolveScannedSkill(name: string, source: SkillSummary['source']): Skil
 
 // ---- IPC 注册 ----
 function registerIpc(): void {
+  ipcMain.handle(IPC.updatesGetStatus, (event) => {
+    assertRendererSender(event)
+    return updater.status()
+  })
+
+  ipcMain.handle(IPC.updatesCheck, (event) => {
+    assertRendererSender(event)
+    return updater.check()
+  })
+
+  ipcMain.handle(IPC.updatesDownload, (event) => {
+    assertRendererSender(event)
+    return updater.download()
+  })
+
+  ipcMain.handle(IPC.updatesInstall, (event) => {
+    assertRendererSender(event)
+    return updater.install()
+  })
+
   ipcMain.handle(IPC.harnessUrl, (event) => {
     assertRendererSender(event)
     return harness?.url ?? null
@@ -994,6 +1035,7 @@ app.on('second-instance', () => {
 
 app.whenReady().then(async () => {
   registerIpc()
+  updater.setup((status) => sendPluginEvent(IPC.updatesStatus, status))
   if (SMOKE) {
     createSkeletonWindow()
     wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: false })
@@ -1017,6 +1059,7 @@ app.whenReady().then(async () => {
   createTray()
   createSkeletonWindow()
   startHarnessBackground()
+  scheduleUpdateChecks()
   app.on('activate', () => {
     showMainWindow()
   })
@@ -1087,6 +1130,10 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', (e) => {
   releaseExitResources()
+  clearTimeout(updateInitialTimer ?? undefined)
+  updateInitialTimer = null
+  clearInterval(updateInterval ?? undefined)
+  updateInterval = null
   // 启动在途的子进程也要清理（detached 的 dsh web 无主存活会占用 profile 与 watcher）
   if ((harness || startingProc) && !quitting) {
     quitting = true
