@@ -1,11 +1,13 @@
 // 扩展市场目录：三类条目契约与安装载荷完整性
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const { listMarketItems, findMarketItem } = await import(pathToFileURL(join(root, 'dist', 'core', 'market.js')).href)
+const { listMarketItems, findMarketItem, fetchMarketItems } = await import(pathToFileURL(join(root, 'dist', 'core', 'market.js')).href)
 
 test('市场目录包含 plugin / mcp / skill 三类条目且 id 唯一', () => {
   const all = listMarketItems()
@@ -49,5 +51,45 @@ test('Skills 市场条目可离线生成有效模板', () => {
     assert.match(item.install.name, /^[a-z0-9]+(?:-[a-z0-9]+)*$/)
     assert.ok(item.install.description)
     assert.ok(item.install.body)
+  }
+})
+
+test('schemaVersion 1 的旧市场缓存将 GitHub stars 从 popularity 迁移出来', async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), 'dsh-market-cache-'))
+  const cache = {
+    schemaVersion: 1,
+    kind: 'plugin',
+    fetchedAt: Date.now(),
+    items: [{
+      id: 'legacy-plugin',
+      kind: 'plugin',
+      name: 'Legacy Plugin',
+      description: 'legacy',
+      author: 'owner',
+      version: 'GitHub',
+      category: 'community',
+      tags: [],
+      verified: false,
+      permissions: [],
+      source: 'DSH Plugin Market · curated',
+      sourceUrl: 'https://github.com/owner/repo',
+      popularity: 42,
+      spec: 'github:owner/repo',
+      packageName: 'repo',
+    }],
+  }
+  await writeFile(join(cacheDir, 'market-plugin.json'), JSON.stringify(cache), 'utf8')
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => { throw new Error('offline') }
+  try {
+    const result = await fetchMarketItems('plugin', '', { cacheDir })
+    const item = result.items.find((candidate) => candidate.id === 'legacy-plugin')
+    assert.equal(result.online, false)
+    assert.equal(result.cached, true)
+    assert.equal(item?.githubStars, 42)
+    assert.equal(item?.popularity, undefined)
+  } finally {
+    globalThis.fetch = originalFetch
+    await rm(cacheDir, { recursive: true, force: true })
   }
 })

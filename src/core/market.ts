@@ -22,6 +22,9 @@ export interface MarketBaseItem {
   /** 目录来源，例如「随包精选」「SkillsMP」「MCP Registry」「npm」 */
   source?: string
   sourceUrl?: string
+  /** 对应 GitHub 仓库的 star 数；仅在上游明确提供 GitHub 数据时设置。 */
+  githubStars?: number
+  /** 与 GitHub stars 无关的通用热度指标，例如 ClawHub 下载量。 */
   popularity?: number
   /** 来源级信任标签，不等同于安全审计；第三方条目仍需用户确认。 */
   trust?: MarketTrust
@@ -274,6 +277,14 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return isNonNegativeInteger(value) ? value : undefined
+}
+
 function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
 }
@@ -388,7 +399,7 @@ function mapDshMarketPlugin(raw: unknown, categories: JsonRecord | null): Plugin
   const category = stringValue(categoryObject?.zh) ?? categoryKey
   const descriptionObject = record(plugin?.description)
   const description = stringValue(descriptionObject?.zh) ?? stringValue(descriptionObject?.en) ?? '来自 DSH Plugin Market 的社区插件。'
-  const stars = Number(plugin?.stars ?? 0)
+  const githubStars = nonNegativeInteger(plugin?.stars)
   return {
     id: `dsh-market-plugin-${hashText(sourceUrl)}`,
     kind: 'plugin',
@@ -404,7 +415,7 @@ function mapDshMarketPlugin(raw: unknown, categories: JsonRecord | null): Plugin
     source: 'DSH Plugin Market · curated',
     // 安装来源链接必须指向真实 GitHub/npm source，而不是上游目录详情页。
     sourceUrl,
-    popularity: Number.isFinite(stars) ? stars : undefined,
+    githubStars,
     spec: install.spec,
     packageName: install.packageName,
   }
@@ -722,7 +733,7 @@ async function fetchSkillsMp(query: string): Promise<MarketItem[]> {
     const githubUrl = stringValue(skill?.githubUrl)
     const name = stringValue(skill?.name)
     if (!githubUrl || !name) return null
-    const stars = Number(skill?.stars ?? 0)
+    const githubStars = nonNegativeInteger(skill?.stars)
     const language = stringValue(skill?.contentLanguage)
     return {
       id: `skillsmp-${stringValue(skill?.id) ?? hashText(githubUrl)}`,
@@ -738,7 +749,7 @@ async function fetchSkillsMp(query: string): Promise<MarketItem[]> {
       permissions: ['写入用户级 ~/.dsh/skills', '从 GitHub 下载 skill 文件'],
       source: 'SkillsMP · GitHub source',
       sourceUrl: stringValue(skill?.skillUrl) ?? githubUrl,
-      popularity: stars,
+      githubStars,
       install: { type: 'github', url: githubUrl, name },
     }
   }).filter((item): item is SkillMarketItem => item !== null)
@@ -810,6 +821,7 @@ function isMarketItem(value: unknown): value is MarketItem {
   if (!item || typeof item.id !== 'string' || typeof item.kind !== 'string' || typeof item.name !== 'string') return false
   if (typeof item.description !== 'string' || typeof item.author !== 'string' || typeof item.version !== 'string') return false
   if (typeof item.category !== 'string' || !isStringArray(item.tags) || typeof item.verified !== 'boolean' || !isStringArray(item.permissions)) return false
+  if (item.githubStars !== undefined && !isNonNegativeInteger(item.githubStars)) return false
   if (item.kind === 'plugin') return typeof item.spec === 'string' && typeof item.packageName === 'string'
   if (item.kind === 'mcp') {
     const row = record(item.row)
@@ -825,8 +837,19 @@ function isMarketItem(value: unknown): value is MarketItem {
   return false
 }
 
+function migrateLegacyMarketItem(item: MarketItem): MarketItem {
+  const migrated = cloneMarketItem(item)
+  const legacyGithubStars = (migrated.kind === 'plugin' && migrated.source === 'DSH Plugin Market · curated') ||
+    (migrated.kind === 'skill' && migrated.source === 'SkillsMP · GitHub source' && migrated.install.type === 'github')
+  if (!legacyGithubStars) return migrated
+  // schemaVersion 1 的旧缓存把 GitHub stars 存在 popularity；升级时恢复语义并移除重复字段。
+  if (migrated.githubStars === undefined && isNonNegativeInteger(migrated.popularity)) migrated.githubStars = migrated.popularity
+  if (migrated.githubStars !== undefined) migrated.popularity = undefined
+  return migrated
+}
+
 function validateMarketItems(value: unknown): MarketItem[] {
-  return arrayValue(value).filter(isMarketItem).map(cloneMarketItem)
+  return arrayValue(value).filter(isMarketItem).map(migrateLegacyMarketItem)
 }
 
 interface MarketFetchOptions {

@@ -337,12 +337,14 @@
       .market-source-link { color: var(--brand-dark); display: inline-block; font-size: 10px; margin-top: 8px; text-decoration: none; }
       .market-source-link:hover { text-decoration: underline; }
       .market-card-meta { color: var(--ink-faint); display: flex; flex-wrap: wrap; font-size: 10px; gap: 6px; margin-top: 11px; }
-      .market-card-meta span, .market-permission {
+      .market-card-meta span, .market-card-meta a, .market-permission {
         background: var(--surface-subtle);
         border: 1px solid var(--line);
         border-radius: 5px;
         padding: 3px 6px;
       }
+      .market-card-meta .market-github-stars { color: var(--warn); text-decoration: none; }
+      .market-card-meta .market-github-stars:hover { border-color: var(--env-line); text-decoration: underline; }
       .market-card-footer { align-items: center; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: space-between; margin-top: auto; padding-top: 12px; }
       .market-card-footer .status { font-size: 11px; min-height: 0; }
       .market-card-footer button { font-size: 11px; min-height: 30px; padding: 6px 10px; }

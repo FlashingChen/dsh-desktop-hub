@@ -243,7 +243,7 @@ git push origin v0.3.0
 ## 已知限制
 
 - **profile 固定**：`ACTIVE_PROFILE` 常量 = `'web'`，暂无 UI 切换（Roadmap 中）。
-- **市场目录**：Plugin 使用 DSH Plugin Market / Awesome DSH Plugin 清单，MCP 使用官方 MCP Registry + DSH MCP Market，Skills 使用 ClawHub + SkillsMP；在线结果经过 schema 校验并缓存到本地。Plugin 安装前校验 `dsh.bundle`，npm 锁定精确版本，GitHub 尽量锁定 commit；ClawHub Skills 锁定版本后只写入 `SKILL.md`。
+- **市场目录**：Plugin 使用 DSH Plugin Market / Awesome DSH Plugin 清单，MCP 使用官方 MCP Registry + DSH MCP Market，Skills 使用 ClawHub + SkillsMP；在线结果经过 schema 校验并缓存到本地，插件与 GitHub source 的 Skill 在可用时显示 GitHub star 数。Plugin 安装前校验 `dsh.bundle`，npm 锁定精确版本，GitHub 尽量锁定 commit；ClawHub Skills 锁定版本后只写入 `SKILL.md`。
 - **Routing Suite 聚合仓库**：`https://github.com/yjh051108/dsh-routing-suite` 不是单一 DSH bundle，根目录缺 `package.json/dsh.bundle`；Plugin Tab 会拒绝直接安装。应按仓库说明分别装配 injector、router-standard preset 与可选 mode-boost。
 - **无 Settings / 其他系统**：Settings（API Key / 模型 / 更新）与其他管理系统本期未实现，API Key/模型配置请使用官方 Web UI 内能力；反馈 Tab 已加入，但生产提交依赖可访问的 feedback API。
 - **git 来源插件的构建授权**：pnpm ≥10 拒绝依赖构建脚本时，Hub 会解析 pnpm 给出的包名或完整 Git depPath，逐包请求用户确认；确认后才原子写入 profile 的 `pnpm-workspace.yaml.allowBuilds` 并重试一次。该授权仍属于在本机执行第三方代码。
