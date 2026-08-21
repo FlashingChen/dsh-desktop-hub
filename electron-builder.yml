@@ -26,7 +26,9 @@ mac:
     # DMG 用于首次下载安装；正式签名后 zip 才作为 electron-updater 的 macOS 更新载荷。
     - target: zip
       arch: [arm64]
-  identity: null
+  # 签名策略：identity 不设（默认）→ electron-builder 自动发现钥匙串里的 Developer ID 证书。
+  # CI 配置了 CSC_LINK/CSC_KEY_PASSWORD secrets 时自动签名+公证（APPLE_ID 等）；
+  # 未配置时跳过签名，应用内更新自动禁用、回退 DMG 手动下载（updater.ts 的 codesign 探测）。
 dmg:
   artifactName: DSH-Desktop-Hub-${version}-${arch}.${ext}
 # Windows：NSIS assisted 向导，可选择安装目录；per-user 免管理员
