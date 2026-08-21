@@ -76,6 +76,22 @@ test('schemaVersion 1 的旧市场缓存将 GitHub stars 从 popularity 迁移�
       popularity: 42,
       spec: 'github:owner/repo',
       packageName: 'repo',
+    }, {
+      id: 'legacy-zero-stars',
+      kind: 'plugin',
+      name: 'Legacy Zero Stars',
+      description: 'legacy zero',
+      author: 'owner',
+      version: 'GitHub',
+      category: 'community',
+      tags: [],
+      verified: false,
+      permissions: [],
+      source: 'DSH Plugin Market · curated',
+      sourceUrl: 'https://github.com/owner/zero-repo',
+      popularity: 0,
+      spec: 'github:owner/zero-repo',
+      packageName: 'zero-repo',
     }],
   }
   await writeFile(join(cacheDir, 'market-plugin.json'), JSON.stringify(cache), 'utf8')
@@ -86,8 +102,11 @@ test('schemaVersion 1 的旧市场缓存将 GitHub stars 从 popularity 迁移�
     const item = result.items.find((candidate) => candidate.id === 'legacy-plugin')
     assert.equal(result.online, false)
     assert.equal(result.cached, true)
+    const zeroStars = result.items.find((candidate) => candidate.id === 'legacy-zero-stars')
     assert.equal(item?.githubStars, 42)
     assert.equal(item?.popularity, undefined)
+    assert.equal(zeroStars?.githubStars, undefined)
+    assert.equal(zeroStars?.popularity, 0)
   } finally {
     globalThis.fetch = originalFetch
     await rm(cacheDir, { recursive: true, force: true })

@@ -842,9 +842,15 @@ function migrateLegacyMarketItem(item: MarketItem): MarketItem {
   const legacyGithubStars = (migrated.kind === 'plugin' && migrated.source === 'DSH Plugin Market · curated') ||
     (migrated.kind === 'skill' && migrated.source === 'SkillsMP · GitHub source' && migrated.install.type === 'github')
   if (!legacyGithubStars) return migrated
-  // schemaVersion 1 的旧缓存把 GitHub stars 存在 popularity；升级时恢复语义并移除重复字段。
-  if (migrated.githubStars === undefined && isNonNegativeInteger(migrated.popularity)) migrated.githubStars = migrated.popularity
-  if (migrated.githubStars !== undefined) migrated.popularity = undefined
+  // schemaVersion 1 的旧缓存用 popularity=0 同时表示「没有 stars 数据」或「确实 0 星」，
+  // 无法事后区分；只迁移正数，避免把缺失值误显示成 GitHub ★ 0。
+  if (migrated.githubStars !== undefined) {
+    migrated.popularity = undefined
+    return migrated
+  }
+  if (!isNonNegativeInteger(migrated.popularity) || migrated.popularity === 0) return migrated
+  migrated.githubStars = migrated.popularity
+  migrated.popularity = undefined
   return migrated
 }
 
