@@ -85,6 +85,7 @@ Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH �
 | Planned | Model Manager（API Key / 模型管理面板） |
 | Planned | Doctor（环境自检与一键修复） |
 | ✅ | Windows 安装包（NSIS，x64，与 macOS 并行发布） |
+| ✅ | 后台托盘：关闭窗口后继续运行 Harness，可从托盘显示或退出 |
 | Planned | Linux 安装包 |
 | ✅ | 应用更新（GitHub Releases 检查、下载与重启安装） |
 
@@ -101,6 +102,8 @@ Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH �
 ---
 
 # 开发者 / Architecture
+
+> 想参与开发？请先阅读 [贡献指南](CONTRIBUTING.md)。
 
 ## 架构
 
@@ -144,10 +147,11 @@ flowchart LR
   → BrowserWindow（1280×800，sandbox + contextIsolation + preload.cjs）
   → 加载五 Tab 壳（file://dist/renderer/index.html）
   → renderer 经 IPC 取 harness URL → iframe 挂载官方 Web UI
-退出 → will-quit → harness.stop()：SIGTERM 进程组 → 2s 兜底 SIGKILL → app.quit
+  → 创建系统托盘；普通关闭按钮隐藏窗口，托盘菜单可重新显示或退出
+退出 → 托盘「退出」/应用菜单 → will-quit → harness.stop()：SIGTERM 进程组 → 2s 兜底 SIGKILL → app.quit
 ```
 
-- 默认（无 flag）＝产品行为：启动 harness + 五 Tab 壳；主菜单仅「退出 / 全屏」。
+- 默认（无 flag）＝产品行为：启动 harness + 五 Tab 壳；关闭窗口后继续驻留托盘，托盘菜单提供「显示窗口 / 退出」。
 - 冒烟模式：`--smoke`（不启 harness，DOM + 真实数据断言）；`--harness-smoke`（真实 harness + iframe 加载断言）。
 
 ## 目录结构
@@ -155,7 +159,7 @@ flowchart LR
 ```
 dsh-desktop-hub/
 ├── src/
-│   ├── main/main.ts            # Electron 主进程：窗口 + IPC + harness 进程生命周期
+│   ├── main/main.ts            # Electron 主进程：窗口 + 托盘 + IPC + harness 进程生命周期
 │   ├── preload/preload.ts      # contextBridge 白名单 API（sandbox，编译为 preload.cjs）
 │   ├── renderer/               # 五 Tab 壳：index.html + renderer.ts（纯脚本，无模块）
 │   └── core/                   # 纯逻辑（可单测）：harness.ts / plugins.ts / plugin-ops.ts / pnpm.ts / mcp.ts / skills.ts / feedback.ts / diagnostics.ts
@@ -242,7 +246,7 @@ git push origin v0.3.0
 ## 已知限制
 
 - **profile 固定**：`ACTIVE_PROFILE` 常量 = `'web'`，暂无 UI 切换（Roadmap 中）。
-- **市场目录**：Plugin 使用 DSH Plugin Market / Awesome DSH Plugin 清单，MCP 使用官方 MCP Registry + DSH MCP Market，Skills 使用 ClawHub + SkillsMP；在线结果经过 schema 校验并缓存到本地。Plugin 安装前校验 `dsh.bundle`，npm 锁定精确版本，GitHub 尽量锁定 commit；ClawHub Skills 锁定版本后只写入 `SKILL.md`。
+- **市场目录**：Plugin 使用 DSH Plugin Market / Awesome DSH Plugin 清单，MCP 使用官方 MCP Registry + DSH MCP Market，Skills 使用 ClawHub + SkillsMP；在线结果经过 schema 校验并缓存到本地，插件与 GitHub source 的 Skill 在可用时显示 GitHub star 数。Plugin 安装前校验 `dsh.bundle`，npm 锁定精确版本，GitHub 尽量锁定 commit；ClawHub Skills 锁定版本后只写入 `SKILL.md`。
 - **Routing Suite 聚合仓库**：`https://github.com/yjh051108/dsh-routing-suite` 不是单一 DSH bundle，根目录缺 `package.json/dsh.bundle`；Plugin Tab 会拒绝直接安装。应按仓库说明分别装配 injector、router-standard preset 与可选 mode-boost。
 - **无完整 Settings / 其他系统**：API Key/模型配置请使用官方 Web UI 内能力；应用更新入口已在壳层侧边栏提供；反馈 Tab 已加入，但生产提交依赖可访问的 feedback API。
 - **git 来源插件的构建授权**：pnpm ≥10 拒绝依赖构建脚本时，Hub 会解析 pnpm 给出的包名或完整 Git depPath，逐包请求用户确认；确认后才原子写入 profile 的 `pnpm-workspace.yaml.allowBuilds` 并重试一次。该授权仍属于在本机执行第三方代码。

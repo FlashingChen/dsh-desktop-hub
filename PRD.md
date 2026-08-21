@@ -258,7 +258,7 @@ dsh plugin --profile <name> update
 
 ### 3.3 多 Tab 主窗口（当前实现）
 
-**壳层（已落地）**：主窗口＝五 Tab 壳（顶部 Tab 栏：Harness / Plugin / MCP / Skills / 反馈，`src/renderer/index.html`）。应用启动后主进程拉起 `dsh web`（profile「web」，`--port 0` 由 dsh 自选端口），轮询 HTTP 200 就绪后创建 BrowserWindow（1280×800，sandbox + contextIsolation）；**Harness Tab 以 `<iframe>` 内嵌官方 Web UI**（CSP `frame-src http://127.0.0.1:*`）。由于 iframe 的 `load` 事件对长连接页面不可靠，由主进程监听 `did-frame-navigate`（非主帧且前缀命中 harness URL）推送 `harness:frame-loaded`，渲染层据此更新状态条「harness 已连接: 127.0.0.1:PORT」。
+**壳层（已落地）**：主窗口＝五 Tab 壳（顶部 Tab 栏：Harness / Plugin / MCP / Skills / 反馈，`src/renderer/index.html`）。应用启动后主进程拉起 `dsh web`（profile「web」，`--port 0` 由 dsh 自选端口），轮询 HTTP 200 就绪后创建 BrowserWindow（1280×800，sandbox + contextIsolation）；**Harness Tab 以 `<iframe>` 内嵌官方 Web UI**（CSP `frame-src http://127.0.0.1:*`）。由于 iframe 的 `load` 事件对长连接页面不可靠，由主进程监听 `did-frame-navigate`（非主帧且前缀命中 harness URL）推送 `harness:frame-loaded`，渲染层据此更新状态条「harness 已连接: 127.0.0.1:PORT」。主窗口关闭按钮默认隐藏到系统托盘，Harness 继续运行；托盘菜单可重新显示窗口或显式退出。
 
 | Tab | 功能 | 关键交互（已实现） |
 |---|---|---|
@@ -307,7 +307,8 @@ UI 风格：浅色主题（`color-scheme: light`，品牌蓝 `#4d6bfe`），五�
   → 加载五 Tab 壳（file://dist/renderer/index.html）
   → renderer 经 IPC 取 harness URL → iframe 挂载官方 Web UI
   → 主进程 did-frame-navigate（非主帧且前缀命中）推送 harness:frame-loaded
-退出 → window-all-closed（非 macOS 退出）
+  → 创建系统托盘；普通关闭隐藏窗口，托盘菜单提供显示/退出
+退出 → 托盘「退出」或应用菜单
   → will-quit → harness.stop()：SIGTERM 进程组 → 2s 兜底 SIGKILL → app.quit
 ```
 
