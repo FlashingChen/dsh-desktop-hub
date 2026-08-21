@@ -1,6 +1,6 @@
 // Electron 主进程：窗口安全边界 + IPC（来源校验）+ harness 生命周期 + 插件/MCP/Skills 管理
 import { type ChildProcess } from 'node:child_process'
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent, type WebContents } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shell, Tray, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join, relative, isAbsolute, basename } from 'node:path'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
@@ -44,6 +44,7 @@ import { normalizeFeedbackInput, toFeedbackPayload } from '../core/feedback.js'
 import { submitFeedback } from '../core/feedback-client.js'
 import { initLog, log } from '../core/log.js'
 import { fetchMarketItems, preflightPluginSpec, type MarketKind } from '../core/market.js'
+import { getTrayWindowAction } from '../core/tray.js'
 import { wireSmoke } from './smoke.js'
 import { createPermissionHandlers } from './permissions.js'
 
@@ -69,10 +70,13 @@ app.setName(APP_NAME)
 if (process.platform === 'win32') app.setAppUserModelId('com.dshdesktophub.app')
 
 let mainWindow: BrowserWindow | null = null
+let tray: Tray | null = null
 let harness: HarnessHandle | null = null
 let lastHarnessStatus: HarnessStatus = { state: 'starting' }
 let restarting = false
 let stoppingHarness = false
+/** 已收到用户退出请求；普通关闭按钮只隐藏到托盘，显式退出时才真正关闭窗口。 */
+let quitRequested = false
 /** 退出标志：将在退出清理期间抑制 harness 自动重启（防关闭竞态 respawn 出孤儿） */
 let quitting = false
 let autoRestartTimer: NodeJS.Timeout | null = null
@@ -665,6 +669,79 @@ function currentHarnessOrigin(): string | null {
   }
 }
 
+function resolveTrayIconPath(): string | null {
+  // resources/ 会被 electron-builder 一起打进 app；开发模式下 app.getAppPath() 则是仓库根目录。
+  const candidates = [
+    join(app.getAppPath(), 'resources', 'tray.png'),
+    join(process.resourcesPath, 'tray.png'),
+    join(app.getAppPath(), 'build', 'icon.png'),
+  ]
+  return candidates.find((path) => existsSync(path)) ?? null
+}
+
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) createSkeletonWindow()
+  const win = mainWindow
+  if (!win || win.isDestroyed()) return
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+function toggleMainWindow(): void {
+  const win = mainWindow
+  if (!win || win.isDestroyed()) {
+    showMainWindow()
+    return
+  }
+  const action = getTrayWindowAction({
+    destroyed: false,
+    minimized: win.isMinimized(),
+    visible: win.isVisible(),
+  })
+  if (action === 'hide') win.hide()
+  else showMainWindow()
+}
+
+function requestAppQuit(): void {
+  // before-quit 是所有退出入口（应用菜单、托盘、系统关闭）的统一状态切换点。
+  app.quit()
+}
+
+function updateTrayMenu(): void {
+  if (!tray) return
+  const visible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized())
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: visible ? '隐藏窗口' : '显示窗口', click: toggleMainWindow },
+      { type: 'separator' },
+      { label: '退出', click: requestAppQuit },
+    ]),
+  )
+}
+
+function createTray(): void {
+  if (tray || SMOKE || HARNESS_SMOKE) return
+  const iconPath = resolveTrayIconPath()
+  const icon = iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty()
+  let nextTray: Tray | null = null
+  try {
+    nextTray = new Tray(icon)
+    nextTray.setToolTip(APP_NAME)
+    nextTray.on('click', toggleMainWindow)
+    tray = nextTray
+    updateTrayMenu()
+  } catch (err) {
+    try {
+      nextTray?.destroy()
+    } catch {
+      /* tray 创建失败后的兜底清理也不能阻止应用启动 */
+    }
+    tray = null
+    log(`tray: 创建失败 —— ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
 function hardenWindow(win: BrowserWindow): void {
   // 拒绝任意 popup：http(s) 外部链接交给系统浏览器，其余一律 deny（P2-9）
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -704,9 +781,20 @@ function createWindow(url: string): void {
   })
   hardenWindow(mainWindow)
   void mainWindow.loadURL(url)
+  mainWindow.on('close', (event) => {
+    // 普通点右上角关闭只隐藏窗口，Harness 与后台进程继续运行；托盘菜单「退出」才真正退出。
+    if (SMOKE || HARNESS_SMOKE || quitRequested || !tray) return
+    event.preventDefault()
+    mainWindow?.hide()
+  })
+  mainWindow.on('show', updateTrayMenu)
+  mainWindow.on('hide', updateTrayMenu)
   mainWindow.on('closed', () => {
     mainWindow = null
+    updateTrayMenu()
   })
+  // createTray() 通常先于窗口创建；显式刷新一次，避免托盘菜单保留初始的「显示窗口」状态。
+  updateTrayMenu()
 }
 
 function createSkeletonWindow(): void {
@@ -889,10 +977,9 @@ function buildMenu(): void {
 }
 
 app.on('second-instance', () => {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore()
-    mainWindow.focus()
-  }
+  // 冒烟模式的 harness 启动是异步的；不要在它完成前创建额外窗口。
+  if (SMOKE || HARNESS_SMOKE) return
+  showMainWindow()
 })
 
 app.whenReady().then(async () => {
@@ -917,18 +1004,30 @@ app.whenReady().then(async () => {
   // 默认产品行为：窗口先行（立即出现，状态「连接中」，绝不因 harness 慢而空白/退出），
   // harness 后台启动；失败自动重试（指数退避），最多 5 次后状态条给出原因并等待手动重启
   buildMenu()
+  createTray()
   createSkeletonWindow()
   startHarnessBackground()
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createSkeletonWindow()
+    showMainWindow()
   })
 })
 
+app.on('before-quit', () => {
+  // app.quit()（包括应用菜单）会先触发 before-quit，再触发 BrowserWindow close。
+  // 记录该状态后，close handler 才会放行真正的窗口关闭。
+  quitRequested = true
+})
+
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  // 有托盘时窗口关闭只是隐藏；即使窗口因渲染崩溃被销毁，也让用户从托盘重新打开。
+  if (process.platform !== 'darwin' && !tray) app.quit()
 })
 
 app.on('will-quit', (e) => {
+  if (tray) {
+    tray.destroy()
+    tray = null
+  }
   clearTimeout(autoRestartTimer ?? undefined)
   autoRestartTimer = null
   // 启动在途的子进程也要清理（detached 的 dsh web 无主存活会占用 profile 与 watcher）

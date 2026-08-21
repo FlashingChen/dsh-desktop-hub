@@ -84,6 +84,7 @@ Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH �
 | Planned | Model Manager（API Key / 模型管理面板） |
 | Planned | Doctor（环境自检与一键修复） |
 | ✅ | Windows 安装包（NSIS，x64，与 macOS 并行发布） |
+| ✅ | 后台托盘：关闭窗口后继续运行 Harness，可从托盘显示或退出 |
 | Planned | Linux 安装包 |
 | Planned | 自动更新（electron-updater） |
 
@@ -145,10 +146,11 @@ flowchart LR
   → BrowserWindow（1280×800，sandbox + contextIsolation + preload.cjs）
   → 加载五 Tab 壳（file://dist/renderer/index.html）
   → renderer 经 IPC 取 harness URL → iframe 挂载官方 Web UI
-退出 → will-quit → harness.stop()：SIGTERM 进程组 → 2s 兜底 SIGKILL → app.quit
+  → 创建系统托盘；普通关闭按钮隐藏窗口，托盘菜单可重新显示或退出
+退出 → 托盘「退出」/应用菜单 → will-quit → harness.stop()：SIGTERM 进程组 → 2s 兜底 SIGKILL → app.quit
 ```
 
-- 默认（无 flag）＝产品行为：启动 harness + 五 Tab 壳；主菜单仅「退出 / 全屏」。
+- 默认（无 flag）＝产品行为：启动 harness + 五 Tab 壳；关闭窗口后继续驻留托盘，托盘菜单提供「显示窗口 / 退出」。
 - 冒烟模式：`--smoke`（不启 harness，DOM + 真实数据断言）；`--harness-smoke`（真实 harness + iframe 加载断言）。
 
 ## 目录结构
@@ -156,7 +158,7 @@ flowchart LR
 ```
 dsh-desktop-hub/
 ├── src/
-│   ├── main/main.ts            # Electron 主进程：窗口 + IPC + harness 进程生命周期
+│   ├── main/main.ts            # Electron 主进程：窗口 + 托盘 + IPC + harness 进程生命周期
 │   ├── preload/preload.ts      # contextBridge 白名单 API（sandbox，编译为 preload.cjs）
 │   ├── renderer/               # 五 Tab 壳：index.html + renderer.ts（纯脚本，无模块）
 │   └── core/                   # 纯逻辑（可单测）：harness.ts / plugins.ts / plugin-ops.ts / pnpm.ts / mcp.ts / skills.ts / feedback.ts / diagnostics.ts
