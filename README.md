@@ -39,7 +39,7 @@ DeepSeek Harness 官方 Web UI 桌面客户端 —— 内置插件市场、MCP �
 - **开箱即用**：内置 Node.js + DeepSeek Harness 运行时（约 586MB），下载即用，本机不需要安装任何环境。
 - **一体化**：在 Harness 对话、插件市场、MCP 市场、Skills 市场之间切换，不用再开终端敲 `dsh plugin` / 手写 YAML。
 - **安全**：所有写操作原子落盘、自动备份 `.bak-<ts>`、官方 HMR 热生效，改错了随时可恢复。
-- **及时更新**：Windows 发布版启动后自动检查 GitHub Releases，侧边栏提示新版本；用户确认后下载并重启安装，不必再手动打开 GitHub。macOS 完成正式签名后启用同一更新链路。
+- **及时更新**：Windows 与 macOS 发布版启动后自动检查 GitHub Releases，侧边栏提示新版本；用户确认后下载并重启安装，不必再手动打开 GitHub。
 
 ## 核心能力
 
@@ -69,11 +69,11 @@ Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH �
 
 ## 快速开始
 
-1. **下载安装**：macOS 下载 DMG；Windows 下载 EXE（当前未签名，首次运行需放行一次：macOS 右键 → 打开；Windows SmartScreen → 更多信息 → 仍要运行）。
-2. **配置模型**：在 Harness Tab 的官方 Web UI 里填入 API Key（首次引导会提示）。
+1. **下载安装**：macOS 下载 DMG（v0.3.5 起已签名并公证，可直接打开）；Windows 下载 EXE（当前未签名，首次运行需放行一次：SmartScreen → 更多信息 → 仍要运行）。
+2. **配置模型**：在 Harness Tab 的官方 Web UI 里填入 API Key。首次启动会有分步引导带你认识各功能区，之后可随时从侧栏「使用引导」重看。
 3. **开始使用**：直接对话；需要外部工具时，到 MCP / Skills / Plugin Tab 管理。
 
-> 当前为预览版（macOS arm64 / Windows x64，均未签名）。
+> 当前为预览版（macOS arm64，已签名并公证；Windows x64 未签名）。
 
 ## Roadmap
 
@@ -88,6 +88,8 @@ Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH �
 | ✅ | 后台托盘：关闭窗口后继续运行 Harness，可从托盘显示或退出 |
 | Planned | Linux 安装包 |
 | ✅ | 应用更新（GitHub Releases 检查、下载与重启安装） |
+| ✅ | 首次访问引导：Spotlight 分步教程，侧栏「使用引导」可重看 |
+| ✅ | macOS 签名与公证（Developer ID，v0.3.5 起；应用内更新同步启用） |
 
 ## 社区与反馈
 
@@ -180,7 +182,7 @@ dsh-desktop-hub/
 ├── tsconfig.json               # 主进程 + core + preload（NodeNext，outDir dist）
 ├── tsconfig.preload.json       # preload：CommonJS → dist/preload/preload.cjs
 ├── tsconfig.renderer.json      # renderer：纯脚本 → dist/renderer
-├── electron-builder.yml        # appId com.dshdesktop.app；DMG arm64；asarUnpack resources
+├── electron-builder.yml        # appId com.dshdesktophub.app；mac DMG+zip（arm64）；asar: false
 └── package.json
 ```
 
@@ -209,7 +211,7 @@ npx electron-builder --win nsis --x64  # 4. Windows：release/DSH-Desktop-Hub-<v
 ```
 
 - `bundle-runtime.mjs`：下载官方 Node v24.10.0（win/darwin/linux × x64/arm64）到 `resources/nd`，用捆绑 npm 以 `--ignore-scripts` 安装锁定版本 `@deepseek-ai/dsh@0.1.0-rc.6` 到 `resources/rt`；`RUNTIME_TARGET=win32` 可在 macOS 上交叉捆绑 Windows 运行时（含 .cmd shim 生成）。
-- `electron-builder.yml`：`files` 含 `dist/**/*` + `resources/**/*`；`asar: false`（产物直放 `resources/app`，压低 Windows 安装路径深度）；mac 目标 DMG + zip（arm64，正式签名后用于自动更新）+ Windows 目标 NSIS（x64，assisted per-user，可选择安装目录）；当前均未签名。
+- `electron-builder.yml`：`files` 含 `dist/**/*` + `resources/**/*`；`asar: false`（产物直放 `resources/app`，压低 Windows 安装路径深度）；mac 目标 DMG + zip（arm64，签名后 zip 作为自动更新载荷）+ Windows 目标 NSIS（x64，assisted per-user，可选择安装目录）；macOS 签名与公证由 Release CI 的 secrets 驱动。
 - 打包后的应用在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）的环境下可用捆绑运行时启动。
 
 ## Release
@@ -218,7 +220,7 @@ npx electron-builder --win nsis --x64  # 4. Windows：release/DSH-Desktop-Hub-<v
 
 1. 创建 draft Release（自动生成 release notes）
 2. **并行构建**：macOS arm64 DMG（macos-15）与 Windows x64 NSIS 安装包（windows-latest），各自执行 `verify` → 捆绑运行时 → `electron-builder`
-3. **双平台都成功后自动转正发布**，上传 `.dmg / .dmg.blockmap / .zip / .zip.blockmap / .exe / .exe.blockmap / latest.yml / latest-mac.yml`（Windows 直接使用更新通道；macOS 的 `.zip` 仅在正式签名后启用）
+3. **双平台都成功后自动转正发布**，上传 `.dmg / .dmg.blockmap / .zip / .zip.blockmap / .exe / .exe.blockmap / latest.yml / latest-mac.yml`（双平台的 `.zip / .exe` 均为 electron-updater 更新载荷）
 
 ```sh
 git tag v0.3.0
@@ -253,7 +255,7 @@ git push origin v0.3.0
 - **MCP `!!js` backtick 模板兼容**：patch 中以反引号模板写 `Bearer ${...}`（官方 README 示例写法）超出 yaml 解析器语法，MCP 面板会拒绝解析并提示；请改用单引号字符串 `!!js 'Bearer ${...}'`（语义为字面字符串）或行级 `process.env.X`。
 - **MCP 无文件导入**：MCP 面板支持粘贴 JSON（`${VAR}` 自动转 `!!js process.env.VAR`；默认合并写入，可选全量替换），暂无 `.mcp.json` 文件选择器。
 - **退出边界**：正常退出走 SIGTERM 进程组清理 + 单实例锁；Harness 意外退出可在 UI 一键重启；强杀（timeout / group-kill）仍可能遗留 dsh 子进程。
-- **打包范围**：macOS DMG + zip（arm64）和 Windows NSIS 安装包（x64）当前均未签名（首次运行需按平台放行一次）；Linux 待做。Windows 正式安装版支持自动更新；未签名 macOS 会明确提示手动下载 DMG，开发模式不会联网检查。
+- **打包范围**：macOS DMG + zip（arm64）自 v0.3.5 起已签名并公证（Developer ID，应用内更新同步启用）；Windows NSIS 安装包（x64）未签名（首次运行需按平台放行一次）；Linux 待做。Windows 正式安装版支持自动更新；macOS 未签名版本会明确提示手动下载 DMG，开发模式不会联网检查。
 - **体积**：`resources/` 捆绑运行时约 586MB（gitignore），首包体积较大。
 - **反馈服务配置**：桌面端默认请求 `https://feedback.flashingchen.xyz/v1/feedback`，也可通过 `DSH_FEEDBACK_ENDPOINT` 覆盖；服务不可达时复制反馈仍可用。服务端启用 Cloudflare Rate Limiting（每个 edge client IP 每 60 秒 10 次，限流策略具有边缘位置级最终一致性）。私有 `github-issue-server/` 不随公开仓库发布。
 - **写操作落真实 profile**：MCP「写入 patch」真实修改 `~/.dsh/profiles/web/cordis.patch.yml`（写入前自动 `.bak-<ts>` 备份）；插件安装/移除真实执行 `dsh plugin`。
