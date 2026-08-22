@@ -22,6 +22,7 @@ const mcp = await import(join(root, 'dist', 'core', 'mcp.js'))
 const { listPlugins } = await import(join(root, 'dist', 'core', 'plugins.js'))
 const { scanSkills } = await import(join(root, 'dist', 'core', 'skills.js'))
 const { startHarness, dshHome, listProfiles } = await import(join(root, 'dist', 'core', 'harness.js'))
+const { fetchMarketItems } = await import(join(root, 'dist', 'core', 'market.js'))
 
 const ACTIVE_PROFILE = 'web'
 const PROFILE_DIR = join(dshHome(), 'profiles', ACTIVE_PROFILE)
@@ -167,6 +168,33 @@ function registerIpc() {
     assertShell(event)
     return harness?.url ?? null
   })
+  // 壳层侧边栏与市场卡片需要以下 handler 才能呈现真实 UI；截图环境给静态合理值
+  ipcMain.handle(IPC.updatesGetStatus, (event) => {
+    assertShell(event)
+    return { state: 'not-available', currentVersion: '0.3.5' }
+  })
+  ipcMain.handle(IPC.marketList, async (event, kind, query) => {
+    assertShell(event)
+    // 与 main.ts 同构：fetchMarketItems 离线自动回退随包精选目录；渲染层要求 ok 包装
+    if (kind !== 'plugin' && kind !== 'mcp' && kind !== 'skill') {
+      return { ok: false, kind: 'all', items: [], error: '市场类型无效' }
+    }
+    const result = await fetchMarketItems(kind, typeof query === 'string' ? query.slice(0, 120) : '')
+    return { ok: true, kind, items: result.items, online: result.online, cached: result.cached, error: result.error }
+  })
+  ipcMain.handle(IPC.feedbackDiagnostics, (event) => {
+    assertShell(event)
+    return {
+      ok: true,
+      text: [
+        '- 应用版本：v0.3.5',
+        '- Electron：43.4.0 · Node：v24.10.0',
+        '- 平台：darwin arm64',
+        '- Profile：web（bundles 2，dependencies 4）',
+        '- MCP 服务器：1（stdio）· Skills：4（用户级 2 / 随包 2）',
+      ].join('\n'),
+    }
+  })
 }
 
 let harness = null
@@ -187,6 +215,16 @@ async function shot(name) {
 }
 
 async function shotFull(name) {
+  const image = await win.webContents.capturePage()
+  mkdirSync(OUT_DIR, { recursive: true })
+  const out = join(OUT_DIR, `${name}.png`)
+  writeFileSync(out, image.toPNG())
+  console.log(`captured ${out} (${image.getSize().width}x${image.getSize().height})`)
+}
+
+/** 视口截图（跟随当前滚动位置），用于聚焦某个面板 */
+async function shotView(name) {
+  await sleep(400)
   const image = await win.webContents.capturePage()
   mkdirSync(OUT_DIR, { recursive: true })
   const out = join(OUT_DIR, `${name}.png`)
@@ -241,6 +279,14 @@ async function runCapture() {
     }
   })
   await win.loadURL(RENDERER_URL)
+  // 首次捕获的 userData 未完成引导会弹出欢迎弹窗：标记完成后重载一次，保证截图为正常工作态
+  const onboardingDone = await win.webContents.executeJavaScript(
+    `localStorage.getItem('dsh.onboarding.done.v1')`,
+  )
+  if (onboardingDone !== '1') {
+    await win.webContents.executeJavaScript(`localStorage.setItem('dsh.onboarding.done.v1', '1')`)
+    await win.loadURL(RENDERER_URL)
+  }
   const js = async (label, code) => {
     console.log(`step: ${label}`)
     try {
@@ -279,9 +325,8 @@ async function runCapture() {
     ),
   )
 
-  // ---- MCP Tab：粘贴 → 转换 → 写入 ----
+  // ---- MCP Tab：粘贴 → 转换 → 写入（隐藏市场区，滚动到转换面板）----
   await js("switch-mcp", `document.getElementById('tab-mcp').click()`)
-  await sleep(500)
   const sample = JSON.stringify(
     {
       mcpServers: {
@@ -300,14 +345,21 @@ async function runCapture() {
     2,
   )
   await js("fill-json", `document.getElementById('mcp-json').value = ${JSON.stringify(sample)}`)
-  await sleep(400)
-  await shot('mcp-flow-1')
+  await js("focus-mcp", `(() => {
+    const sw = document.querySelector('.market-switcher[data-market-kind="mcp"] [data-market-mode="manage"]')
+    if (sw) sw.click()
+    const mv = document.getElementById('mcp-market-view')
+    if (mv) mv.style.display = 'none'
+    document.getElementById('mcp-json').scrollIntoView({ block: 'start' })
+    window.scrollBy(0, -12)
+  })()`)
+  await shotView('mcp-flow-1')
 
   await js("convert", `document.getElementById('mcp-convert').click()`)
   const converted = await waitFor(`document.getElementById('mcp-preview').textContent.length > 60`, 6000)
   if (!converted) throw new Error('MCP 转换未完成')
   await sleep(500)
-  await shot('mcp-flow-2')
+  await shotView('mcp-flow-2')
 
   await js("apply", `window.confirm = () => true; document.getElementById('mcp-apply').click()`)
   const applied = await waitFor(
@@ -316,16 +368,18 @@ async function runCapture() {
   )
   if (!applied) throw new Error('MCP 写入未完成')
   await sleep(500)
-  await shot('mcp-flow-3')
+  await shotView('mcp-flow-3')
 
   // ---- Skills / Plugin Tab ----
   await js("switch-skills", `document.getElementById('tab-skills').click()`)
   await waitFor(`document.querySelectorAll('#skills-rows tr').length >= 3`, 6000)
+  await waitFor(`document.querySelectorAll('#skills-market-grid .market-card').length > 0`, 15000)
   await sleep(500)
   await shot('skills')
 
   await js("switch-plugin", `document.getElementById('tab-plugin').click()`)
   await waitFor(`document.querySelectorAll('#plugin-rows tr').length >= 3`, 6000)
+  await waitFor(`document.querySelectorAll('#plugin-market-grid .market-card').length > 0`, 15000)
   await sleep(500)
   await shot('plugins')
 
