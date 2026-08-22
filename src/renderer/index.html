@@ -228,11 +228,14 @@
         text-transform: uppercase;
       }
       .sidebar-profile strong { color: var(--ink); display: block; font-size: 13px; margin-top: 3px; }
-      .sidebar-update {
+      .sidebar-update,
+      .sidebar-help {
         border-top: 1px solid var(--line);
         margin-top: 8px;
         padding: 12px 10px 8px;
       }
+      .sidebar-help { margin-top: auto; padding-bottom: 10px; }
+      .sidebar-help button { width: 100%; }
       .sidebar-update-head { align-items: center; display: flex; gap: 6px; margin-top: 4px; }
       .sidebar-update-head strong { color: var(--ink); font-size: 13px; font-weight: 680; }
       .sidebar-update-badge {
@@ -818,10 +821,73 @@
       body.harness-fullscreen .harness-fullscreen-toggle { bottom: 18px; right: 18px; }
       body.harness-fullscreen .fullscreen-enter { display: none; }
       body.harness-fullscreen .harness-fullscreen-toggle .fullscreen-exit { display: block; }
+      /* ---- 首次访问引导：遮罩挖洞高亮目标 + 定位气泡 ---- */
+      #onboarding { inset: 0; position: fixed; z-index: 100; }
+      #onboarding[hidden] { display: none; }
+      #onboarding-backdrop {
+        background: rgb(10 12 16 / 58%);
+        inset: 0;
+        position: absolute;
+      }
+      /* 双层 mask 合成挖洞：洞的位置由 JS 注入 --spot-* 自定义属性；
+         洞内真实 UI 可继续交互，洞外由遮罩拦截误触 */
+      #onboarding.spotlight #onboarding-backdrop {
+        mask-composite: exclude;
+        mask-image: linear-gradient(#fff, #fff), linear-gradient(#fff, #fff);
+        mask-position: 0 0, var(--spot-x, -9999px) var(--spot-y, -9999px);
+        mask-repeat: no-repeat;
+        mask-size: 100% 100%, var(--spot-w, 0px) var(--spot-h, 0px);
+      }
+      /* 几何全部来自 --spot-* 自定义属性，与遮罩挖洞共用同一组值，保证环与洞不脱同步 */
+      #onboarding-spot {
+        border: 2px solid var(--brand);
+        border-radius: 10px;
+        box-shadow: 0 0 0 4px rgb(77 107 254 / 22%), 0 0 24px rgb(77 107 254 / 35%);
+        height: var(--spot-h, 0px);
+        left: var(--spot-x, -9999px);
+        pointer-events: none;
+        position: absolute;
+        top: var(--spot-y, -9999px);
+        width: var(--spot-w, 0px);
+      }
+      #onboarding-spot[hidden] { display: none; }
+      #onboarding-card {
+        background: var(--surface);
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-md);
+        max-width: min(344px, calc(100vw - 24px));
+        padding: 16px 18px;
+        position: absolute;
+        width: 344px;
+      }
+      #onboarding-card.centered { left: 50%; top: 50%; transform: translate(-50%, -50%); }
+      .onboarding-step-label {
+        color: var(--brand-dark);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+      }
+      #onboarding-title { font-size: 16px; margin-top: 5px; }
+      #onboarding-body {
+        color: var(--ink-soft);
+        font-size: 12.5px;
+        line-height: 1.75;
+        margin-top: 7px;
+        overflow-wrap: anywhere;
+        white-space: pre-line;
+      }
+      .onboarding-actions {
+        align-items: center;
+        display: flex;
+        justify-content: space-between;
+        margin-top: 15px;
+      }
+      .onboarding-nav { display: flex; gap: 8px; }
       @media (max-width: 900px) {
         .app-shell { grid-template-columns: 74px minmax(0, 1fr); }
         .sidebar { padding-left: 10px; padding-right: 10px; }
-        .sidebar-label, .tab-copy, .sidebar-profile, .sidebar-update { display: none; }
+        .sidebar-label, .tab-copy, .sidebar-profile, .sidebar-update, .sidebar-help { display: none; }
         .tab { justify-content: center; padding: 7px; }
         .tab::before { left: -10px; }
         .two-column { grid-template-columns: 1fr; }
@@ -895,6 +961,10 @@
             <button id="app-update-install" class="primary" type="button" hidden>重启更新</button>
           </div>
         </section>
+        <div class="sidebar-help">
+          <span class="sidebar-profile-label">Help</span>
+          <button id="onboarding-replay" type="button">使用引导</button>
+        </div>
         <div class="sidebar-profile">
           <span class="sidebar-profile-label">Profile</span>
           <strong>web</strong>
@@ -1271,6 +1341,22 @@
           </div>
         </section>
       </main>
+    </div>
+    <div id="onboarding" hidden>
+      <div id="onboarding-backdrop"></div>
+      <div id="onboarding-spot" hidden></div>
+      <div id="onboarding-card" role="dialog" aria-labelledby="onboarding-title">
+        <div class="onboarding-step-label" id="onboarding-step-label"></div>
+        <h2 id="onboarding-title"></h2>
+        <p id="onboarding-body"></p>
+        <div class="onboarding-actions">
+          <button id="onboarding-skip" class="quiet" type="button">跳过引导</button>
+          <div class="onboarding-nav">
+            <button id="onboarding-prev" type="button">上一步</button>
+            <button id="onboarding-next" class="primary" type="button">下一步</button>
+          </div>
+        </div>
+      </div>
     </div>
     <script src="renderer.js"></script>
   </body>

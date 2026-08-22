@@ -278,8 +278,17 @@ harnessFullscreenButton?.addEventListener('click', () => {
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return
-  if (document.body.classList.contains('harness-fullscreen')) setHarnessFullscreen(false)
-  if (harnessMenu && !harnessMenu.hidden) setHarnessMenuOpen(false)
+  // 全屏/状态弹层优先：引导第 4 步提示用户按 Esc 退出全屏，首次按 Esc 应恢复状态而非结束引导；
+  // 状态都已是默认态时，Esc 才用于中途退出引导
+  if (document.body.classList.contains('harness-fullscreen')) {
+    setHarnessFullscreen(false)
+    return
+  }
+  if (harnessMenu && !harnessMenu.hidden) {
+    setHarnessMenuOpen(false)
+    return
+  }
+  if (onboardingActive()) endOnboarding(true)
 })
 
 for (const t of TABS) {
@@ -1869,3 +1878,219 @@ if (api) {
   void refreshFeedbackDiagnostics()
   void mountHarness()
 }
+
+// ---- 首次访问引导：Spotlight 分步教程（纯渲染层，localStorage 记忆完成态）----
+type OnboardingStep = {
+  title: string
+  body: string
+  /** 高亮目标选择器；缺省时气泡居中显示（欢迎/完成页） */
+  target?: string
+  /** 进入该步前先切到的工作区 */
+  tab?: TabId
+  /** 进入该步前的额外准备（如退出 Harness 全屏） */
+  prepare?: () => void
+}
+
+const ONBOARDING_KEY = 'dsh.onboarding.done.v1'
+const ONBOARDING_CARD_MARGIN = 12
+const ONBOARDING_SPOT_PAD = 6
+
+const ONBOARDING_STEPS: OnboardingStep[] = [
+  {
+    title: '欢迎使用 DSH Desktop Hub',
+    body: '这里是 DeepSeek Harness 的桌面管理控制台。\n接下来用几步带你认识各个功能区；看完说明点「下一步」即可，随时可以「跳过引导」。',
+  },
+  {
+    title: 'Harness 主界面',
+    body: '这里内嵌了完整的 DeepSeek Harness Web 界面。首次启动约需 1-2 分钟，就绪后即可直接对话使用。',
+    tab: 'harness',
+    target: '#harness-frame',
+  },
+  {
+    title: '连接状态徽章',
+    body: '左下角边缘的小箭头是状态徽章：绿色＝已连接、黄色＝连接中、红色＝已断开。\n点击可展开菜单，对 Harness 进行重新连接或重新启动。',
+    tab: 'harness',
+    target: '#harness-badge',
+  },
+  {
+    title: 'Harness 全屏',
+    body: '右下角这个按钮可以让 Harness 一键全屏，隐藏侧栏专注对话；再点一次或按 Esc 即可退出全屏。\n现在就可以试试。',
+    tab: 'harness',
+    target: '#harness-fullscreen',
+  },
+  {
+    title: '插件市场',
+    body: '在「插件市场」浏览精选 DSH 插件，一键安装并激活；切到「已安装」可停用或移除。安装后会自动重启 Harness 生效。',
+    tab: 'plugin',
+    target: '.market-switcher[data-market-kind="plugin"]',
+  },
+  {
+    title: 'MCP 配置',
+    body: '从 MCP 市场一键安装服务器，或在下方粘贴 Claude Code / Cursor 导出的 JSON 转换写入；写入前会自动备份现有配置。',
+    tab: 'mcp',
+    target: '.market-switcher[data-market-kind="mcp"]',
+  },
+  {
+    title: 'Skills 管理',
+    body: '从 ClawHub / SkillsMP 或 GitHub 导入 Skill；在「我的 Skills」里可分别控制每个 Skill 对模型和用户是否可见。',
+    tab: 'skills',
+    target: '.market-switcher[data-market-kind="skill"]',
+  },
+  {
+    title: '反馈与交流',
+    body: '遇到问题或有建议？在这里提交反馈，可附带低敏诊断信息；网络不畅时复制内容发到页面底部的 QQ 群也可以。',
+    tab: 'feedback',
+    target: '.feedback-community',
+  },
+  {
+    title: '检查应用更新',
+    body: '侧边栏底部显示当前版本，启动时会自动检查更新；也可以手动点击「检查更新」获取新版本。',
+    prepare: () => {
+      // 全屏模式下侧栏被隐藏，先退回普通布局，保证高亮目标可见
+      if (document.body.classList.contains('harness-fullscreen')) setHarnessFullscreen(false)
+    },
+    target: '#app-update',
+  },
+  {
+    title: '准备就绪！',
+    body: '引导到此结束。以后随时可以点击侧栏底部的「使用引导」重看本教程。\n祝使用愉快！',
+  },
+]
+
+const onboardingRoot = document.getElementById('onboarding')
+const onboardingCard = document.getElementById('onboarding-card')
+const onboardingSpot = document.getElementById('onboarding-spot')
+const onboardingStepLabel = document.getElementById('onboarding-step-label')
+const onboardingTitle = document.getElementById('onboarding-title')
+const onboardingBody = document.getElementById('onboarding-body')
+const onboardingPrev = document.getElementById('onboarding-prev') as HTMLButtonElement | null
+const onboardingNext = document.getElementById('onboarding-next') as HTMLButtonElement | null
+let onboardingIndex = -1
+
+function onboardingActive(): boolean {
+  return onboardingIndex >= 0
+}
+
+function readOnboardingDone(): boolean {
+  try {
+    return localStorage.getItem(ONBOARDING_KEY) === '1'
+  } catch {
+    // 存储不可用时视为已完成，避免每次启动都弹窗
+    return true
+  }
+}
+
+function markOnboardingDone(): void {
+  try {
+    localStorage.setItem(ONBOARDING_KEY, '1')
+  } catch {
+    // 忽略：仅影响下次是否自动弹出
+  }
+}
+
+function startOnboarding(): void {
+  if (!onboardingRoot) return
+  onboardingIndex = 0
+  renderOnboardingStep()
+}
+
+function endOnboarding(markDone: boolean): void {
+  onboardingIndex = -1
+  if (onboardingRoot) onboardingRoot.hidden = true
+  if (markDone) markOnboardingDone()
+}
+
+/** 计算并应用 spotlight 洞与气泡位置；目标不可见时回退为居中卡片模式 */
+function placeOnboardingCard(step: OnboardingStep): void {
+  if (!onboardingRoot || !onboardingCard || !onboardingSpot) return
+  const target = step.target ? document.querySelector(step.target) : null
+  const rect = target?.getBoundingClientRect()
+  const visible = !!rect && rect.width > 0 && rect.height > 0
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+
+  if (!target || !rect || !visible) {
+    onboardingRoot.classList.remove('spotlight')
+    onboardingSpot.hidden = true
+    onboardingCard.classList.add('centered')
+    onboardingCard.style.left = ''
+    onboardingCard.style.top = ''
+    return
+  }
+
+  onboardingCard.classList.remove('centered')
+  onboardingRoot.classList.add('spotlight')
+  onboardingSpot.hidden = false
+
+  const x = Math.max(rect.left - ONBOARDING_SPOT_PAD, 0)
+  const y = Math.max(rect.top - ONBOARDING_SPOT_PAD, 0)
+  const w = Math.min(rect.width + ONBOARDING_SPOT_PAD * 2, vw)
+  const h = Math.min(rect.height + ONBOARDING_SPOT_PAD * 2, vh)
+  // mask 双层合成挖洞：洞内 UI 可真实交互
+  onboardingRoot.style.setProperty('--spot-x', `${x}px`)
+  onboardingRoot.style.setProperty('--spot-y', `${y}px`)
+  onboardingRoot.style.setProperty('--spot-w', `${w}px`)
+  onboardingRoot.style.setProperty('--spot-h', `${h}px`)
+  onboardingSpot.style.left = `${x}px`
+  onboardingSpot.style.top = `${y}px`
+  onboardingSpot.style.width = `${w}px`
+  onboardingSpot.style.height = `${h}px`
+
+  const cardW = onboardingCard.offsetWidth
+  const cardH = onboardingCard.offsetHeight
+  let left = rect.right + 14
+  let top = rect.top
+  if (left + cardW > vw - ONBOARDING_CARD_MARGIN) left = rect.left - cardW - 14
+  if (left < ONBOARDING_CARD_MARGIN) {
+    // 右侧与左侧都放不下：放到目标下方，空间不足则放上方
+    left = Math.min(Math.max(rect.left, ONBOARDING_CARD_MARGIN), vw - cardW - ONBOARDING_CARD_MARGIN)
+    top = rect.bottom + 14
+    if (top + cardH > vh - ONBOARDING_CARD_MARGIN) top = rect.top - cardH - 14
+  }
+  left = Math.min(Math.max(left, ONBOARDING_CARD_MARGIN), Math.max(vw - cardW - ONBOARDING_CARD_MARGIN, ONBOARDING_CARD_MARGIN))
+  top = Math.min(Math.max(top, ONBOARDING_CARD_MARGIN), Math.max(vh - cardH - ONBOARDING_CARD_MARGIN, ONBOARDING_CARD_MARGIN))
+  onboardingCard.style.left = `${left}px`
+  onboardingCard.style.top = `${top}px`
+}
+
+function renderOnboardingStep(): void {
+  if (!onboardingRoot || !onboardingCard || onboardingIndex < 0) return
+  const step = ONBOARDING_STEPS[onboardingIndex]
+  step.prepare?.()
+  if (step.tab) switchTab(step.tab)
+
+  onboardingRoot.hidden = false
+  if (onboardingStepLabel) onboardingStepLabel.textContent = `第 ${onboardingIndex + 1} 步 · 共 ${ONBOARDING_STEPS.length} 步`
+  if (onboardingTitle) onboardingTitle.textContent = step.title
+  if (onboardingBody) onboardingBody.textContent = step.body
+  if (onboardingPrev) onboardingPrev.disabled = onboardingIndex === 0
+  if (onboardingNext) onboardingNext.textContent = onboardingIndex === ONBOARDING_STEPS.length - 1 ? '完成' : '下一步'
+  // 等一帧让 switchTab 的面板切换与布局生效后再测量定位
+  requestAnimationFrame(() => {
+    if (!onboardingActive()) return
+    placeOnboardingCard(step)
+  })
+}
+
+document.getElementById('onboarding-prev')?.addEventListener('click', () => {
+  if (onboardingIndex > 0) {
+    onboardingIndex -= 1
+    renderOnboardingStep()
+  }
+})
+document.getElementById('onboarding-next')?.addEventListener('click', () => {
+  if (onboardingIndex >= ONBOARDING_STEPS.length - 1) endOnboarding(true)
+  else {
+    onboardingIndex += 1
+    renderOnboardingStep()
+  }
+})
+document.getElementById('onboarding-skip')?.addEventListener('click', () => endOnboarding(true))
+document.getElementById('onboarding-replay')?.addEventListener('click', () => startOnboarding())
+window.addEventListener('resize', () => {
+  // 只重算高亮位置，不重跑 prepare/switchTab，避免拖拽窗口时反复切 Tab、退出全屏或触发 IPC
+  if (onboardingActive()) placeOnboardingCard(ONBOARDING_STEPS[onboardingIndex])
+})
+
+// 首次访问（未完成过引导）时自动开始
+if (!readOnboardingDone()) startOnboarding()
