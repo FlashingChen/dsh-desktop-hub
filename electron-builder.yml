@@ -26,7 +26,17 @@ mac:
     # DMG 用于首次下载安装；正式签名后 zip 才作为 electron-updater 的 macOS 更新载荷。
     - target: zip
       arch: [arm64]
+  # 签名策略：默认 identity 显式为 null —— 本地无 Developer ID 证书时干净跳过签名
+  # （不会被钥匙串里的 Apple Development 证书误签导致出包失败）。
+  # Release CI 签名步骤用 -c.mac.identity="" 覆盖（空字符串≠null，会启用自动发现，
+  # 在 CSC_LINK 导入的临时钥匙串里找到 Developer ID 证书后签名公证）。
+  # 注意 v26 语义：identity 为 null 时连 CSC_LINK 也被无视，故不能靠环境变量单独开启。
   identity: null
+  hardenedRuntime: true
+  # arm64 Electron 渲染进程需要 JIT 权限，否则签名后启动即崩溃；
+  # electron-builder 默认读取 build/entitlements.mac.plist
+  entitlements: build/entitlements.mac.plist
+  notarize: true
 dmg:
   artifactName: DSH-Desktop-Hub-${version}-${arch}.${ext}
 # Windows：NSIS assisted 向导，可选择安装目录；per-user 免管理员

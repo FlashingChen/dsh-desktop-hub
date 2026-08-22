@@ -25,6 +25,9 @@ jobs:
     name: Build macOS installer (${{ github.ref_name }})
     runs-on: macos-15 # arm64 runner，匹配 electron-builder.yml 中的 mac.arch: arm64
     needs: create-release
+    # 步骤级 if 无法直接读 secrets，先映射到 job env 用于签名/回退分支判断
+    env:
+      MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,9 +53,27 @@ jobs:
       - name: Bundle runtime (Node + DSH, darwin)
         run: node scripts/bundle-runtime.mjs
 
-      - name: Package macOS installers
-        # DMG 给首次安装；正式签名后 zip + blockmap 供 electron-updater 下载更新。
-        # 显式 arch 与 runner 架构解耦（CLI 平台参数会覆盖 yml 的 arch 配置）
+      - name: Package macOS installers (signed + notarized)
+        # DMG 给首次安装；签名后 zip + blockmap 供 electron-updater 下载更新。
+        # 显式 arch 与 runner 架构解耦（CLI 平台参数会覆盖 yml 的 arch 配置）。
+        # 签名与公证：仓库 Secrets 配齐 MAC_CERT_P12 / MAC_CERT_PASSWORD / APPLE_ID /
+        # APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID 后走本步骤；未配置时走下方回退步骤。
+        # 注意：此处不可设 CSC_IDENTITY_AUTO_DISCOVERY=false——v26 下会连 CSC_LINK
+        # 导入的临时钥匙串也跳过查找，导致配了证书仍不签名；也不可用 CSC_NAME
+        # 指定证书名（v26 禁止带 Developer ID Application 前缀，自动发现即可）。
+        # -c.mac.identity="" 覆盖 yml 的 null（空串走自动发现，null 则无条件跳过签名）。
+        if: env.MAC_CERT_P12 != ''
+        run: npx electron-builder --mac dmg zip --arm64 -c.mac.identity="" --publish never
+        env:
+          CSC_LINK: ${{ secrets.MAC_CERT_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Package macOS installers (unsigned fallback)
+        # 未配置签名 secrets 时的回退：与历史行为一致，显式关闭签名探测。
+        if: env.MAC_CERT_P12 == ''
         run: npx electron-builder --mac dmg zip --arm64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
