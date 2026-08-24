@@ -141,7 +141,7 @@ interface DesktopApi {
     url: () => Promise<string | null>
     restart: () => Promise<{ ok: boolean; url?: string; error?: string }>
     onFrameLoaded: (cb: (url: string) => void) => void
-    onStatus: (cb: (status: { state: string; url?: string; code?: number | null }) => void) => void
+    onStatus: (cb: (status: { state: string; url?: string; code?: number | null; since?: number }) => void) => void
   }
   updates: {
     status: () => Promise<UpdateStatus>
@@ -1620,10 +1620,16 @@ function setUpdateStatus(status: UpdateStatus): void {
       text = '当前已是最新版本'
       kind = 'ok'
       break
-    case 'error':
-      text = `更新失败：${status.error ?? '未知错误'}`
+    case 'error': {
+      const raw = status.error ?? '未知错误'
+      // GitHub 在部分地区/网络下不可达：给出可操作提示而不是看似「坏了」的裸错误（Issue #35）
+      const networkHint = /timeout|timed out|ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|getaddrinfo|network|net::/i.test(raw)
+        ? '\n若网络访问 GitHub 受限，可使用系统代理后重试，或从 Releases 页手动下载安装包'
+        : ''
+      text = `更新失败：${raw}${networkHint}`
       kind = 'error'
       break
+    }
   }
   appUpdateStatus.textContent = text
   appUpdateStatus.className = `sidebar-update-status${kind ? ` ${kind}` : ''}`
@@ -1722,16 +1728,54 @@ function setHarnessLoading(state: string): void {
   const active = state === 'starting' || state === 'restarting' || state === 'reconnecting'
   harnessLoading.hidden = !active
   if (!harnessLoadingText || !active) return
-  const text =
-    state === 'starting'
-      ? '正在启动 DeepSeek Harness…\n（首次运行或需 1-2 分钟，请稍候）'
-      : state === 'restarting'
-        ? 'Harness 重启中…'
-        : '正在重新连接…'
-  harnessLoadingText.textContent = text
+  harnessLoadingText.textContent = harnessWaitText(state, 0)
 }
 
-function setHarnessStatusText(status: { state: string; url?: string; code?: number | null; error?: string }): void {
+// ---- 启动等待计时（Issue #35）：让慢启动可见为进度而非卡死，超时后给出可操作建议 ----
+let harnessWaitTicker: number | null = null
+let harnessWaitStartedAt = 0
+/** 超过该等待秒数后在提示里追加杀毒软件扫描建议（与主进程 SLOW_START_LOG_MS 对齐） */
+const HARNESS_WAIT_HINT_AFTER_MS = 45_000
+
+function harnessWaitText(state: 'starting' | 'restarting' | 'reconnecting', elapsedMs: number): string {
+  const seconds = Math.floor(elapsedMs / 1000)
+  const waited = seconds > 0 ? `（已等待 ${seconds} 秒）` : ''
+  if (state === 'starting') {
+    const base = `正在启动 DeepSeek Harness…${waited}`
+    // 正常环境数秒内就绪；明显偏慢时大概率是安全软件逐文件扫描捆绑运行时
+    return elapsedMs >= HARNESS_WAIT_HINT_AFTER_MS
+      ? `${base}\n启动较慢？杀毒软件/Defender 扫描新安装的运行时可能显著拖慢启动；\n将 DSH Desktop Hub 安装目录加入排除项通常可加速`
+      : `${base}\n通常几秒内完成；首次运行或被安全软件扫描时可能需要更久，请稍候`
+  }
+  if (state === 'restarting') return `Harness 重启中…${waited}`
+  return `正在重新连接…${waited}`
+}
+
+function startHarnessWaitTicker(state: 'starting' | 'restarting' | 'reconnecting', sinceMs: number): void {
+  stopHarnessWaitTicker()
+  harnessWaitStartedAt = sinceMs
+  const tick = (): void => {
+    const elapsed = Date.now() - harnessWaitStartedAt
+    if (harnessLoadingText && !harnessLoading?.hidden) {
+      harnessLoadingText.textContent = harnessWaitText(state, elapsed)
+    }
+    if (state !== 'reconnecting') {
+      const el = document.getElementById('harness-status')
+      if (el) el.textContent = harnessWaitText(state, elapsed).replace('\n', ' ')
+    }
+  }
+  tick()
+  harnessWaitTicker = window.setInterval(tick, 1000)
+}
+
+function stopHarnessWaitTicker(): void {
+  if (harnessWaitTicker !== null) {
+    window.clearInterval(harnessWaitTicker)
+    harnessWaitTicker = null
+  }
+}
+
+function setHarnessStatusText(status: { state: string; url?: string; code?: number | null; error?: string; since?: number }): void {
   const el = document.getElementById('harness-status')
   if (!el) return
   currentHarnessState = status.state
@@ -1745,7 +1789,7 @@ function setHarnessStatusText(status: { state: string; url?: string; code?: numb
   let kind: '' | 'ok' | 'error' = ''
   switch (status.state) {
     case 'starting':
-      menuText = 'Harness 启动中…（首次运行或需 1-2 分钟，请稍候）'
+      menuText = 'Harness 启动中…'
       break
     case 'restarting':
       menuText = 'Harness 重启中…'
@@ -1766,6 +1810,13 @@ function setHarnessStatusText(status: { state: string; url?: string; code?: numb
   if (harnessBadge) harnessBadge.title = menuText
   el.textContent = menuText
   el.className = `harness-status${kind ? ` ${kind}` : ''}`
+  // 等待类状态启动秒表（在静态文案之后启动，tick 会覆写为带计时的提示）：
+  // 把慢启动呈现为进度而不是卡死；其余状态停表
+  if (status.state === 'starting' || status.state === 'restarting') {
+    startHarnessWaitTicker(status.state, status.since ?? Date.now())
+  } else {
+    stopHarnessWaitTicker()
+  }
   // 连接完成后自动缩回左下角徽章，不再遮挡界面；故障时自动展开便于查看原因并操作
   if (status.state === 'ready' || status.state === 'starting' || status.state === 'restarting') setHarnessMenuOpen(false)
   else if (status.state === 'exited') setHarnessMenuOpen(true)
@@ -1902,7 +1953,7 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
   },
   {
     title: 'Harness 主界面',
-    body: '这里内嵌了完整的 DeepSeek Harness Web 界面。首次启动约需 1-2 分钟，就绪后即可直接对话使用。',
+    body: '这里内嵌了完整的 DeepSeek Harness Web 界面。通常几秒内完成连接；首次运行或被安全软件扫描时可能需要更久，就绪后即可直接对话使用。',
     tab: 'harness',
     target: '#harness-frame',
   },
