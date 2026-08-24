@@ -66,6 +66,9 @@ const HARNESS_SMOKE = argv.includes('--harness-smoke')
 initLog()
 log(`argv=${JSON.stringify(argv)}`)
 
+/** 超过该耗时视为慢启动：日志给出可操作提示，诊断块带上实际秒数（Issue #35） */
+const SLOW_START_LOG_MS = 45_000
+
 app.setName(APP_NAME)
 // Windows 任务栏分组/通知归属（须在 ready 前设置）；其他平台无此概念
 if (process.platform === 'win32') app.setAppUserModelId('com.dshdesktophub.app')
@@ -74,6 +77,8 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let harness: HarnessHandle | null = null
 let lastHarnessStatus: HarnessStatus = { state: 'starting' }
+/** 上次成功就绪的 Harness 启动耗时（ms）；诊断与慢启动日志用（Issue #35） */
+let lastHarnessStartupMs: number | null = null
 let restarting = false
 let stoppingHarness = false
 /** 已收到用户退出请求；普通关闭按钮只隐藏到托盘，显式退出时才真正关闭窗口。 */
@@ -166,6 +171,8 @@ function buildDiagnosticText(): string {
     pnpmVersion,
     harnessState: diagnosticHarnessState(lastHarnessStatus.state),
     harnessExitCode: typeof lastHarnessStatus.code === 'number' ? lastHarnessStatus.code : null,
+    harnessStartupMs: lastHarnessStartupMs,
+    updateState: updater.status().state,
   })
 }
 
@@ -878,9 +885,9 @@ function watchHarness(proc: HarnessHandle['proc']): void {
 }
 
 function sendHarnessStatus(status: HarnessStatus): void {
-  lastHarnessStatus = status
+  lastHarnessStatus = { ...status, since: Date.now() }
   try {
-    shellWebContents()?.send(IPC.harnessStatus, status)
+    shellWebContents()?.send(IPC.harnessStatus, lastHarnessStatus)
   } catch {
     /* 窗口未就绪/已销毁：状态仍由日志留痕 */
   }
@@ -890,6 +897,7 @@ function sendHarnessStatus(status: HarnessStatus): void {
 async function startHarnessAndWatch(): Promise<void> {
   const generation = ++harnessStartGeneration
   sendHarnessStatus({ state: 'starting' })
+  const startedAt = Date.now()
   try {
     const exec = resolveDshExec()
     if (!exec) {
@@ -922,7 +930,12 @@ async function startHarnessAndWatch(): Promise<void> {
     harness = next
     startingProc = null
     watchHarness(next.proc)
-    log(`harness: 就绪 ${next.url}`)
+    lastHarnessStartupMs = Date.now() - startedAt
+    log(`harness: 就绪 ${next.url}（启动耗时 ${(lastHarnessStartupMs / 1000).toFixed(1)}s）`)
+    if (lastHarnessStartupMs > SLOW_START_LOG_MS) {
+      log(`harness: 本次启动超过 ${Math.round(SLOW_START_LOG_MS / 1000)}s —— 常见原因是杀毒软件/Defender 逐文件扫描捆绑运行时；` +
+        '将 DSH Desktop Hub 安装目录加入排除项通常可显著加速（详见运行日志与反馈诊断中的 Harness last startup）')
+    }
     sendHarnessStatus({ state: 'ready', url: next.url })
   } catch (err) {
     // 被主动停止/新一代启动取消的 Promise 不算启动失败，也不能触发自动重试。
