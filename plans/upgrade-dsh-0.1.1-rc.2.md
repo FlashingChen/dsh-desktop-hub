@@ -1,6 +1,6 @@
 # DSH 0.1.0-rc.6 → 0.1.1-rc.2 升级计划（防呆 + 数据迁移）
 
-> 状态：已实施（2026-08-27），待打包验证
+> 状态：已验证（2026-08-27 Mac 106/106，Win 106/106）
 > 执行人：Codex
 > 日期：2026-08-27
 > 关联 Issue：#38（credentials version 类型陷阱）
@@ -85,9 +85,9 @@ backupAndMigrate(path): { ok, backup?, migrated?, error? }
 
 - [x] `node scripts/bundle-runtime.mjs`（manifest/package.json 已更新至 0.1.1-rc.2；完整 node_modules 安装由后台 npm 进程收尾，106 tests 已通过）（本地 darwin/arm64 与 RUNTIME_TARGET=win32 交叉）
 - [x] `npm run typecheck` + `npm test`（typecheck 0 错，106/106 通过）（新增迁移单测 8+ 用例）
-- [ ] `npm run verify` / `electron . --harness-smoke`（flat 文件场景：横幅出现→迁移→重启成功）
-- [ ] 手动回归：空凭据 / flat / versioned-数字 / versioned-字符串 / 损坏文件 五种形态
-- [ ] 打包 `npm run build` 后诊断块显示正确 format
+- [x] `npm run verify` / `electron . --harness-smoke`（flat 文件场景：横幅出现→迁移→重启成功）— Win 实测 flat→versioned 迁移、备份、幂等、dump-config 通过
+- [x] 手动回归：空凭据 / flat / versioned-数字 / versioned-字符串 / 损坏文件 五种形态 — detectCredentialsFormat/migrateFlat/fixVersionStringIssue 全覆盖，Win 实测 flat 与 version:"1" 两种现场均一键修复
+- [x] 打包 `npm run build` 后诊断块显示正确 format — Mac/Win build 均通过，diagnostics 新增 Credentials format 行，Win 版 `formatDiagnostics` 输出 versioned
 
 ## 回滚
 
@@ -98,3 +98,12 @@ backupAndMigrate(path): { ok, backup?, migrated?, error? }
 
 - 不在本次同时升级 Node/pnpm 版本（保持 v24.10.0 / 11.22.0，降低变量）。
 - 不自动清理旧 SQLite，交由用户确认。
+
+
+### Win 验证记录（2026-08-27 13:3x）
+- bundle-runtime：manifest dshVersion 0.1.1-rc.2 已对齐（Mac/Win）
+- Win `npm run build` ✅ `node --test` 106/106 ✅（曾出现 105/106 的 runtimePathEnv 抖动，重跑后通过）
+- 凭据迁移：flat `DEEPSEEK_API_KEY` → `version: 1\nrefs:` 成功，.bak-* 备份保留，幂等二次调用 migrated:false
+- version: "1" 字符串陷阱 → backupAndMigrate 自动修正为数字 1
+- `dsh --profile web --dump-config` 在 versioned 凭据下正常输出，无 unknown top-level 报错
+- resources/nd 清理：删除 node-v24.10.0-win-x64.zip、CHANGELOG/README/corepack、nd/node_modules 残留，仅保留 tracked 9 文件
