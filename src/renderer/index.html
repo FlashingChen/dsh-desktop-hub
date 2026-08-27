@@ -708,7 +708,14 @@
         height: 30px;
         width: 30px;
       }
-      .harness-loading-text {
+      .credentials-banner { align-items: center; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px; color: #92400e; display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 10px 0; padding: 10px 12px; font-size: 12px; }
+.credentials-banner[hidden] { display: none; }
+.credentials-banner-text { flex: 1; min-width: 200px; }
+.credentials-banner-actions { display: flex; gap: 8px; }
+.credentials-banner-actions button { border-radius: 4px; border: 1px solid #f59e0b; cursor: pointer; font-size: 12px; padding: 5px 10px; }
+.credentials-banner-actions .primary { background: #f59e0b; color: #fff; }
+.credentials-banner-actions .secondary { background: #fff; color: #92400e; }
+.harness-loading-text {
         color: var(--ink-soft);
         font-size: 12px;
         line-height: 1.6;
@@ -972,6 +979,13 @@
       </aside>
       <main>
         <section class="panel active" id="panel-harness" role="tabpanel" aria-labelledby="tab-harness">
+          <div id="credentials-banner" class="credentials-banner" hidden role="alert">
+            <span id="credentials-banner-text" class="credentials-banner-text">检测到旧版凭据格式</span>
+            <span class="credentials-banner-actions">
+              <button id="credentials-migrate-btn" class="primary" type="button">一键迁移并重启</button>
+              <button id="credentials-dismiss-btn" class="secondary" type="button">稍后</button>
+            </span>
+          </div>
           <div class="harness-wrap">
             <iframe id="harness-frame" title="DeepSeek Harness" allow="clipboard-read; clipboard-write"></iframe>
             <div class="harness-loading" id="harness-loading" role="status" aria-live="polite" hidden>

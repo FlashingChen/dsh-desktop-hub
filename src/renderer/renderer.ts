@@ -192,6 +192,11 @@ interface DesktopApi {
       diagnostics?: string | null
     }) => Promise<FeedbackSubmitResult>
   }
+  credentials: {
+    status: () => Promise<{ format: string; path: string; text?: string; error?: string }>
+    migrate: () => Promise<{ ok: boolean; backupPath?: string; error?: string }>
+    openBackup: (backupPath: string) => Promise<{ ok: boolean; error?: string }>
+  }
 }
 
 interface SkillsImportResult {
@@ -270,6 +275,7 @@ function switchTab(id: TabId): void {
     panel?.setAttribute('aria-hidden', String(!active))
   }
   if (id === 'feedback') void refreshFeedbackDiagnostics()
+  if (id === 'harness') void checkCredentialsMigration()
 }
 
 harnessFullscreenButton?.addEventListener('click', () => {
@@ -1829,6 +1835,49 @@ function sameHarnessUrl(left: string, right: string): boolean {
   return left.replace(/\/+$/, '') === right.replace(/\/+$/, '')
 }
 
+let credentialsMigrating = false
+async function checkCredentialsMigration(): Promise<void> {
+  if (!api?.credentials) return
+  const banner = document.getElementById('credentials-banner') as HTMLElement | null
+  const textEl = document.getElementById('credentials-banner-text') as HTMLElement | null
+  const btn = document.getElementById('credentials-migrate-btn') as HTMLButtonElement | null
+  const dismiss = document.getElementById('credentials-dismiss-btn') as HTMLButtonElement | null
+  if (!banner || !textEl) return
+  try {
+    const res = await api.credentials.status()
+    if (res.format === 'flat') {
+      textEl.textContent = `检测到旧版凭据格式（flat），建议一键迁移到新版（versioned）。已准备备份，迁移前会自动备份到 ${res.path}.bak-*。`
+      banner.hidden = false
+      if (btn) btn.disabled = credentialsMigrating
+    } else if (res.format === 'unknown') {
+      textEl.textContent = `凭据文件格式异常（unknown），请手动检查 ${res.path}。错误：${res.error ?? '解析失败'}`
+      banner.hidden = false
+      if (btn) btn.disabled = true
+    } else {
+      banner.hidden = true
+    }
+  } catch { banner.hidden = true }
+}
+async function doMigrateCredentials(): Promise<void> {
+  if (credentialsMigrating || !api?.credentials) return
+  credentialsMigrating = true
+  const btn = document.getElementById('credentials-migrate-btn') as HTMLButtonElement | null
+  const textEl = document.getElementById('credentials-banner-text') as HTMLElement | null
+  if (btn) btn.disabled = true
+  if (textEl) textEl.textContent = '正在备份并迁移…'
+  try {
+    const res = await api.credentials.migrate()
+    if (res.ok) {
+      if (textEl) textEl.textContent = `迁移成功，备份：${res.backupPath ?? '已备份'}。正在重启 Harness…`
+      await api.harness.restart()
+      setTimeout(() => checkCredentialsMigration(), 1500)
+    } else {
+      if (textEl) textEl.textContent = `迁移失败：${res.error ?? '未知错误'}，请手动检查或复制诊断信息反馈。`
+      if (btn) btn.disabled = false
+    }
+  } finally { credentialsMigrating = false }
+}
+
 async function mountHarness(): Promise<void> {
   const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
   if (!frame || !api) return
@@ -1837,6 +1886,7 @@ async function mountHarness(): Promise<void> {
   // 窗口先行时 harness 可能尚未就绪：保持「连接中…」，等待 onStatus 推送，不误显示已退出
   if (!url) return
   frame.src = url
+  void checkCredentialsMigration()
 }
 
 async function restartHarness(): Promise<boolean> {
@@ -1903,6 +1953,7 @@ if (api) {
     if (frame && !sameHarnessUrl(frame.src, url)) frame.src = url
   })
   // 窗口先行：收到 ready 时必须把 iframe 挂到新 URL（首次 mount 时 harness 可能未就绪）
+  void checkCredentialsMigration()
   api.harness.onStatus((status) => {
     setHarnessStatusText(status)
     if (status.state === 'ready' && status.url) {
@@ -1912,6 +1963,8 @@ if (api) {
   })
   document.getElementById('harness-reconnect')?.addEventListener('click', () => void reconnectHarness())
   document.getElementById('harness-restart')?.addEventListener('click', () => void restartHarness())
+document.getElementById('credentials-migrate-btn')?.addEventListener('click', () => void doMigrateCredentials())
+document.getElementById('credentials-dismiss-btn')?.addEventListener('click', () => { const b=document.getElementById('credentials-banner'); if(b) b.hidden=true })
   harnessBadge?.addEventListener('click', () => {
     setHarnessMenuOpen(harnessMenu ? harnessMenu.hidden : false)
   })

@@ -34,6 +34,9 @@ const CH = {
   skillsImportClawHub: 'skills:import-clawhub',
   marketList: 'market:list',
   marketPluginPreflight: 'market:plugin-preflight',
+  credentialsStatus: 'credentials:status',
+  credentialsMigrate: 'credentials:migrate',
+  credentialsOpenBackup: 'credentials:open-backup',
   feedbackDiagnostics: 'feedback:diagnostics',
   feedbackCopy: 'feedback:copy',
   feedbackSubmit: 'feedback:submit',
@@ -139,6 +142,11 @@ contextBridge.exposeInMainWorld('dshDesktop', {
   market: {
     list: (kind: 'plugin' | 'mcp' | 'skill', query?: string) => ipcRenderer.invoke(CH.marketList, kind, query),
     preflightPlugin: (spec: string) => ipcRenderer.invoke(CH.marketPluginPreflight, spec),
+  },
+  credentials: {
+    status: (): Promise<{ format: string; path: string; backupPath?: string; error?: string }> => ipcRenderer.invoke(CH.credentialsStatus),
+    migrate: (): Promise<{ ok: boolean; backupPath?: string; error?: string }> => ipcRenderer.invoke(CH.credentialsMigrate),
+    openBackup: (backupPath: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke(CH.credentialsOpenBackup, backupPath),
   },
   feedback: {
     diagnostics: (): Promise<{ ok: boolean; text?: string; error?: string }> => ipcRenderer.invoke(CH.feedbackDiagnostics),

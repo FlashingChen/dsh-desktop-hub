@@ -40,6 +40,7 @@ import {
 import { scanSkills, createSkill, setInvocation, importSkillFromZip, importSkillFromGitHub, importSkillFromClawHub, type SkillSummary } from '../core/skills.js'
 import { IPC, type PluginOpAction, type HarnessStatus } from '../core/ipc.js'
 import { DIAGNOSTIC_FORMAT_VERSION, formatDiagnostics, type DiagnosticHarnessState } from '../core/diagnostics.js'
+import { checkCredentialsFile, backupAndMigrate, credentialsPath } from '../core/credentials-migration.js'
 import { normalizeFeedbackInput, toFeedbackPayload } from '../core/feedback.js'
 import { submitFeedback } from '../core/feedback-client.js'
 import { initLog, log } from '../core/log.js'
@@ -155,6 +156,7 @@ function buildDiagnosticText(): string {
   const manifest = readRuntimeManifest()
   const dshVersion = typeof manifest?.dshVersion === 'string' ? manifest.dshVersion : null
   const pnpmVersion = typeof manifest?.pnpmVersion === 'string' ? manifest.pnpmVersion : null
+  const cred = checkCredentialsFile()
   return formatDiagnostics({
     formatVersion: DIAGNOSTIC_FORMAT_VERSION,
     generatedAt: new Date().toISOString(),
@@ -173,6 +175,7 @@ function buildDiagnosticText(): string {
     harnessExitCode: typeof lastHarnessStatus.code === 'number' ? lastHarnessStatus.code : null,
     harnessStartupMs: lastHarnessStartupMs,
     updateState: updater.status().state,
+    credentialsFormat: cred.format,
   })
 }
 
@@ -357,6 +360,35 @@ function registerIpc(): void {
   ipcMain.handle(IPC.harnessRestart, (event) => {
     assertRendererSender(event)
     return restartHarness()
+  })
+
+  ipcMain.handle(IPC.credentialsStatus, (event) => {
+    assertRendererSender(event)
+    const cred = checkCredentialsFile()
+    return { format: cred.format, path: credentialsPath(), text: cred.text?.slice(0, 200) ?? undefined }
+  })
+
+  ipcMain.handle(IPC.credentialsMigrate, (event) => {
+    assertRendererSender(event)
+    const result = backupAndMigrate()
+    if (result.ok && result.migrated) log(`credentials: 已迁移 ${result.formatBefore} → ${result.formatAfter} 备份 ${result.backupPath}`)
+    else if (!result.ok) log(`credentials: 迁移失败 ${result.error}`)
+    return result.ok ? { ok: true as const, backupPath: result.backupPath } : { ok: false as const, error: result.error }
+  })
+
+  ipcMain.handle(IPC.credentialsOpenBackup, async (event, backupPath: unknown) => {
+    assertRendererSender(event)
+    if (typeof backupPath !== 'string' || !backupPath) return { ok: false as const, error: '无效备份路径' }
+    // 仅允许打开 .credentials.yaml.bak-* 备份，且必须在 DSH_HOME 内
+    const home = dshHome()
+    const rel = backupPath.startsWith(home) ? backupPath : ''
+    if (!rel || !backupPath.includes('.credentials.yaml.bak-')) return { ok: false as const, error: '路径不在允许范围' }
+    try {
+      await shell.openPath(backupPath)
+      return { ok: true as const }
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) }
+    }
   })
 
   ipcMain.handle(IPC.feedbackDiagnostics, (event) => {
