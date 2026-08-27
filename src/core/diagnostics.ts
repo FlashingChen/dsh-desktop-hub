@@ -32,6 +32,8 @@ export interface DiagnosticSnapshot {
   harnessStartupMs?: number | null
   /** 应用内更新状态枚举（idle/checking/available/…）；不包含错误详情文本 */
   updateState?: string | null
+  /** 凭据文件格式（flat/versioned/missing/unknown），用于 Issue #38 排障 */
+  credentialsFormat?: string | null
 }
 
 function oneLine(value: string): string {
@@ -76,6 +78,7 @@ export function formatDiagnostics(snapshot: DiagnosticSnapshot): string {
     ['Harness exit code', exitCodeOrDash(snapshot.harnessExitCode)],
     ['Harness last startup', durationOrDash(snapshot.harnessStartupMs)],
     ['App update state', snapshot.updateState ?? '—'],
+    ['Credentials format', snapshot.credentialsFormat ?? '—'],
   ]
   const lines = [
     '<!-- DSH Desktop Hub diagnostics: low-sensitivity whitelist v1 -->',

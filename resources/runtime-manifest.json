@@ -2,9 +2,9 @@
   "nodeVersion": "v24.10.0",
   "nodeTarball": "node-v24.10.0-win-x64.zip",
   "nodeSha256": "adc1a2d5ca79c92e94f3a58c3ec0efa76bdb488769ba4d4b50990e4c84896060",
-  "dshVersion": "0.1.0-rc.6",
+  "dshVersion": "0.1.1-rc.2",
   "pnpmVersion": "11.22.0",
   "platform": "win32",
   "arch": "x64",
-  "generatedAt": "2026-08-17T02:33:25.056Z"
+  "generatedAt": "2026-08-27T05:12:08.059372Z"
 }

@@ -14,7 +14,7 @@ import AdmZip from 'adm-zip'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const NODE_VER = 'v24.10.0'
-const DSH_VERSION = '0.1.0-rc.6'
+const DSH_VERSION = '0.1.1-rc.2'
 const PNPM_VERSION = '11.22.0'
 // 交叉捆绑：RUNTIME_TARGET=win32 时在非 Windows 机器上为 win32/x64 组装运行时
 // （下载 win-x64.zip + npm --os/--cpu 按目标平台解析 optionalDependencies）。
