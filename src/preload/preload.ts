@@ -144,7 +144,7 @@ contextBridge.exposeInMainWorld('dshDesktop', {
     preflightPlugin: (spec: string) => ipcRenderer.invoke(CH.marketPluginPreflight, spec),
   },
   credentials: {
-    status: (): Promise<{ format: string; path: string; backupPath?: string; error?: string }> => ipcRenderer.invoke(CH.credentialsStatus),
+    status: (): Promise<{ format: string; path: string; text?: string }> => ipcRenderer.invoke(CH.credentialsStatus),
     migrate: (): Promise<{ ok: boolean; backupPath?: string; error?: string }> => ipcRenderer.invoke(CH.credentialsMigrate),
     openBackup: (backupPath: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke(CH.credentialsOpenBackup, backupPath),
   },

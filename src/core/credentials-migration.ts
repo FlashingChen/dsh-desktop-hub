@@ -1,9 +1,9 @@
 // Credentials migration: flat → versioned (version: 1 + refs:)
 // 复刻上游 dsh-credentials-local@0.1.1 的 renderFlatLayoutMigration 校验，不依赖该包。
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
-import { parseDocument, isMap, isScalar, Document } from 'yaml'
+import { join } from 'node:path'
+import { parseDocument, isMap, isScalar } from 'yaml'
 import { atomicWriteWithBackup } from './mcp.js'
 
 export type CredentialsFormat = 'flat' | 'versioned' | 'empty' | 'missing' | 'unknown'

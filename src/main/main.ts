@@ -379,10 +379,10 @@ function registerIpc(): void {
   ipcMain.handle(IPC.credentialsOpenBackup, async (event, backupPath: unknown) => {
     assertRendererSender(event)
     if (typeof backupPath !== 'string' || !backupPath) return { ok: false as const, error: '无效备份路径' }
-    // 仅允许打开 .credentials.yaml.bak-* 备份，且必须在 DSH_HOME 内
+    // 仅允许打开 .credentials.yaml.bak-* 备份，且必须在 DSH_HOME 内（防目录穿越）
     const home = dshHome()
-    const rel = backupPath.startsWith(home) ? backupPath : ''
-    if (!rel || !backupPath.includes('.credentials.yaml.bak-')) return { ok: false as const, error: '路径不在允许范围' }
+    const rel = relative(home, backupPath)
+    if (!rel || rel.startsWith('..') || isAbsolute(rel) || !backupPath.includes('.credentials.yaml.bak-')) return { ok: false as const, error: '路径不在允许范围' }
     try {
       await shell.openPath(backupPath)
       return { ok: true as const }

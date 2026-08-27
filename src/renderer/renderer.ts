@@ -1850,7 +1850,7 @@ async function checkCredentialsMigration(): Promise<void> {
       banner.hidden = false
       if (btn) btn.disabled = credentialsMigrating
     } else if (res.format === 'unknown') {
-      textEl.textContent = `凭据文件格式异常（unknown），请手动检查 ${res.path}。错误：${res.error ?? '解析失败'}`
+      textEl.textContent = `凭据文件格式异常（unknown），请手动检查 ${res.path}。${res.text ? `内容：${res.text.slice(0,80)}` : '解析失败'}`
       banner.hidden = false
       if (btn) btn.disabled = true
     } else {
@@ -1963,8 +1963,8 @@ if (api) {
   })
   document.getElementById('harness-reconnect')?.addEventListener('click', () => void reconnectHarness())
   document.getElementById('harness-restart')?.addEventListener('click', () => void restartHarness())
-document.getElementById('credentials-migrate-btn')?.addEventListener('click', () => void doMigrateCredentials())
-document.getElementById('credentials-dismiss-btn')?.addEventListener('click', () => { const b=document.getElementById('credentials-banner'); if(b) b.hidden=true })
+  document.getElementById('credentials-migrate-btn')?.addEventListener('click', () => void doMigrateCredentials())
+  document.getElementById('credentials-dismiss-btn')?.addEventListener('click', () => { const b=document.getElementById('credentials-banner'); if(b) b.hidden=true })
   harnessBadge?.addEventListener('click', () => {
     setHarnessMenuOpen(harnessMenu ? harnessMenu.hidden : false)
   })
