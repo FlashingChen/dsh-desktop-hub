@@ -40,7 +40,7 @@ import {
 import { scanSkills, createSkill, setInvocation, importSkillFromZip, importSkillFromGitHub, importSkillFromClawHub, type SkillSummary } from '../core/skills.js'
 import { IPC, type PluginOpAction, type HarnessStatus } from '../core/ipc.js'
 import { DIAGNOSTIC_FORMAT_VERSION, formatDiagnostics, type DiagnosticHarnessState } from '../core/diagnostics.js'
-import { checkCredentialsFile, backupAndMigrate, credentialsPath } from '../core/credentials-migration.js'
+import { checkCredentialsFile, backupAndMigrate, credentialsPath, dshSupportsVersioned } from '../core/credentials-migration.js'
 import { normalizeFeedbackInput, toFeedbackPayload } from '../core/feedback.js'
 import { submitFeedback } from '../core/feedback-client.js'
 import { initLog, log } from '../core/log.js'
@@ -183,6 +183,23 @@ const DEFAULT_FEEDBACK_ENDPOINT = 'https://feedback.flashingchen.xyz/v1/feedback
 
 function feedbackEndpoint(): string {
   return (process.env.DSH_FEEDBACK_ENDPOINT ?? DEFAULT_FEEDBACK_ENDPOINT).trim()
+}
+
+function feedbackBaseUrl(): string {
+  try {
+    const u = new URL(feedbackEndpoint())
+    return `${u.protocol}//${u.host}`
+  } catch { return 'https://feedback.flashingchen.xyz' }
+}
+
+async function fetchJson(url: string, timeoutMs = 10000): Promise<unknown> {
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: ctrl.signal })
+    const text = await res.text()
+    try { return JSON.parse(text) } catch { return { ok: false, code: 'invalid_response', message: text.slice(0,300) } }
+  } finally { clearTimeout(t) }
 }
 
 // ---- IPC 来源校验（P1-2 / P2-9）：只接受壳层主帧，拒绝 harness iframe / 外部页 ----
@@ -365,7 +382,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.credentialsStatus, (event) => {
     assertRendererSender(event)
     const cred = checkCredentialsFile()
-    return { format: cred.format, path: credentialsPath(), text: cred.text?.slice(0, 200) ?? undefined }
+    return { format: cred.format, path: credentialsPath(), text: cred.text?.slice(0, 200) ?? undefined, supportsVersioned: dshSupportsVersioned() }
   })
 
   ipcMain.handle(IPC.credentialsMigrate, (event) => {
@@ -419,6 +436,61 @@ function registerIpc(): void {
       profile: ACTIVE_PROFILE,
     })
     return submitFeedback(payload, { endpoint: feedbackEndpoint() })
+  })
+
+  ipcMain.handle(IPC.feedbackStatus, async (event, receiptIds: unknown) => {
+    assertRendererSender(event)
+    if (!Array.isArray(receiptIds) || receiptIds.length === 0) return { ok: false as const, code: 'invalid_request' as const, message: '缺少 receiptIds' }
+    const ids = receiptIds.filter((v): v is string => typeof v === 'string' && /^fb_[a-z0-9]{24}$/.test(v)).slice(0,20)
+    if (ids.length === 0) return { ok: false as const, code: 'invalid_request' as const, message: 'receiptIds 无效' }
+    const url = `${feedbackBaseUrl()}/v1/feedback?receiptIds=${encodeURIComponent(ids.join(','))}`
+    try {
+      const data = await fetchJson(url) as Record<string, unknown>
+      return data
+    } catch (err) {
+      return { ok: false as const, code: 'network_error' as const, message: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.feedbackIssues, async (event, params: unknown) => {
+    assertRendererSender(event)
+    const p = (params && typeof params === 'object' ? params as Record<string, unknown> : {}) as Record<string, unknown>
+    const state = p.state === 'closed' || p.state === 'all' ? p.state : 'open'
+    const page = Math.max(1, Math.min(10, Number(p.page ?? 1) || 1))
+    const perPage = Math.max(1, Math.min(50, Number(p.perPage ?? 20) || 20))
+    const url = `${feedbackBaseUrl()}/v1/issues?state=${encodeURIComponent(String(state))}&page=${page}&per_page=${perPage}`
+    try {
+      const data = await fetchJson(url) as Record<string, unknown>
+      return data
+    } catch (err) {
+      return { ok: false as const, code: 'network_error' as const, message: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.feedbackIssueDetail, async (event, issueNumber: unknown) => {
+    assertRendererSender(event)
+    const num = Number(issueNumber)
+    if (!Number.isInteger(num) || num <= 0) return { ok: false as const, code: 'invalid_request' as const, message: 'issueNumber 无效' }
+    const url = `${feedbackBaseUrl()}/v1/issues/${num}`
+    try {
+      const data = await fetchJson(url) as Record<string, unknown>
+      return data
+    } catch (err) {
+      return { ok: false as const, code: 'network_error' as const, message: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.feedbackOpenIssue, async (event, issueNumber: unknown) => {
+    assertRendererSender(event)
+    const num = Number(issueNumber)
+    if (!Number.isInteger(num) || num <= 0) return { ok: false as const, error: 'issueNumber 无效' }
+    const url = `https://github.com/${'FlashingChen'}/dsh-desktop-hub/issues/${num}`
+    try {
+      await shell.openExternal(url)
+      return { ok: true as const }
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) }
+    }
   })
 
   ipcMain.handle(IPC.pluginsList, (event) => {

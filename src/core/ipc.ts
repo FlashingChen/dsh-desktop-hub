@@ -39,6 +39,10 @@ export const IPC = {
   feedbackDiagnostics: 'feedback:diagnostics',
   feedbackCopy: 'feedback:copy',
   feedbackSubmit: 'feedback:submit',
+  feedbackStatus: 'feedback:status',
+  feedbackIssues: 'feedback:issues',
+  feedbackIssueDetail: 'feedback:issue-detail',
+  feedbackOpenIssue: 'feedback:open-issue',
 } as const
 
 export type UpdateState = 'idle' | 'unsupported' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'not-available' | 'error'

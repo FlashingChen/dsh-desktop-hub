@@ -646,6 +646,22 @@
       .feedback-qr { flex: none; text-align: center; width: 148px; }
       .feedback-qr img { background: #fff; border: 1px solid var(--line); border-radius: 8px; height: 148px; object-fit: contain; padding: 5px; width: 148px; }
       .feedback-qr figcaption { color: var(--ink-faint); font-size: 10px; margin-top: 5px; }
+      .feedback-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+      .feedback-item { background: var(--surface); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; position: relative; }
+      .feedback-item.unread { border-color: var(--accent-line); background: var(--surface-blue); }
+      .feedback-item-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .feedback-item-title { font-size: 13px; font-weight: 650; color: var(--ink); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .feedback-badge { font-size: 10px; padding: 2px 6px; border-radius: 5px; border: 1px solid var(--line); background: var(--surface-subtle); color: var(--ink-soft); white-space: nowrap; }
+      .feedback-badge.open { background: #e6ffed; border-color: #abefc6; color: #0a6b2e; }
+      .feedback-badge.closed { background: #f0f0f5; border-color: #d9d9e3; color: #666; }
+      .feedback-badge.queued { background: #fff7e6; border-color: #ffd8a8; color: #8a4b00; }
+      .feedback-badge.unread-dot { background: #ff3b30; border-color: #ff3b30; color: #fff; font-weight: 700; }
+      .feedback-item-meta { font-size: 11px; color: var(--ink-faint); display: flex; gap: 10px; flex-wrap: wrap; }
+      .feedback-item-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+      .feedback-item-actions button { font-size: 11px; min-height: 26px; padding: 4px 9px; }
+      .feedback-filter { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+      .feedback-filter button.active { background: var(--brand); color: #fff; border-color: var(--brand); }
+      .feedback-empty { color: var(--ink-faint); font-size: 12px; padding: 14px; text-align: center; border: 1px dashed var(--line); border-radius: 8px; }
       @media (max-width: 640px) {
         .feedback-community { align-items: stretch; flex-direction: column; }
         .feedback-qr { margin: 0 auto; }
@@ -1339,6 +1355,45 @@
                 </div>
               </section>
             </div>
+            <section class="surface" id="feedback-my-surface">
+              <div class="surface-head">
+                <div>
+                  <h2 class="surface-title">我的反馈 <span id="feedback-my-unread" class="feedback-badge unread-dot" hidden>有更新</span></h2>
+                  <p class="surface-caption">本地保存的收据编号，自动同步 GitHub Issue 状态，支持已读标记。</p>
+                </div>
+                <div class="feedback-filter">
+                  <button id="feedback-my-refresh" class="quiet" type="button">刷新</button>
+                  <button id="feedback-my-mark-all" class="quiet" type="button">全部已读</button>
+                </div>
+              </div>
+              <div class="surface-body">
+                <div id="feedback-my-status" class="status" aria-live="polite"></div>
+                <div id="feedback-my-list" class="feedback-list"></div>
+              </div>
+            </section>
+            <section class="surface" id="feedback-community-issues-surface">
+              <div class="surface-head">
+                <div>
+                  <h2 class="surface-title">社区反馈</h2>
+                  <p class="surface-caption">镜像 GitHub 公开 Issues，无需翻墙即可浏览，国内通过 Worker 缓存访问。</p>
+                </div>
+                <div class="feedback-filter">
+                  <button data-issues-state="open" class="active" type="button">进行中</button>
+                  <button data-issues-state="closed" type="button">已关闭</button>
+                  <button data-issues-state="all" type="button">全部</button>
+                  <button id="feedback-issues-refresh" class="quiet" type="button">刷新</button>
+                </div>
+              </div>
+              <div class="surface-body">
+                <div id="feedback-issues-status" class="status" aria-live="polite"></div>
+                <div id="feedback-issues-list" class="feedback-list"></div>
+                <div class="surface-actions" style="margin-top:10px; justify-content: center;">
+                  <button id="feedback-issues-prev" type="button">上一页</button>
+                  <span id="feedback-issues-page" style="font-size:12px; color:var(--ink-soft); padding: 6px 8px;">第 1 页</span>
+                  <button id="feedback-issues-next" type="button">下一页</button>
+                </div>
+              </div>
+            </section>
             <section class="surface">
               <div class="surface-body feedback-community">
                 <div class="feedback-community-copy">
