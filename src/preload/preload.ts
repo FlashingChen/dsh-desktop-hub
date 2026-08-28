@@ -40,6 +40,10 @@ const CH = {
   feedbackDiagnostics: 'feedback:diagnostics',
   feedbackCopy: 'feedback:copy',
   feedbackSubmit: 'feedback:submit',
+  feedbackStatus: 'feedback:status',
+  feedbackIssues: 'feedback:issues',
+  feedbackIssueDetail: 'feedback:issue-detail',
+  feedbackOpenIssue: 'feedback:open-issue',
 } as const
 
 interface HarnessStatus {
@@ -160,5 +164,13 @@ contextBridge.exposeInMainWorld('dshDesktop', {
       diagnostics?: string | null
     }): Promise<{ ok: boolean; status?: 'queued' | 'accepted'; receiptId?: string; code?: string; message?: string; retryable?: boolean }> =>
       ipcRenderer.invoke(CH.feedbackSubmit, input),
+    status: (receiptIds: string[]): Promise<{ ok: boolean; items?: Array<{ receiptId: string; status: string; issueNumber: number | null; createdAt: string; updatedAt: string; github?: { number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[] } | null; errorCode?: string | null }>; code?: string; message?: string }> =>
+      ipcRenderer.invoke(CH.feedbackStatus, receiptIds),
+    issues: (params?: { state?: string; page?: number; perPage?: number }): Promise<{ ok: boolean; issues?: Array<{ number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[]; body_preview?: string }>; page?: number; perPage?: number; state?: string; cachedAt?: string; code?: string; message?: string }> =>
+      ipcRenderer.invoke(CH.feedbackIssues, params ?? {}),
+    issueDetail: (issueNumber: number): Promise<{ ok: boolean; issue?: { number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[]; body_preview?: string }; code?: string; message?: string }> =>
+      ipcRenderer.invoke(CH.feedbackIssueDetail, issueNumber),
+    openIssue: (issueNumber: number): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(CH.feedbackOpenIssue, issueNumber),
   },
 })

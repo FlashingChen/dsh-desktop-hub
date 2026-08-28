@@ -191,6 +191,10 @@ interface DesktopApi {
       signature?: string | null
       diagnostics?: string | null
     }) => Promise<FeedbackSubmitResult>
+    status: (receiptIds: string[]) => Promise<{ ok: boolean; items?: Array<{ receiptId: string; status: string; issueNumber: number | null; createdAt: string; updatedAt: string; github?: { number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[] } | null; errorCode?: string | null }>; code?: string; message?: string }>
+    issues: (params?: { state?: string; page?: number; perPage?: number }) => Promise<{ ok: boolean; issues?: Array<{ number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[]; body_preview?: string }>; page?: number; perPage?: number; state?: string; cachedAt?: string; code?: string; message?: string }>
+    issueDetail: (issueNumber: number) => Promise<{ ok: boolean; issue?: { number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[]; body_preview?: string }; code?: string; message?: string }>
+    openIssue: (issueNumber: number) => Promise<{ ok: boolean; error?: string }>
   }
   credentials: {
     status: () => Promise<{ format: string; path: string; text?: string; error?: string }>
@@ -274,7 +278,7 @@ function switchTab(id: TabId): void {
     panel?.classList.toggle('active', active)
     panel?.setAttribute('aria-hidden', String(!active))
   }
-  if (id === 'feedback') void refreshFeedbackDiagnostics()
+  if (id === 'feedback') { void refreshFeedbackDiagnostics(); void refreshMyFeedback(); void refreshCommunityIssues() }
   if (id === 'harness') void checkCredentialsMigration()
 }
 
@@ -1553,6 +1557,341 @@ document.getElementById('feedback-copy-full')?.addEventListener('click', () => v
 document.getElementById('feedback-submit')?.addEventListener('click', () => void submitFeedbackUi())
 setFeedbackMode('anonymous')
 
+// ---- Feedback 追踪 + 已读 + 社区镜像 ----
+const FEEDBACK_RECEIPTS_KEY = 'dsh-feedback-receipts'
+const FEEDBACK_READ_KEY = 'dsh-feedback-read'
+let feedbackIssuesState: string = 'open'
+let feedbackIssuesPage = 1
+const FEEDBACK_ISSUES_PER_PAGE = 20
+let feedbackPollTimer: number | null = null
+
+function getStoredReceipts(): string[] {
+  try {
+    const raw = localStorage.getItem(FEEDBACK_RECEIPTS_KEY)
+    if (!raw) return []
+    const arr = JSON.parse(raw)
+    if (!Array.isArray(arr)) return []
+    return arr.filter((v: unknown): v is string => typeof v === 'string' && /^fb_[a-z0-9]{24}$/.test(v)).slice(0, 50)
+  } catch { return [] }
+}
+
+function storeReceipt(receiptId: string): void {
+  const list = getStoredReceipts()
+  if (list.includes(receiptId)) return
+  list.unshift(receiptId)
+  localStorage.setItem(FEEDBACK_RECEIPTS_KEY, JSON.stringify(list.slice(0, 50)))
+}
+
+function getReadMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(FEEDBACK_READ_KEY)
+    if (!raw) return {}
+    const obj = JSON.parse(raw)
+    return obj && typeof obj === 'object' ? obj as Record<string,string> : {}
+  } catch { return {} }
+}
+
+function setRead(key: string, updatedAt: string): void {
+  const map = getReadMap()
+  map[key] = updatedAt
+  localStorage.setItem(FEEDBACK_READ_KEY, JSON.stringify(map))
+}
+
+function isUnread(key: string, updatedAt: string): boolean {
+  const map = getReadMap()
+  const readAt = map[key]
+  if (!readAt) return true
+  return new Date(updatedAt).getTime() > new Date(readAt).getTime()
+}
+
+function markAllRead(): void {
+  const myItems = document.querySelectorAll<HTMLElement>('#feedback-my-list .feedback-item')
+  myItems.forEach(el => {
+    const rid = el.dataset.receiptId
+    const updated = el.dataset.updatedAt
+    if (rid && updated) setRead(rid, updated)
+    const num = el.dataset.issueNumber
+    if (num && updated) setRead(`issue-${num}`, updated)
+  })
+  const issueItems = document.querySelectorAll<HTMLElement>('#feedback-issues-list .feedback-item')
+  issueItems.forEach(el => {
+    const num = el.dataset.issueNumber
+    const updated = el.dataset.updatedAt
+    if (num && updated) setRead(`issue-${num}`, updated)
+  })
+  void refreshMyFeedback()
+  void refreshCommunityIssues()
+  updateFeedbackTabBadge()
+}
+
+function updateFeedbackTabBadge(): void {
+  const tab = document.getElementById('tab-feedback')
+  const receipts = getStoredReceipts()
+  // async check unread without blocking
+  void (async () => {
+    if (receipts.length === 0) { tab?.removeAttribute('data-unread'); return }
+    try {
+      if (!api) return
+      const res = await api.feedback.status(receipts)
+      if (!res.ok || !res.items) return
+      let hasUnread = false
+      for (const it of res.items) {
+        const key = it.receiptId
+        const updated = it.github?.updated_at ?? it.updatedAt
+        if (updated && isUnread(key, updated)) { hasUnread = true; break }
+        if (it.github?.number && isUnread(`issue-${it.github.number}`, it.github.updated_at)) { hasUnread = true; break }
+      }
+      if (hasUnread) tab?.setAttribute('data-unread','1')
+      else tab?.removeAttribute('data-unread')
+    } catch {}
+  })()
+}
+
+function renderMyFeedback(items: Array<{ receiptId: string; status: string; issueNumber: number | null; createdAt: string; updatedAt: string; github?: { number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[] } | null }>): void {
+  const list = document.getElementById('feedback-my-list')
+  const badge = document.getElementById('feedback-my-unread')
+  if (!list) return
+  if (items.length === 0) {
+    list.innerHTML = '<div class="feedback-empty">暂无提交记录，提交后会在这里出现，可追踪处理进度</div>'
+    if (badge) badge.hidden = true
+    return
+  }
+  let unreadCount = 0
+  list.innerHTML = items.map(it => {
+    const github = it.github
+    const title = github?.title ?? '(等待创建 Issue...)'
+    const state = github?.state ?? it.status
+    const stateLabel = state === 'open' ? '进行中' : state === 'closed' ? '已关闭' : state === 'queued' ? '排队中' : state === 'created' ? '已创建' : state
+    const badgeClass = state === 'open' ? 'open' : state === 'closed' ? 'closed' : state === 'queued' ? 'queued' : ''
+    const updatedAt = github?.updated_at ?? it.updatedAt ?? it.createdAt
+    const unread = updatedAt ? isUnread(it.receiptId, updatedAt) : false
+    if (unread) unreadCount++
+    const issueNo = it.issueNumber ? `#${it.issueNumber}` : '—'
+    const escTitle = title.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    const escReceipt = it.receiptId.replace(/&/g,'&amp;')
+    return `<div class="feedback-item ${unread ? 'unread' : ''}" data-receipt-id="${escReceipt}" data-issue-number="${it.issueNumber ?? ''}" data-updated-at="${updatedAt ?? ''}">
+      <div class="feedback-item-head">
+        <span class="feedback-item-title">${escTitle}</span>
+        ${unread ? '<span class="feedback-badge unread-dot">未读</span>' : ''}
+        <span class="feedback-badge ${badgeClass}">${stateLabel}</span>
+        <span class="feedback-badge">${issueNo}</span>
+      </div>
+      <div class="feedback-item-meta">
+        <span>收据 ${escReceipt.slice(0,10)}…</span>
+        <span>${github ? `评论 ${github.comments}` : ''}</span>
+        <span>${updatedAt ? new Date(updatedAt).toLocaleString() : ''}</span>
+      </div>
+      <div class="feedback-item-actions">
+        ${it.issueNumber ? `<button data-open-issue="${it.issueNumber}" type="button">查看 Issue</button>` : '<span class="feedback-badge">同步中</span>'}
+        ${unread ? `<button data-mark-read="${escReceipt}" type="button" class="quiet">标为已读</button>` : ''}
+      </div>
+    </div>`
+  }).join('')
+  if (badge) badge.hidden = unreadCount === 0
+  list.querySelectorAll<HTMLButtonElement>('[data-open-issue]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const num = Number(btn.dataset.openIssue)
+      if (!num) return
+      const item = items.find(i => i.issueNumber === num)
+      if (item) setRead(item.receiptId, item.github?.updated_at ?? item.updatedAt)
+      if (num) setRead(`issue-${num}`, items.find(i=>i.issueNumber===num)?.github?.updated_at ?? new Date().toISOString())
+      void api?.feedback.openIssue(num)
+      setTimeout(() => { void refreshMyFeedback(); updateFeedbackTabBadge() }, 300)
+    })
+  })
+  list.querySelectorAll<HTMLButtonElement>('[data-mark-read]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const rid = btn.dataset.markRead
+      const el = btn.closest('.feedback-item') as HTMLElement | null
+      const updated = el?.dataset.updatedAt ?? new Date().toISOString()
+      if (rid) setRead(rid, updated)
+      void refreshMyFeedback(); updateFeedbackTabBadge()
+    })
+  })
+}
+
+async function refreshMyFeedback(): Promise<void> {
+  const statusEl = document.getElementById('feedback-my-status')
+  const receipts = getStoredReceipts()
+  if (receipts.length === 0) {
+    if (statusEl) statusEl.textContent = ''
+    renderMyFeedback([])
+    return
+  }
+  if (statusEl) statusEl.textContent = '同步中…'
+  try {
+    if (!api) throw new Error('api unavailable')
+    const res = await api.feedback.status(receipts)
+    if (!res.ok) {
+      if (statusEl) statusEl.textContent = res.message ?? '同步失败'
+      return
+    }
+    if (statusEl) statusEl.textContent = `${res.items?.length ?? 0} 条反馈，已关联 GitHub`
+    renderMyFeedback(res.items ?? [])
+    // check for new updates and notify
+    for (const it of res.items ?? []) {
+      const updated = it.github?.updated_at ?? it.updatedAt
+      if (updated && isUnread(it.receiptId, updated) && it.github) {
+        // only notify once per session per receipt
+        const notifiedKey = `notified-${it.receiptId}-${updated}`
+        if (!sessionStorage.getItem(notifiedKey)) {
+          sessionStorage.setItem(notifiedKey, '1')
+          try { new Notification('反馈有更新', { body: `${it.github.title} 状态: ${it.github.state}` }) } catch {}
+        }
+      }
+    }
+    updateFeedbackTabBadge()
+  } catch (err) {
+    if (statusEl) statusEl.textContent = err instanceof Error ? err.message : '同步失败'
+  }
+}
+
+function renderCommunityIssues(issues: Array<{ number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[]; body_preview?: string }>): void {
+  const list = document.getElementById('feedback-issues-list')
+  if (!list) return
+  if (issues.length === 0) {
+    list.innerHTML = '<div class="feedback-empty">暂无公开反馈</div>'
+    return
+  }
+  list.innerHTML = issues.map(iss => {
+    const unread = isUnread(`issue-${iss.number}`, iss.updated_at)
+    const badgeClass = iss.state === 'open' ? 'open' : 'closed'
+    const stateLabel = iss.state === 'open' ? '进行中' : '已关闭'
+    const escTitle = iss.title.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    const labels = iss.labels.slice(0,3).map(l => `<span class="feedback-badge">${l.replace(/&/g,'&amp;')}</span>`).join('')
+    return `<div class="feedback-item ${unread ? 'unread' : ''}" data-issue-number="${iss.number}" data-updated-at="${iss.updated_at}">
+      <div class="feedback-item-head">
+        <span class="feedback-item-title">${escTitle}</span>
+        ${unread ? '<span class="feedback-badge unread-dot">未读</span>' : ''}
+        <span class="feedback-badge ${badgeClass}">${stateLabel}</span>
+        <span class="feedback-badge">#${iss.number}</span>
+      </div>
+      <div class="feedback-item-meta">
+        <span>评论 ${iss.comments}</span>
+        <span>${new Date(iss.updated_at).toLocaleString()}</span>
+        ${labels}
+      </div>
+      ${iss.body_preview ? `<div style="font-size:12px;color:var(--ink-soft);line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${iss.body_preview.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>` : ''}
+      <div class="feedback-item-actions">
+        <button data-open-community="${iss.number}" type="button">查看详情</button>
+        ${unread ? `<button data-mark-community="${iss.number}" type="button" class="quiet">标为已读</button>` : ''}
+      </div>
+    </div>`
+  }).join('')
+  list.querySelectorAll<HTMLButtonElement>('[data-open-community]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const num = Number(btn.dataset.openCommunity)
+      const iss = issues.find(i => i.number === num)
+      if (iss) setRead(`issue-${num}`, iss.updated_at)
+      void api?.feedback.openIssue(num)
+      setTimeout(() => { void refreshCommunityIssues(); updateFeedbackTabBadge() }, 300)
+    })
+  })
+  list.querySelectorAll<HTMLButtonElement>('[data-mark-community]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const num = Number(btn.dataset.markCommunity)
+      const iss = issues.find(i => i.number === num)
+      if (iss) setRead(`issue-${num}`, iss.updated_at)
+      void refreshCommunityIssues(); updateFeedbackTabBadge()
+    })
+  })
+}
+
+async function refreshCommunityIssues(): Promise<void> {
+  const statusEl = document.getElementById('feedback-issues-status')
+  const pageEl = document.getElementById('feedback-issues-page')
+  if (statusEl) statusEl.textContent = '加载中…'
+  try {
+    if (!api) throw new Error('api unavailable')
+    const res = await api.feedback.issues({ state: feedbackIssuesState, page: feedbackIssuesPage, perPage: FEEDBACK_ISSUES_PER_PAGE })
+    if (!res.ok) {
+      if (statusEl) statusEl.textContent = res.message ?? '加载失败'
+      return
+    }
+    if (statusEl) statusEl.textContent = res.cachedAt ? `已同步 · ${new Date(res.cachedAt).toLocaleTimeString()}` : ''
+    if (pageEl) pageEl.textContent = `第 ${res.page ?? feedbackIssuesPage} 页`
+    renderCommunityIssues(res.issues ?? [])
+    updateFeedbackTabBadge()
+  } catch (err) {
+    if (statusEl) statusEl.textContent = err instanceof Error ? err.message : '加载失败'
+  }
+}
+
+function scheduleFeedbackPoll(): void {
+  if (feedbackPollTimer !== null) window.clearInterval(feedbackPollTimer)
+  feedbackPollTimer = window.setInterval(() => {
+    void refreshMyFeedback()
+    // community issues refresh less frequently
+    void refreshCommunityIssues()
+  }, 5 * 60 * 1000)
+  // also update badge on load
+  updateFeedbackTabBadge()
+}
+
+// Hook into existing submit to store receipt
+const originalSubmit = submitFeedbackUi
+async function submitFeedbackUiWithStore(): Promise<void> {
+  // call original but intercept result - we duplicate logic to capture receipt
+  if (!api || feedbackSubmitting) return
+  feedbackSubmitting = true
+  const submit = document.getElementById('feedback-submit') as HTMLButtonElement | null
+  if (submit) submit.disabled = true
+  try {
+    const include = (document.getElementById('feedback-include-diagnostics') as HTMLInputElement | null)?.checked ?? false
+    if (include && !feedbackDiagnosticsLoaded) await refreshFeedbackDiagnostics()
+    const input = feedbackInput(include)
+    if (!input.title.trim()) { setFeedbackStatus('请填写反馈标题', 'error'); return }
+    if (!input.body.trim()) { setFeedbackStatus('请填写反馈内容', 'error'); return }
+    if (input.mode === 'signed' && !input.signature?.trim()) { setFeedbackStatus('署名提交需要填写署名', 'error'); return }
+    setFeedbackStatus('提交中…')
+    const result = await api.feedback.submit(input)
+    if (result.ok) {
+      setFeedbackStatus(`反馈已收到，处理编号：${result.receiptId ?? '—'}`, 'ok')
+      if (result.receiptId) {
+        storeReceipt(result.receiptId)
+        void refreshMyFeedback()
+      }
+    } else {
+      setFeedbackStatus(`提交失败：${result.message ?? result.code ?? '未知错误'}\n可以复制完整反馈后发送到 QQ 群。`, result.code === 'unconfigured' ? 'warn' : 'error')
+    }
+  } catch {
+    setFeedbackStatus('提交失败：反馈服务暂时不可用\n可以复制完整反馈后发送到 QQ 群。', 'error')
+  } finally {
+    feedbackSubmitting = false
+    if (submit) submit.disabled = false
+  }
+}
+// replace handler
+document.getElementById('feedback-submit')?.replaceWith(document.getElementById('feedback-submit')!.cloneNode(true))
+document.getElementById('feedback-submit')?.addEventListener('click', () => void submitFeedbackUiWithStore())
+
+document.getElementById('feedback-my-refresh')?.addEventListener('click', () => void refreshMyFeedback())
+document.getElementById('feedback-my-mark-all')?.addEventListener('click', () => markAllRead())
+document.getElementById('feedback-issues-refresh')?.addEventListener('click', () => void refreshCommunityIssues())
+document.querySelectorAll<HTMLButtonElement>('[data-issues-state]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll<HTMLButtonElement>('[data-issues-state]').forEach(b => b.classList.remove('active'))
+    btn.classList.add('active')
+    feedbackIssuesState = btn.dataset.issuesState ?? 'open'
+    feedbackIssuesPage = 1
+    void refreshCommunityIssues()
+  })
+})
+document.getElementById('feedback-issues-prev')?.addEventListener('click', () => {
+  if (feedbackIssuesPage > 1) { feedbackIssuesPage--; void refreshCommunityIssues() }
+})
+document.getElementById('feedback-issues-next')?.addEventListener('click', () => {
+  feedbackIssuesPage++; void refreshCommunityIssues()
+})
+
+// initial load
+void refreshMyFeedback()
+void refreshCommunityIssues()
+scheduleFeedbackPoll()
+if ('Notification' in window && Notification.permission === 'default') {
+  void Notification.requestPermission()
+}
+
 // ---- 应用更新：启动自动检查，下载与重启安装由用户确认 ----
 const appUpdateVersion = document.getElementById('app-version')
 const appUpdateBadge = document.getElementById('app-update-badge')
@@ -1841,18 +2180,21 @@ async function checkCredentialsMigration(): Promise<void> {
   const banner = document.getElementById('credentials-banner') as HTMLElement | null
   const textEl = document.getElementById('credentials-banner-text') as HTMLElement | null
   const btn = document.getElementById('credentials-migrate-btn') as HTMLButtonElement | null
-  const dismiss = document.getElementById('credentials-dismiss-btn') as HTMLButtonElement | null
   if (!banner || !textEl) return
   try {
     const res = await api.credentials.status()
     if (res.format === 'flat') {
-      textEl.textContent = `检测到旧版凭据格式（flat），建议一键迁移到新版（versioned）。已准备备份，迁移前会自动备份到 ${res.path}.bak-*。`
+      // 版本感知：flat 在旧版 dsh 上保持可用，打包版 (>=0.1.1) 会自动支持 versioned
+      // 这里主动提示可迁移，点击后由主进程根据 dshSupportsVersioned() 决定是否执行
+      textEl.textContent = `检测到旧版凭据格式 flat（${res.path}），可一键迁移到 versioned（自动备份原文件）`
       banner.hidden = false
-      if (btn) btn.disabled = credentialsMigrating
+      if (btn) { btn.disabled = false; btn.textContent = '一键迁移' }
+      return
     } else if (res.format === 'unknown') {
-      textEl.textContent = `凭据文件格式异常（unknown），请手动检查 ${res.path}。${res.text ? `内容：${res.text.slice(0,80)}` : '解析失败'}`
+      // 可能是 version: 1 数字误写，主进程已可自动修复
+      textEl.textContent = `凭据文件格式异常（unknown），可尝试一键修复（version 数字→字符串）。路径：${res.path}。${res.text ? `内容：${res.text.slice(0,80)}` : '解析失败'}`
       banner.hidden = false
-      if (btn) btn.disabled = true
+      if (btn) { btn.disabled = false; btn.textContent = '尝试修复' }
     } else {
       banner.hidden = true
     }
