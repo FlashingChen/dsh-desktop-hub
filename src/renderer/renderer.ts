@@ -2182,10 +2182,13 @@ async function checkCredentialsMigration(): Promise<void> {
   const btn = document.getElementById('credentials-migrate-btn') as HTMLButtonElement | null
   if (!banner || !textEl) return
   try {
-    const res = await api.credentials.status()
+    const res = await api.credentials.status() as { format: string; path: string; text?: string; supportsVersioned?: boolean }
     if (res.format === 'flat') {
-      // 版本感知：flat 在旧版 dsh 上保持可用，打包版 (>=0.1.1) 会自动支持 versioned
-      // 这里主动提示可迁移，点击后由主进程根据 dshSupportsVersioned() 决定是否执行
+      // 版本感知：旧版 dsh（0.1.0-rc.6 仅支持 flat）保持可用，不打扰用户；打包版 (>=0.1.1) 才提示迁移
+      if (res.supportsVersioned === false) {
+        banner.hidden = true
+        return
+      }
       textEl.textContent = `检测到旧版凭据格式 flat（${res.path}），可一键迁移到 versioned（自动备份原文件）`
       banner.hidden = false
       if (btn) { btn.disabled = false; btn.textContent = '一键迁移' }

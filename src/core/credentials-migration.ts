@@ -216,7 +216,7 @@ export function backupAndMigrate(path = credentialsPath()): MigrationResult {
   if (format === 'flat') {
     // 版本感知：仅当 dsh >=0.1.1 才允许 flat→versioned，否则保持 flat 避免 harness 崩溃
     if (!dshSupportsVersioned()) {
-      return { ok: false, formatBefore: format, error: '当前 dsh 版本过低（<0.1.1），不支持 versioned 格式，已保持 flat 可用。请先升级 dsh 到 >=0.1.1 再迁移' }
+      return { ok: false, formatBefore: format, error: '当前 dsh 版本过低（<0.1.1），暂不支持 versioned，已保持 flat 可用（无需处理，打包版会自动支持）' }
     }
     if (!text) return { ok: false, formatBefore: format, error: '无法读取凭据文件' }
     const migrated = migrateFlat(text)

@@ -40,7 +40,7 @@ import {
 import { scanSkills, createSkill, setInvocation, importSkillFromZip, importSkillFromGitHub, importSkillFromClawHub, type SkillSummary } from '../core/skills.js'
 import { IPC, type PluginOpAction, type HarnessStatus } from '../core/ipc.js'
 import { DIAGNOSTIC_FORMAT_VERSION, formatDiagnostics, type DiagnosticHarnessState } from '../core/diagnostics.js'
-import { checkCredentialsFile, backupAndMigrate, credentialsPath } from '../core/credentials-migration.js'
+import { checkCredentialsFile, backupAndMigrate, credentialsPath, dshSupportsVersioned } from '../core/credentials-migration.js'
 import { normalizeFeedbackInput, toFeedbackPayload } from '../core/feedback.js'
 import { submitFeedback } from '../core/feedback-client.js'
 import { initLog, log } from '../core/log.js'
@@ -382,7 +382,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.credentialsStatus, (event) => {
     assertRendererSender(event)
     const cred = checkCredentialsFile()
-    return { format: cred.format, path: credentialsPath(), text: cred.text?.slice(0, 200) ?? undefined }
+    return { format: cred.format, path: credentialsPath(), text: cred.text?.slice(0, 200) ?? undefined, supportsVersioned: dshSupportsVersioned() }
   })
 
   ipcMain.handle(IPC.credentialsMigrate, (event) => {
