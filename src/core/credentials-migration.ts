@@ -215,7 +215,8 @@ export function backupAndMigrate(path = credentialsPath()): MigrationResult {
   }
   if (format === 'flat') {
     // 版本感知：仅当 dsh >=0.1.1 才允许 flat→versioned，否则保持 flat 避免 harness 崩溃
-    if (!dshSupportsVersioned()) {
+    // 测试环境可通过 DSH_TEST_ALLOW_MIGRATE=1 强制允许（node:test 无法 mock ESM 只读导出）
+    if (!dshSupportsVersioned() && process.env.DSH_TEST_ALLOW_MIGRATE !== '1') {
       return { ok: false, formatBefore: format, error: '当前 dsh 版本过低（<0.1.1），暂不支持 versioned，已保持 flat 可用（无需处理，打包版会自动支持）' }
     }
     if (!text) return { ok: false, formatBefore: format, error: '无法读取凭据文件' }
