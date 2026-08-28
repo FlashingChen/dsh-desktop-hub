@@ -30,8 +30,8 @@ export function detectCredentialsFormat(text: string | undefined): CredentialsFo
   const hasVersion = contents.items.some((pair: any) => isScalar(pair.key) && pair.key.value === 'version')
   if (hasVersion) {
     const obj: any = doc.toJS()
-    if (obj && obj.version === '1') return 'unknown'
-    if (obj && obj.version === 1) {
+    if (obj && obj.version === 1) return 'unknown'
+    if (obj && obj.version === '1') {
       const keys = Object.keys(obj)
       const allowed = new Set(['version','refs','records'])
       if (keys.some(k => !allowed.has(k))) return 'unknown'
@@ -57,17 +57,17 @@ export function migrateFlat(text: string): string | undefined {
   // 上游逻辑：原行 verbatim 缩进两格进 refs
   const indented = text.split('\n').map(line => line.length === 0 ? line : `  ${line}`).join('\n')
   const suffix = text.endsWith('\n') ? '' : '\n'
-  return `version: 1\nrefs:\n${indented}${suffix}`
+  return `version: "1"\nrefs:\n${indented}${suffix}`
 }
 
 export function fixVersionStringIssue(text: string): string | undefined {
-  // 处理 version: "1" 字符串误写 → 改为数字
+  // 处理 version: 1 数字误写 → 改为字符串 "1"（dsh-credentials-local 要求 string）
   let doc
   try { doc = parseDocument(text) } catch { return undefined }
   const obj: any = doc.toJS()
-  if (obj && obj.version === '1') {
-    // 直接文本替换 version 行
-    return text.replace(/^(\s*version\s*:\s*)"1"/m, '$11').replace(/^(\s*version\s*:\s*)'1'/m, '$11')
+  if (obj && obj.version === 1) {
+    // 直接文本替换 version 行：数字 1 -> 字符串 "1"
+    return text.replace(/^(\s*version\s*:\s*)1\s*$/m, '$1"1"')
   }
   return undefined
 }
@@ -101,7 +101,7 @@ export function backupAndMigrate(path = credentialsPath()): MigrationResult {
   if (format === 'missing' || format === 'empty') return { ok: true, formatBefore: format, migrated: false }
   if (format === 'versioned') {
     // also fix string version edge
-    if (text && text.match(/version\s*:\s*["']1["']/)) {
+    if (text && text.match(/^\s*version\s*:\s*1\s*$/m)) {
       const fixed = fixVersionStringIssue(text)
       if (fixed && fixed !== text) {
         let backup = ''
