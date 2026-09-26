@@ -39,6 +39,7 @@ import {
 import { scanSkillsDetailed, resolveSkillIdentity, createSkill, setInvocation, importSkillFromZip, importSkillFromGitHub, importSkillFromClawHub, type SkillSummary } from '../core/skills.js'
 import { IPC, type PluginOpAction, type HarnessStatus } from '../core/ipc.js'
 import { DIAGNOSTIC_FORMAT_VERSION, formatDiagnostics, type DiagnosticHarnessState } from '../core/diagnostics.js'
+import { checkCredentialsFile } from '../core/credentials-migration.js'
 import { normalizeFeedbackInput, toFeedbackPayload } from '../core/feedback.js'
 import { submitFeedback } from '../core/feedback-client.js'
 import { initLog, log } from '../core/log.js'
@@ -75,6 +76,9 @@ const HARNESS_SMOKE = argv.includes('--harness-smoke')
 initLog()
 log(`argv=${JSON.stringify(argv)}`)
 
+/** 超过该耗时视为慢启动：日志给出可操作提示，诊断块带上实际秒数（Issue #35） */
+const SLOW_START_LOG_MS = 45_000
+
 app.setName(APP_NAME)
 // In development Electron's resourcesPath points into node_modules/electron,
 // while packaged builds place this app's resources under app/resources.
@@ -90,6 +94,8 @@ let tray: Tray | null = null
 let rendererServer: LocalRendererServer | null = null
 let harness: HarnessHandle | null = null
 let lastHarnessStatus: HarnessStatus = { state: 'starting' }
+/** 上次成功就绪的 Harness 启动耗时（ms）；诊断与慢启动日志用（Issue #35） */
+let lastHarnessStartupMs: number | null = null
 let restarting = false
 let stoppingHarness = false
 /** 已收到用户退出请求；普通关闭按钮只隐藏到托盘，显式退出时才真正关闭窗口。 */
@@ -281,6 +287,7 @@ function buildDiagnosticText(): string {
   const manifest = readRuntimeManifest()
   const dshVersion = typeof manifest?.dshVersion === 'string' ? manifest.dshVersion : null
   const pnpmVersion = typeof manifest?.pnpmVersion === 'string' ? manifest.pnpmVersion : null
+  const cred = checkCredentialsFile()
   return formatDiagnostics({
     formatVersion: DIAGNOSTIC_FORMAT_VERSION,
     generatedAt: new Date().toISOString(),
@@ -297,6 +304,9 @@ function buildDiagnosticText(): string {
     pnpmVersion,
     harnessState: diagnosticHarnessState(lastHarnessStatus.state),
     harnessExitCode: typeof lastHarnessStatus.code === 'number' ? lastHarnessStatus.code : null,
+    harnessStartupMs: lastHarnessStartupMs,
+    updateState: updater.status().state,
+    credentialsFormat: cred.format,
   })
 }
 
@@ -304,6 +314,23 @@ const DEFAULT_FEEDBACK_ENDPOINT = 'https://feedback.flashingchen.xyz/v1/feedback
 
 function feedbackEndpoint(): string {
   return (process.env.DSH_FEEDBACK_ENDPOINT ?? DEFAULT_FEEDBACK_ENDPOINT).trim()
+}
+
+function feedbackBaseUrl(): string {
+  try {
+    const u = new URL(feedbackEndpoint())
+    return `${u.protocol}//${u.host}`
+  } catch { return 'https://feedback.flashingchen.xyz' }
+}
+
+async function fetchJson(url: string, timeoutMs = 10000): Promise<unknown> {
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: ctrl.signal })
+    const text = await res.text()
+    try { return JSON.parse(text) } catch { return { ok: false, code: 'invalid_response', message: text.slice(0,300) } }
+  } finally { clearTimeout(t) }
 }
 
 // ---- IPC 来源校验（P1-2 / P2-9）：只接受壳层主帧，拒绝 harness iframe / 外部页 ----
@@ -530,6 +557,61 @@ function registerIpc(): void {
       profile: ACTIVE_PROFILE,
     })
     return submitFeedback(payload, { endpoint: feedbackEndpoint() })
+  })
+
+  ipcMain.handle(IPC.feedbackStatus, async (event, receiptIds: unknown) => {
+    assertRendererSender(event)
+    if (!Array.isArray(receiptIds) || receiptIds.length === 0) return { ok: false as const, code: 'invalid_request' as const, message: '缺少 receiptIds' }
+    const ids = receiptIds.filter((v): v is string => typeof v === 'string' && /^fb_[a-z0-9]{24}$/.test(v)).slice(0,20)
+    if (ids.length === 0) return { ok: false as const, code: 'invalid_request' as const, message: 'receiptIds 无效' }
+    const url = `${feedbackBaseUrl()}/v1/feedback?receiptIds=${encodeURIComponent(ids.join(','))}`
+    try {
+      const data = await fetchJson(url) as Record<string, unknown>
+      return data
+    } catch (err) {
+      return { ok: false as const, code: 'network_error' as const, message: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.feedbackIssues, async (event, params: unknown) => {
+    assertRendererSender(event)
+    const p = (params && typeof params === 'object' ? params as Record<string, unknown> : {}) as Record<string, unknown>
+    const state = p.state === 'closed' || p.state === 'all' ? p.state : 'open'
+    const page = Math.max(1, Math.min(10, Number(p.page ?? 1) || 1))
+    const perPage = Math.max(1, Math.min(50, Number(p.perPage ?? 20) || 20))
+    const url = `${feedbackBaseUrl()}/v1/issues?state=${encodeURIComponent(String(state))}&page=${page}&per_page=${perPage}`
+    try {
+      const data = await fetchJson(url) as Record<string, unknown>
+      return data
+    } catch (err) {
+      return { ok: false as const, code: 'network_error' as const, message: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.feedbackIssueDetail, async (event, issueNumber: unknown) => {
+    assertRendererSender(event)
+    const num = Number(issueNumber)
+    if (!Number.isInteger(num) || num <= 0) return { ok: false as const, code: 'invalid_request' as const, message: 'issueNumber 无效' }
+    const url = `${feedbackBaseUrl()}/v1/issues/${num}`
+    try {
+      const data = await fetchJson(url) as Record<string, unknown>
+      return data
+    } catch (err) {
+      return { ok: false as const, code: 'network_error' as const, message: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC.feedbackOpenIssue, async (event, issueNumber: unknown) => {
+    assertRendererSender(event)
+    const num = Number(issueNumber)
+    if (!Number.isInteger(num) || num <= 0) return { ok: false as const, error: 'issueNumber 无效' }
+    const url = `https://github.com/${'FlashingChen'}/dsh-desktop-hub/issues/${num}`
+    try {
+      await shell.openExternal(url)
+      return { ok: true as const }
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) }
+    }
   })
 
   ipcMain.handle(IPC.pluginsList, (event) => {
@@ -1065,9 +1147,9 @@ function watchHarness(proc: HarnessHandle['proc']): void {
 }
 
 function sendHarnessStatus(status: HarnessStatus): void {
-  lastHarnessStatus = status
+  lastHarnessStatus = { ...status, since: Date.now() }
   try {
-    shellWebContents()?.send(IPC.harnessStatus, status)
+    shellWebContents()?.send(IPC.harnessStatus, lastHarnessStatus)
   } catch {
     /* 窗口未就绪/已销毁：状态仍由日志留痕 */
   }
@@ -1078,6 +1160,7 @@ async function startHarnessAndWatch(): Promise<void> {
   const generation = ++harnessStartGeneration
   let spawnedProc: ChildProcess | null = null
   sendHarnessStatus({ state: 'starting' })
+  const startedAt = Date.now()
   try {
     const desktopHubPatch = await ensureDesktopHubPlugin()
     const exec = resolveDshExec()
@@ -1126,7 +1209,12 @@ async function startHarnessAndWatch(): Promise<void> {
     if (startingProc === next.proc) startingProc = null
     harnessCleanupRetries.delete(next.proc)
     watchHarness(next.proc)
-    log(`harness: 就绪 ${next.url}`)
+    lastHarnessStartupMs = Date.now() - startedAt
+    log(`harness: 就绪 ${next.url}（启动耗时 ${(lastHarnessStartupMs / 1000).toFixed(1)}s）`)
+    if (lastHarnessStartupMs > SLOW_START_LOG_MS) {
+      log(`harness: 本次启动超过 ${Math.round(SLOW_START_LOG_MS / 1000)}s —— 常见原因是杀毒软件/Defender 逐文件扫描捆绑运行时；` +
+        '将 DSH Desktop Hub 安装目录加入排除项通常可显著加速（详见运行日志与反馈诊断中的 Harness last startup）')
+    }
     sendHarnessStatus({ state: 'ready', url: next.url })
   } catch (err) {
     // startHarness 仅在原始启动错误之后的 stopTree 也失败时抛 AggregateError。

@@ -144,7 +144,7 @@ interface DesktopApi {
     url: () => Promise<string | null>
     restart: () => Promise<{ ok: boolean; url?: string; error?: string }>
     onFrameLoaded: (cb: (url: string) => void) => void
-    onStatus: (cb: (status: { state: string; url?: string; code?: number | null }) => void) => void
+    onStatus: (cb: (status: { state: string; url?: string; code?: number | null; since?: number }) => void) => void
   }
   updates: {
     status: () => Promise<UpdateStatus>
@@ -194,6 +194,10 @@ interface DesktopApi {
       signature?: string | null
       diagnostics?: string | null
     }) => Promise<FeedbackSubmitResult>
+    status: (receiptIds: string[]) => Promise<{ ok: boolean; items?: Array<{ receiptId: string; status: string; issueNumber: number | null; createdAt: string; updatedAt: string; github?: { number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[] } | null; errorCode?: string | null }>; code?: string; message?: string }>
+    issues: (params?: { state?: string; page?: number; perPage?: number }) => Promise<{ ok: boolean; issues?: Array<{ number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[]; body_preview?: string }>; page?: number; perPage?: number; state?: string; cachedAt?: string; code?: string; message?: string }>
+    issueDetail: (issueNumber: number) => Promise<{ ok: boolean; issue?: { number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[]; body_preview?: string }; code?: string; message?: string }>
+    openIssue: (issueNumber: number) => Promise<{ ok: boolean; error?: string }>
   }
 }
 
@@ -1863,6 +1867,345 @@ document.getElementById('feedback-submit')?.addEventListener('click', () => {
 })
 setFeedbackMode('anonymous')
 
+// ---- Feedback 追踪 + 已读 + 社区镜像 ----
+const FEEDBACK_RECEIPTS_KEY = 'dsh-feedback-receipts'
+const FEEDBACK_READ_KEY = 'dsh-feedback-read'
+let feedbackIssuesState: string = 'open'
+let feedbackIssuesPage = 1
+const FEEDBACK_ISSUES_PER_PAGE = 20
+let feedbackPollTimer: number | null = null
+
+function getStoredReceipts(): string[] {
+  try {
+    const raw = localStorage.getItem(FEEDBACK_RECEIPTS_KEY)
+    if (!raw) return []
+    const arr = JSON.parse(raw)
+    if (!Array.isArray(arr)) return []
+    return arr.filter((v: unknown): v is string => typeof v === 'string' && /^fb_[a-z0-9]{24}$/.test(v)).slice(0, 50)
+  } catch { return [] }
+}
+
+function storeReceipt(receiptId: string): void {
+  const list = getStoredReceipts()
+  if (list.includes(receiptId)) return
+  list.unshift(receiptId)
+  localStorage.setItem(FEEDBACK_RECEIPTS_KEY, JSON.stringify(list.slice(0, 50)))
+}
+
+function getReadMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(FEEDBACK_READ_KEY)
+    if (!raw) return {}
+    const obj = JSON.parse(raw)
+    return obj && typeof obj === 'object' ? obj as Record<string,string> : {}
+  } catch { return {} }
+}
+
+function setRead(key: string, updatedAt: string): void {
+  const map = getReadMap()
+  map[key] = updatedAt
+  localStorage.setItem(FEEDBACK_READ_KEY, JSON.stringify(map))
+}
+
+function isUnread(key: string, updatedAt: string): boolean {
+  const map = getReadMap()
+  const readAt = map[key]
+  if (!readAt) return true
+  return new Date(updatedAt).getTime() > new Date(readAt).getTime()
+}
+
+function markAllRead(): void {
+  const myItems = document.querySelectorAll<HTMLElement>('#feedback-my-list .feedback-item')
+  myItems.forEach(el => {
+    const rid = el.dataset.receiptId
+    const updated = el.dataset.updatedAt
+    if (rid && updated) setRead(rid, updated)
+    const num = el.dataset.issueNumber
+    if (num && updated) setRead(`issue-${num}`, updated)
+  })
+  const issueItems = document.querySelectorAll<HTMLElement>('#feedback-issues-list .feedback-item')
+  issueItems.forEach(el => {
+    const num = el.dataset.issueNumber
+    const updated = el.dataset.updatedAt
+    if (num && updated) setRead(`issue-${num}`, updated)
+  })
+  fireAndForget('Refresh feedback', () => refreshMyFeedback())
+  fireAndForget('Refresh feedback', () => refreshCommunityIssues())
+  updateFeedbackTabBadge()
+}
+
+function updateFeedbackTabBadge(): void {
+  const tab = document.getElementById('tab-feedback')
+  const receipts = getStoredReceipts()
+  // async check unread without blocking
+  fireAndForget('Refresh feedback badge', async () => {
+    if (receipts.length === 0) { tab?.removeAttribute('data-unread'); return }
+    try {
+      if (!api) return
+      const res = await api.feedback.status(receipts)
+      if (!res.ok || !res.items) return
+      let hasUnread = false
+      for (const it of res.items) {
+        const key = it.receiptId
+        const updated = it.github?.updated_at ?? it.updatedAt
+        if (updated && isUnread(key, updated)) { hasUnread = true; break }
+        if (it.github?.number && isUnread(`issue-${it.github.number}`, it.github.updated_at)) { hasUnread = true; break }
+      }
+      if (hasUnread) tab?.setAttribute('data-unread','1')
+      else tab?.removeAttribute('data-unread')
+    } catch {}
+  })
+}
+
+function feedbackNode(tag: string, className: string, text = ''): HTMLElement {
+  const node = document.createElement(tag)
+  node.className = className
+  node.textContent = text
+  return node
+}
+
+function feedbackCard(title: string, state: string, number: number | null, unread: boolean, updatedAt: string) {
+  const item = feedbackNode('div', `feedback-item ${unread ? 'unread' : ''}`)
+  item.dataset.issueNumber = number === null ? '' : String(number)
+  item.dataset.updatedAt = updatedAt
+  const head = feedbackNode('div', 'feedback-item-head')
+  head.append(feedbackNode('span', 'feedback-item-title', title))
+  if (unread) head.append(feedbackNode('span', 'feedback-badge unread-dot', '\u672a\u8bfb'))
+  const labels: Record<string, string> = { open: '\u8fdb\u884c\u4e2d', closed: '\u5df2\u5173\u95ed', queued: '\u6392\u961f\u4e2d', created: '\u5df2\u521b\u5efa' }
+  head.append(feedbackNode('span', `feedback-badge ${['open', 'closed', 'queued'].includes(state) ? state : ''}`, labels[state] ?? state))
+  head.append(feedbackNode('span', 'feedback-badge', number ? `#${number}` : '\u2014'))
+  const meta = feedbackNode('div', 'feedback-item-meta')
+  const actions = feedbackNode('div', 'feedback-item-actions')
+  item.append(head, meta, actions)
+  return { item, meta, actions }
+}
+
+function feedbackButton(parent: HTMLElement, label: string, key: string, value: string, quiet = false): void {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.textContent = label
+  button.dataset[key] = value
+  if (quiet) button.className = 'quiet'
+  parent.append(button)
+}
+
+function renderMyFeedback(items: Array<{ receiptId: string; status: string; issueNumber: number | null; createdAt: string; updatedAt: string; github?: { number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[] } | null }>): void {
+  const list = document.getElementById('feedback-my-list')
+  const badge = document.getElementById('feedback-my-unread')
+  if (!list) return
+  list.replaceChildren()
+  if (items.length === 0) {
+    list.append(feedbackNode('div', 'feedback-empty', '\u6682\u65e0\u63d0\u4ea4\u8bb0\u5f55'))
+    if (badge) badge.hidden = true
+    return
+  }
+  let unreadCount = 0
+  for (const it of items) {
+    const github = it.github
+    const updatedAt = github?.updated_at ?? it.updatedAt ?? it.createdAt
+    const unread = updatedAt ? isUnread(it.receiptId, updatedAt) : false
+    if (unread) unreadCount++
+    const { item, meta, actions } = feedbackCard(github?.title ?? '\u7b49\u5f85\u521b\u5efa Issue...', github?.state ?? it.status, it.issueNumber, unread, updatedAt)
+    item.dataset.receiptId = it.receiptId
+    meta.append(feedbackNode('span', '', `\u6536\u636e ${it.receiptId.slice(0,10)}...`))
+    if (github) meta.append(feedbackNode('span', '', `\u8bc4\u8bba ${github.comments}`))
+    meta.append(feedbackNode('span', '', updatedAt ? new Date(updatedAt).toLocaleString() : ''))
+    if (it.issueNumber) feedbackButton(actions, '\u67e5\u770b Issue', 'openIssue', String(it.issueNumber))
+    else actions.append(feedbackNode('span', 'feedback-badge', '\u540c\u6b65\u4e2d'))
+    if (unread) feedbackButton(actions, '\u6807\u4e3a\u5df2\u8bfb', 'markRead', it.receiptId, true)
+    list.append(item)
+  }
+  if (badge) badge.hidden = unreadCount === 0
+  list.querySelectorAll<HTMLButtonElement>('[data-open-issue]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const num = Number(btn.dataset.openIssue)
+      if (!num) return
+      const item = items.find(i => i.issueNumber === num)
+      if (item) setRead(item.receiptId, item.github?.updated_at ?? item.updatedAt)
+      if (num) setRead(`issue-${num}`, items.find(i=>i.issueNumber===num)?.github?.updated_at ?? new Date().toISOString())
+      fireAndForget('Open feedback issue', async () => { await api?.feedback.openIssue(num) })
+      setTimeout(() => { fireAndForget('Refresh feedback', () => refreshMyFeedback()); updateFeedbackTabBadge() }, 300)
+    })
+  })
+  list.querySelectorAll<HTMLButtonElement>('[data-mark-read]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const rid = btn.dataset.markRead
+      const el = btn.closest('.feedback-item') as HTMLElement | null
+      const updated = el?.dataset.updatedAt ?? new Date().toISOString()
+      if (rid) setRead(rid, updated)
+      fireAndForget('Refresh feedback', () => refreshMyFeedback()); updateFeedbackTabBadge()
+    })
+  })
+}
+
+async function refreshMyFeedback(): Promise<void> {
+  const statusEl = document.getElementById('feedback-my-status')
+  const receipts = getStoredReceipts()
+  if (receipts.length === 0) {
+    if (statusEl) statusEl.textContent = ''
+    renderMyFeedback([])
+    return
+  }
+  if (statusEl) statusEl.textContent = '同步中…'
+  try {
+    if (!api) throw new Error('api unavailable')
+    const res = await api.feedback.status(receipts)
+    if (!res.ok) {
+      if (statusEl) statusEl.textContent = res.message ?? '同步失败'
+      return
+    }
+    if (statusEl) statusEl.textContent = `${res.items?.length ?? 0} 条反馈，已关联 GitHub`
+    renderMyFeedback(res.items ?? [])
+    // check for new updates and notify
+    for (const it of res.items ?? []) {
+      const updated = it.github?.updated_at ?? it.updatedAt
+      if (updated && isUnread(it.receiptId, updated) && it.github) {
+        // only notify once per session per receipt
+        const notifiedKey = `notified-${it.receiptId}-${updated}`
+        if (!sessionStorage.getItem(notifiedKey)) {
+          sessionStorage.setItem(notifiedKey, '1')
+          try { new Notification('反馈有更新', { body: `${it.github.title} 状态: ${it.github.state}` }) } catch {}
+        }
+      }
+    }
+    updateFeedbackTabBadge()
+  } catch (err) {
+    if (statusEl) statusEl.textContent = err instanceof Error ? err.message : '同步失败'
+  }
+}
+
+function renderCommunityIssues(issues: Array<{ number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[]; body_preview?: string }>): void {
+  const list = document.getElementById('feedback-issues-list')
+  if (!list) return
+  list.replaceChildren()
+  if (issues.length === 0) {
+    list.append(feedbackNode('div', 'feedback-empty', '\u6682\u65e0\u516c\u5f00\u53cd\u9988'))
+    return
+  }
+  for (const iss of issues) {
+    const unread = isUnread(`issue-${iss.number}`, iss.updated_at)
+    const { item, meta, actions } = feedbackCard(iss.title, iss.state, iss.number, unread, iss.updated_at)
+    meta.append(feedbackNode('span', '', `\u8bc4\u8bba ${iss.comments}`), feedbackNode('span', '', new Date(iss.updated_at).toLocaleString()))
+    for (const label of iss.labels.slice(0,3)) meta.append(feedbackNode('span', 'feedback-badge', label))
+    if (iss.body_preview) item.insertBefore(feedbackNode('p', 'surface-caption', iss.body_preview), actions)
+    feedbackButton(actions, '\u67e5\u770b\u8be6\u60c5', 'openCommunity', String(iss.number))
+    if (unread) feedbackButton(actions, '\u6807\u4e3a\u5df2\u8bfb', 'markCommunity', String(iss.number), true)
+    list.append(item)
+  }
+  list.querySelectorAll<HTMLButtonElement>('[data-open-community]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const num = Number(btn.dataset.openCommunity)
+      const iss = issues.find(i => i.number === num)
+      if (iss) setRead(`issue-${num}`, iss.updated_at)
+      fireAndForget('Open feedback issue', async () => { await api?.feedback.openIssue(num) })
+      setTimeout(() => { fireAndForget('Refresh feedback', () => refreshCommunityIssues()); updateFeedbackTabBadge() }, 300)
+    })
+  })
+  list.querySelectorAll<HTMLButtonElement>('[data-mark-community]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const num = Number(btn.dataset.markCommunity)
+      const iss = issues.find(i => i.number === num)
+      if (iss) setRead(`issue-${num}`, iss.updated_at)
+      fireAndForget('Refresh feedback', () => refreshCommunityIssues()); updateFeedbackTabBadge()
+    })
+  })
+}
+
+async function refreshCommunityIssues(): Promise<void> {
+  const statusEl = document.getElementById('feedback-issues-status')
+  const pageEl = document.getElementById('feedback-issues-page')
+  if (statusEl) statusEl.textContent = '加载中…'
+  try {
+    if (!api) throw new Error('api unavailable')
+    const res = await api.feedback.issues({ state: feedbackIssuesState, page: feedbackIssuesPage, perPage: FEEDBACK_ISSUES_PER_PAGE })
+    if (!res.ok) {
+      if (statusEl) statusEl.textContent = res.message ?? '加载失败'
+      return
+    }
+    if (statusEl) statusEl.textContent = res.cachedAt ? `已同步 · ${new Date(res.cachedAt).toLocaleTimeString()}` : ''
+    if (pageEl) pageEl.textContent = `第 ${res.page ?? feedbackIssuesPage} 页`
+    renderCommunityIssues(res.issues ?? [])
+    updateFeedbackTabBadge()
+  } catch (err) {
+    if (statusEl) statusEl.textContent = err instanceof Error ? err.message : '加载失败'
+  }
+}
+
+function scheduleFeedbackPoll(): void {
+  if (feedbackPollTimer !== null) window.clearInterval(feedbackPollTimer)
+  feedbackPollTimer = window.setInterval(() => {
+    fireAndForget('Refresh feedback', () => refreshMyFeedback())
+    // community issues refresh less frequently
+    fireAndForget('Refresh feedback', () => refreshCommunityIssues())
+  }, 5 * 60 * 1000)
+  // also update badge on load
+  updateFeedbackTabBadge()
+}
+
+// Hook into existing submit to store receipt
+const originalSubmit = submitFeedbackUi
+async function submitFeedbackUiWithStore(): Promise<void> {
+  // call original but intercept result - we duplicate logic to capture receipt
+  if (!api || feedbackSubmitting) return
+  feedbackSubmitting = true
+  const submit = document.getElementById('feedback-submit') as HTMLButtonElement | null
+  if (submit) submit.disabled = true
+  try {
+    const include = (document.getElementById('feedback-include-diagnostics') as HTMLInputElement | null)?.checked ?? false
+    if (include && !feedbackDiagnosticsLoaded) await refreshFeedbackDiagnostics()
+    const input = feedbackInput(include)
+    if (!input.title.trim()) { setFeedbackStatus('请填写反馈标题', 'error'); return }
+    if (!input.body.trim()) { setFeedbackStatus('请填写反馈内容', 'error'); return }
+    if (input.mode === 'signed' && !input.signature?.trim()) { setFeedbackStatus('署名提交需要填写署名', 'error'); return }
+    setFeedbackStatus('提交中…')
+    const result = await api.feedback.submit(input)
+    if (result.ok) {
+      setFeedbackStatus(`反馈已收到，处理编号：${result.receiptId ?? '—'}`, 'ok')
+      if (result.receiptId) {
+        storeReceipt(result.receiptId)
+        fireAndForget('Refresh feedback', () => refreshMyFeedback())
+      }
+    } else {
+      setFeedbackStatus(`提交失败：${result.message ?? result.code ?? '未知错误'}\n可以复制完整反馈后发送到 QQ 群。`, result.code === 'unconfigured' ? 'warn' : 'error')
+    }
+  } catch {
+    setFeedbackStatus('提交失败：反馈服务暂时不可用\n可以复制完整反馈后发送到 QQ 群。', 'error')
+  } finally {
+    feedbackSubmitting = false
+    if (submit) submit.disabled = false
+  }
+}
+// replace handler
+document.getElementById('feedback-submit')?.replaceWith(document.getElementById('feedback-submit')!.cloneNode(true))
+document.getElementById('feedback-submit')?.addEventListener('click', () => fireAndForget('Submit feedback', () => submitFeedbackUiWithStore()))
+
+document.getElementById('feedback-my-refresh')?.addEventListener('click', () => fireAndForget('Refresh feedback', () => refreshMyFeedback()))
+document.getElementById('feedback-my-mark-all')?.addEventListener('click', () => markAllRead())
+document.getElementById('feedback-issues-refresh')?.addEventListener('click', () => fireAndForget('Refresh feedback', () => refreshCommunityIssues()))
+document.querySelectorAll<HTMLButtonElement>('[data-issues-state]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll<HTMLButtonElement>('[data-issues-state]').forEach(b => b.classList.remove('active'))
+    btn.classList.add('active')
+    feedbackIssuesState = btn.dataset.issuesState ?? 'open'
+    feedbackIssuesPage = 1
+    fireAndForget('Refresh feedback', () => refreshCommunityIssues())
+  })
+})
+document.getElementById('feedback-issues-prev')?.addEventListener('click', () => {
+  if (feedbackIssuesPage > 1) { feedbackIssuesPage--; fireAndForget('Refresh feedback', () => refreshCommunityIssues()) }
+})
+document.getElementById('feedback-issues-next')?.addEventListener('click', () => {
+  feedbackIssuesPage++; fireAndForget('Refresh feedback', () => refreshCommunityIssues())
+})
+
+// initial load
+fireAndForget('Refresh feedback', () => refreshMyFeedback())
+fireAndForget('Refresh feedback', () => refreshCommunityIssues())
+scheduleFeedbackPoll()
+if ('Notification' in window && Notification.permission === 'default') {
+  fireAndForget('Request notification permission', () => Notification.requestPermission())
+}
+
 // ---- 应用更新：启动自动检查，下载与重启安装由用户确认 ----
 const appUpdateVersion = document.getElementById('app-version')
 const appUpdateBadge = document.getElementById('app-update-badge')
@@ -1936,10 +2279,16 @@ function setUpdateStatus(status: UpdateStatus): void {
       text = '当前已是最新版本'
       kind = 'ok'
       break
-    case 'error':
-      text = `更新失败：${status.error ?? '未知错误'}`
+    case 'error': {
+      const raw = status.error ?? '未知错误'
+      // GitHub 在部分地区/网络下不可达：给出可操作提示而不是看似「坏了」的裸错误（Issue #35）
+      const networkHint = /timeout|timed out|ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|getaddrinfo|network|net::/i.test(raw)
+        ? '\n若网络访问 GitHub 受限，可使用系统代理后重试，或从 Releases 页手动下载安装包'
+        : ''
+      text = `更新失败：${raw}${networkHint}`
       kind = 'error'
       break
+    }
   }
   appUpdateStatus.textContent = text
   appUpdateStatus.className = `sidebar-update-status${kind ? ` ${kind}` : ''}`
@@ -2073,7 +2422,51 @@ function setHarnessLoading(status: { state: string; error?: string }): void {
   }
 }
 
-function setHarnessStatusText(status: { state: string; url?: string; code?: number | null; error?: string }): void {
+// ---- 启动等待计时（Issue #35）：让慢启动可见为进度而非卡死，超时后给出可操作建议 ----
+let harnessWaitTicker: number | null = null
+let harnessWaitStartedAt = 0
+/** 超过该等待秒数后在提示里追加杀毒软件扫描建议（与主进程 SLOW_START_LOG_MS 对齐） */
+const HARNESS_WAIT_HINT_AFTER_MS = 45_000
+
+function harnessWaitText(state: 'starting' | 'restarting' | 'reconnecting', elapsedMs: number): string {
+  const seconds = Math.floor(elapsedMs / 1000)
+  const waited = seconds > 0 ? `（已等待 ${seconds} 秒）` : ''
+  if (state === 'starting') {
+    const base = `正在启动 DeepSeek Harness…${waited}`
+    // 正常环境数秒内就绪；明显偏慢时大概率是安全软件逐文件扫描捆绑运行时
+    return elapsedMs >= HARNESS_WAIT_HINT_AFTER_MS
+      ? `${base}\n启动较慢？杀毒软件/Defender 扫描新安装的运行时可能显著拖慢启动；\n将 DSH Desktop Hub 安装目录加入排除项通常可加速`
+      : `${base}\n通常几秒内完成；首次运行或被安全软件扫描时可能需要更久，请稍候`
+  }
+  if (state === 'restarting') return `Harness 重启中…${waited}`
+  return `正在重新连接…${waited}`
+}
+
+function startHarnessWaitTicker(state: 'starting' | 'restarting' | 'reconnecting', sinceMs: number): void {
+  stopHarnessWaitTicker()
+  harnessWaitStartedAt = sinceMs
+  const tick = (): void => {
+    const elapsed = Date.now() - harnessWaitStartedAt
+    if (harnessLoadingText && !harnessLoading?.hidden) {
+      harnessLoadingText.textContent = harnessWaitText(state, elapsed)
+    }
+    if (state !== 'reconnecting') {
+      const el = document.getElementById('harness-status')
+      if (el) el.textContent = harnessWaitText(state, elapsed).replace('\n', ' ')
+    }
+  }
+  tick()
+  harnessWaitTicker = window.setInterval(tick, 1000)
+}
+
+function stopHarnessWaitTicker(): void {
+  if (harnessWaitTicker !== null) {
+    window.clearInterval(harnessWaitTicker)
+    harnessWaitTicker = null
+  }
+}
+
+function setHarnessStatusText(status: { state: string; url?: string; code?: number | null; error?: string; since?: number }): void {
   const el = document.getElementById('harness-status')
   if (!el) return
   currentHarnessState = status.state
@@ -2087,7 +2480,7 @@ function setHarnessStatusText(status: { state: string; url?: string; code?: numb
   let kind: '' | 'ok' | 'error' = ''
   switch (status.state) {
     case 'starting':
-      menuText = 'Harness 启动中…（首次运行或需 1-2 分钟，请稍候）'
+      menuText = 'Harness 启动中…'
       break
     case 'restarting':
       menuText = 'Harness 重启中…'
@@ -2108,6 +2501,13 @@ function setHarnessStatusText(status: { state: string; url?: string; code?: numb
   if (harnessBadge) harnessBadge.title = menuText
   el.textContent = menuText
   el.className = `harness-status${kind ? ` ${kind}` : ''}`
+  // 等待类状态启动秒表（在静态文案之后启动，tick 会覆写为带计时的提示）：
+  // 把慢启动呈现为进度而不是卡死；其余状态停表
+  if (status.state === 'starting' || status.state === 'restarting') {
+    startHarnessWaitTicker(status.state, status.since ?? Date.now())
+  } else {
+    stopHarnessWaitTicker()
+  }
   // 连接完成后自动缩回左下角徽章，不再遮挡界面；故障时自动展开便于查看原因并操作
   if (status.state === 'ready' || status.state === 'starting' || status.state === 'restarting') setHarnessMenuOpen(false)
   else if (status.state === 'exited') setHarnessMenuOpen(true)
@@ -2307,7 +2707,7 @@ const ONBOARDING_STEPS: OnboardingStep[] = [
   },
   {
     title: 'Harness 主界面',
-    body: '这里内嵌了完整的 DeepSeek Harness Web 界面。首次启动约需 1-2 分钟，就绪后即可直接对话使用。',
+    body: '这里内嵌了完整的 DeepSeek Harness Web 界面。通常几秒内完成连接；首次运行或被安全软件扫描时可能需要更久，就绪后即可直接对话使用。',
     tab: 'harness',
     target: '#harness-frame',
   },

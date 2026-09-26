@@ -339,7 +339,7 @@ test('Harness Windows shim 接线始终 shell:false 并保留独立 argv', async
     proc.stdout.emit('data', Buffer.from('dsh web: http://127.0.0.1:4321\r\n'))
     assert.equal((await started).url, 'http://127.0.0.1:4321')
     assert.equal(spawned.command, node)
-    assert.deepEqual(spawned.args, [entry, 'web', '--no-open', '--port', '4321'])
+    assert.deepEqual(spawned.args, [entry, '--profile', 'web', '--no-open', '--port', '4321'])
     assert.equal(spawned.options.shell, false)
     assert.equal(spawned.options.detached, false)
   } finally {

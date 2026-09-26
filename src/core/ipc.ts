@@ -34,9 +34,16 @@ export const IPC = {
   skillsImportClawHub: 'skills:import-clawhub',
   marketList: 'market:list',
   marketPluginPreflight: 'market:plugin-preflight',
+
+
+
   feedbackDiagnostics: 'feedback:diagnostics',
   feedbackCopy: 'feedback:copy',
   feedbackSubmit: 'feedback:submit',
+  feedbackStatus: 'feedback:status',
+  feedbackIssues: 'feedback:issues',
+  feedbackIssueDetail: 'feedback:issue-detail',
+  feedbackOpenIssue: 'feedback:open-issue',
 } as const
 
 export type UpdateState = 'idle' | 'unsupported' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'not-available' | 'error'
@@ -84,6 +91,8 @@ export interface HarnessStatus {
   signal?: string | null
   /** 失败/退出原因（面向用户的简短说明，UI 显示；详见运行日志） */
   error?: string
+  /** 该状态进入时刻（epoch ms）；renderer 用于显示「已等待 N 秒」 */
+  since?: number
 }
 
 export interface McpApplyInput {

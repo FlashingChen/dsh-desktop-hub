@@ -23,6 +23,8 @@ const snapshot = {
   pnpmVersion: '11.22.0',
   harnessState: 'ready',
   harnessExitCode: null,
+  harnessStartupMs: 72300,
+  updateState: 'not-available',
 }
 
 test('诊断格式只输出低敏白名单字段', () => {
@@ -37,6 +39,16 @@ test('诊断值中的换行和表格分隔符不会破坏 Markdown 表格', () =
   const text = diagnostics.formatDiagnostics({ ...snapshot, osRelease: 'line1|line2\nline3' })
   assert.match(text, /line1\\\|line2 line3/)
   assert.doesNotMatch(text, /line1\\\|line2\nline3/)
+})
+
+test('诊断包含启动耗时与更新状态，耗时以秒呈现且缺失时为 —（Issue #35）', () => {
+  const text = diagnostics.formatDiagnostics(snapshot)
+  assert.match(text, /Harness last startup.*72\.3 s/)
+  assert.match(text, /App update state.*not-available/)
+
+  const bare = diagnostics.formatDiagnostics({ ...snapshot, harnessStartupMs: null, updateState: null })
+  assert.match(bare, /Harness last startup.*—/)
+  assert.match(bare, /App update state.*—/)
 })
 
 test('匿名反馈会丢弃署名，署名反馈必须有署名', () => {
