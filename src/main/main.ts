@@ -48,6 +48,7 @@ import { getTrayWindowAction } from '../core/tray.js'
 import { wireSmoke } from './smoke.js'
 import { createPermissionHandlers } from './permissions.js'
 import { createNavigationGuard, isAllowedIpcSender, isAllowedNavigation } from './navigation.js'
+import { embeddedManagerUrl } from '../core/manager-url.js'
 import { loadInitialPage, type InitialPageLoadFailure } from './window-load.js'
 import { createUpdater } from './updater.js'
 import {
@@ -66,17 +67,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const RENDERER_ROOT = join(__dirname, '..', 'renderer')
 let RENDERER_URL = ''
 const ARTIFACTS_DIR = join(__dirname, '..', '..', 'artifacts')
-
-/**
- * 内嵌管理中心地址：Plugin/MCP/Skills 中心只渲染在 manager-embedded（manager.html）下，
- * 与渲染层响应 Harness 侧边栏握手时构造的 URL 保持一致。
- */
-function embeddedManagerUrl(): string {
-  const url = new URL('/manager.html', RENDERER_URL)
-  url.searchParams.set('embedded', '1')
-  url.searchParams.set('tab', 'plugin')
-  return url.href
-}
 
 const argv = process.argv
 const SMOKE = argv.includes('--smoke')
@@ -1375,13 +1365,13 @@ void app.whenReady().then(async () => {
   updater.setup((status) => sendPluginEvent(IPC.updatesStatus, status))
   if (SMOKE) {
     createSkeletonWindow()
-    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: false, managerUrl: embeddedManagerUrl() })
+    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: false, managerUrl: embeddedManagerUrl(RENDERER_URL) })
     return
   }
   if (HARNESS_SMOKE) {
     await startHarnessAndWatch()
     createSkeletonWindow()
-    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: true, managerUrl: embeddedManagerUrl() })
+    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: true, managerUrl: embeddedManagerUrl(RENDERER_URL) })
     return
   }
   // 默认产品行为：窗口先行（立即出现，状态「连接中」，绝不因 harness 慢而空白/退出），

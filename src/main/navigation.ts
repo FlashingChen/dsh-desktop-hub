@@ -1,3 +1,5 @@
+import { isManagerCenterTab } from '../core/manager-url.js'
+
 function isAllowedHarnessNavigation(candidateUrl: string, harnessUrl: string | null): boolean {
   if (!harnessUrl) return false
 
@@ -43,7 +45,7 @@ function isAllowedManagerNavigation(candidateUrl: string, rendererUrl: string): 
       && manager.password === ''
       && manager.hash === ''
       && manager.searchParams.get('embedded') === '1'
-      && ['plugin', 'mcp', 'skills', 'updates', 'feedback'].includes(manager.searchParams.get('tab') ?? '')
+      && isManagerCenterTab(manager.searchParams.get('tab'))
       && [...manager.searchParams.keys()].every((key) => key === 'embedded' || key === 'tab')
   } catch {
     return false

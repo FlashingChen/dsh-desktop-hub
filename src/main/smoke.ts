@@ -317,7 +317,13 @@ export function wireSmoke(ctx: SmokeContext): void {
       const screenshotOk = await assertDomAndScreenshot(
         win,
         'm1-harness',
-        (dom) => dom.title === APP_TITLE && dom.bodyLen > 0,
+        // 壳层是 desktop-host：自身文案全被 CSS 隐藏，Harness 渲染在 iframe 里，
+        // 因此壳层 bodyLen 合法为 0，不能拿它当「有内容」的判据。
+        // 真正要守的是：标题/面板结构完整，且 iframe 已连上真实 Harness。
+        (dom) =>
+          dom.title === APP_TITLE &&
+          (dom.panels?.every(Boolean) ?? false) &&
+          (dom.harnessStatus ?? '').includes('已连接'),
         ctx.artifactsDir,
         false,
       )

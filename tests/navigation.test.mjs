@@ -1,11 +1,21 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   createNavigationGuard,
   isAllowedFrameNavigation,
   isAllowedIpcSender,
   isAllowedNavigation,
 } from '../dist/main/navigation.js'
+import {
+  MANAGER_CENTER_TABS,
+  embeddedManagerUrl,
+  isManagerCenterTab,
+} from '../dist/core/manager-url.js'
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const rendererUrl = 'file:///opt/DSH%20Desktop/dist/renderer/index.html'
 const harnessUrl = 'http://127.0.0.1:3080/app'
@@ -113,4 +123,41 @@ test('IPC 拒绝主帧偏离壳层，以及非中心子帧（Harness 源 / 外�
   assert.equal(isAllowedIpcSender('http://owner@127.0.0.1:4000/manager.html?embedded=1&tab=plugin', false, shell), false)
   assert.equal(isAllowedIpcSender('about:blank', false, shell), false)
   assert.equal(isAllowedIpcSender('not a URL', false, shell), false)
+})
+
+// 中心地址有三处消费者（渲染层握手 / IPC 来源校验 / 冒烟），但渲染层是独立 bundle
+// （tsconfig.renderer.json 的 rootDir 限死 src/renderer），无法 import core。
+// 这里锁住「渲染层内联拼法 == core 的 embeddedManagerUrl」，任一处漂移都会红。
+test('渲染层内联的中心地址与 core 单一来源保持一致', () => {
+  const renderer = readFileSync(join(root, 'src/renderer/renderer.ts'), 'utf8')
+  const handshake = renderer.slice(
+    renderer.indexOf("dsh-desktop-hub/manager-url-request"),
+    renderer.indexOf('dsh-desktop-hub/manager-url\''),
+  )
+  assert.match(handshake, /new URL\('\/manager\.html', window\.location\.origin\)/, '渲染层必须从壳层 origin 拼 /manager.html')
+  assert.match(handshake, /searchParams\.set\('embedded', '1'\)/, '渲染层必须标记 embedded=1')
+  assert.match(handshake, /searchParams\.set\('tab', 'plugin'\)/, '渲染层必须指定默认 tab=plugin')
+
+  // 同一份拼法产出的地址必须与 core 逐字相同
+  assert.equal(
+    embeddedManagerUrl('http://127.0.0.1:4000/index.html'),
+    new URL('/manager.html', 'http://127.0.0.1:4000/index.html').href.replace('/manager.html', '/manager.html?embedded=1&tab=plugin'),
+  )
+  for (const tab of MANAGER_CENTER_TABS) {
+    assert.equal(embeddedManagerUrl('http://127.0.0.1:4000/index.html', tab), `http://127.0.0.1:4000/manager.html?embedded=1&tab=${tab}`)
+  }
+})
+
+test('中心 tab 白名单只认五个工作区，且中心地址只接受白名单内的 tab', () => {
+  assert.deepEqual([...MANAGER_CENTER_TABS], ['plugin', 'mcp', 'skills', 'updates', 'feedback'])
+  for (const tab of MANAGER_CENTER_TABS) assert.equal(isManagerCenterTab(tab), true, tab)
+  for (const tab of ['account', 'harness', '', null, undefined, 'PLUGIN']) assert.equal(isManagerCenterTab(tab), false, String(tab))
+
+  const shell = 'http://127.0.0.1:4000/index.html'
+  for (const tab of MANAGER_CENTER_TABS) {
+    assert.equal(isAllowedFrameNavigation(embeddedManagerUrl(shell, tab), false, shell, harnessUrl), true, tab)
+    assert.equal(isAllowedIpcSender(embeddedManagerUrl(shell, tab), false, shell), true, tab)
+  }
+  assert.equal(isAllowedFrameNavigation(embeddedManagerUrl(shell).replace('tab=plugin', 'tab=account'), false, shell, harnessUrl), false)
+  assert.equal(isAllowedIpcSender(embeddedManagerUrl(shell).replace('tab=plugin', 'tab=account'), false, shell), false)
 })
