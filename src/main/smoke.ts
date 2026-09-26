@@ -3,18 +3,19 @@
 import { app, type BrowserWindow } from 'electron'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import type { HarnessHandle } from '../core/harness.js'
 import { IPC } from '../core/ipc.js'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
 const APP_TITLE = 'DSH Desktop Hub'
+const FIVE_TABS = ['harness', 'plugin', 'mcp', 'skills', 'feedback'] as const
 
 export interface SmokeContext {
   mainWindow: () => BrowserWindow | null
   harness: () => HarnessHandle | null
   artifactsDir: string
   harnessSmoke: boolean
+  /** 内嵌管理中心地址（/manager.html?embedded=1），与 Harness 侧边栏打开的 URL 同源。 */
+  managerUrl: string
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
@@ -26,6 +27,15 @@ function finishSmoke(code: number): void {
   smokeFinished = true
   process.exitCode = code
   app.quit()
+}
+
+/** Run an event-triggered smoke flow without letting a rejected promise hang CI. */
+function runSmokeTask(label: string, task: () => Promise<void>): void {
+  void task().catch((error: unknown) => {
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+    console.error(`SMOKE FAIL: ${label} 异步执行失败：${detail}`)
+    finishSmoke(1)
+  })
 }
 
 interface DomSnapshot {
@@ -46,28 +56,34 @@ interface DomSnapshot {
   feedbackQr?: boolean
 }
 
-async function snapshot(win: BrowserWindow): Promise<DomSnapshot> {
+/**
+ * 读取渲染快照。`docExpr` 是求值为 Document 的 JS 表达式：默认主壳文档，
+ * 传 iframe 的 contentDocument 可直接断言内嵌管理中心（同源，可直接访问）。
+ */
+async function snapshot(win: BrowserWindow, docExpr = 'document'): Promise<DomSnapshot> {
   return win.webContents.executeJavaScript(`(() => {
-    const tabs = [...document.querySelectorAll('[data-tab]')].map(b => b.dataset.tab)
-    const active = document.querySelector('.tab.active')?.dataset.tab
-    const panels = ['harness','plugin','mcp','skills','feedback'].map(t => !!document.getElementById('panel-' + t))
-    const pluginRows = [...document.querySelectorAll('#plugin-rows tr')].map(r => r.textContent ?? '')
-    const mcpRows = [...document.querySelectorAll('#mcp-server-rows tr')].map(r => r.textContent ?? '')
+    // 刻意不叫 document：默认实参就是 'document'，同名 const 会形成 TDZ 自引用。
+    const doc = ${docExpr}
+    const tabs = [...doc.querySelectorAll('[data-tab]')].map(b => b.dataset.tab)
+    const active = doc.querySelector('.tab.active')?.dataset.tab
+    const panels = ['harness','plugin','mcp','skills','feedback'].map(t => !!doc.getElementById('panel-' + t))
+    const pluginRows = [...doc.querySelectorAll('#plugin-rows tr')].map(r => r.textContent ?? '')
+    const mcpRows = [...doc.querySelectorAll('#mcp-server-rows tr')].map(r => r.textContent ?? '')
     const marketCards = {
-      plugin: document.querySelectorAll('#plugin-market-grid .market-card').length,
-      mcp: document.querySelectorAll('#mcp-market-grid .market-card').length,
-      skills: document.querySelectorAll('#skills-market-grid .market-card').length,
+      plugin: doc.querySelectorAll('#plugin-market-grid .market-card').length,
+      mcp: doc.querySelectorAll('#mcp-market-grid .market-card').length,
+      skills: doc.querySelectorAll('#skills-market-grid .market-card').length,
     }
     return {
-      tabs, active, panels, title: document.title, bodyLen: document.body.innerText.length, pluginRows, mcpRows, marketCards,
+      tabs, active, panels, title: doc.title, bodyLen: doc.body.innerText.length, pluginRows, mcpRows, marketCards,
       apiPresent: !!window.dshDesktop,
-      pluginStatus: document.getElementById('plugin-status')?.textContent ?? '',
-      mcpApply: document.getElementById('mcp-apply')?.textContent ?? '',
-      mcpCancelHidden: document.getElementById('mcp-cancel-edit')?.hidden ?? false,
-      skillsStatus: document.getElementById('skills-status')?.textContent ?? '',
-      harnessStatus: document.getElementById('harness-status')?.textContent ?? '',
-      feedbackControls: !!document.getElementById('feedback-submit') && !!document.getElementById('feedback-diagnostics') && !!document.getElementById('feedback-copy-full'),
-      feedbackQr: !!document.querySelector('#panel-feedback img[src="community/qq-group.png"]'),
+      pluginStatus: doc.getElementById('plugin-status')?.textContent ?? '',
+      mcpApply: doc.getElementById('mcp-apply')?.textContent ?? '',
+      mcpCancelHidden: doc.getElementById('mcp-cancel-edit')?.hidden ?? false,
+      skillsStatus: doc.getElementById('skills-status')?.textContent ?? '',
+      harnessStatus: doc.getElementById('harness-status')?.textContent ?? '',
+      feedbackControls: !!doc.getElementById('feedback-submit') && !!doc.getElementById('feedback-diagnostics') && !!doc.getElementById('feedback-copy-full'),
+      feedbackQr: !!doc.querySelector('#panel-feedback img[src="community/qq-group.png"]'),
     }
   })()`) as Promise<DomSnapshot>
 }
@@ -78,8 +94,9 @@ async function assertDomAndScreenshot(
   assert: (dom: DomSnapshot) => boolean,
   artifactsDir: string,
   exitAfter = true,
+  docExpr = 'document',
 ): Promise<boolean> {
-  const dom = await snapshot(win)
+  const dom = await snapshot(win, docExpr)
   if (!assert(dom)) {
     console.error(`SMOKE FAIL: unexpected DOM ${JSON.stringify(dom)}`)
     finishSmoke(1)
@@ -101,7 +118,7 @@ async function assertDomAndScreenshot(
 }
 
 /** 等待谓词为真（带超时） */
-async function waitFor(win: BrowserWindow, probe: () => Promise<boolean>, timeoutMs: number): Promise<boolean> {
+async function waitFor(probe: () => Promise<boolean>, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (await probe()) return true
@@ -133,22 +150,66 @@ export function wireSmoke(ctx: SmokeContext): void {
     finishSmoke(1)
     return
   }
-  win.webContents.on('did-fail-load', (_e, code, desc, _url, isMainFrame) => {
-    // 子帧（harness iframe）失败/中止（-3）在重启旧进程时是正常现象，容忍，由后续状态断言把关
-    if (isMainFrame) {
-      console.error(`SMOKE FAIL: main frame load failed (${code} ${desc})`)
-      finishSmoke(1)
-    }
-  })
-
   if (!ctx.harnessSmoke) {
-    // ---- 骨架冒烟：五 Tab + 数据面板加载（不依赖特定 profile 数据）----
+    // ---- 骨架冒烟：壳层（desktop-host，Harness 全屏宿主）+ 内嵌管理中心（Plugin/MCP/Skills 中心）----
     onShellDidFinishLoad(win, () => {
-      void (async () => {
-        const ready = await waitFor(
-          win,
+      runSmokeTask('骨架冒烟', async () => {
+        // 1) 壳层契约：desktop-host 只承载 Harness 宿主视图（CSS 隐藏其余面板），
+        //    Plugin/MCP/Skills 中心由 manager.html 承载——壳层本就不加载中心数据。
+        const shellReady = await waitFor(
           async () => {
             const dom = await snapshot(win)
+            return (
+              JSON.stringify(dom.tabs) === JSON.stringify(FIVE_TABS) &&
+              dom.active === 'harness' &&
+              (dom.panels?.every(Boolean) ?? false) &&
+              dom.title === APP_TITLE &&
+              dom.feedbackControls === true &&
+              dom.feedbackQr === true
+            )
+          },
+          10_000,
+        )
+        if (!shellReady) {
+          console.error(`SMOKE FAIL: 壳层未渲染 ${JSON.stringify(await snapshot(win))}`)
+          finishSmoke(1)
+          return
+        }
+        const shellShot = await assertDomAndScreenshot(
+          win,
+          'm0-smoke',
+          (dom) => dom.title === APP_TITLE && (dom.bodyLen ?? 0) > 0,
+          ctx.artifactsDir,
+          false,
+        )
+        if (!shellShot) return
+
+        // 2) 内嵌管理中心：中心数据只在 manager-embedded（/manager.html?embedded=1）下加载。
+        //    生产上它占用 shell 的 harness-frame（与主壳同源的子帧），这里按同样拓扑复现——
+        //    不能把主帧导航过去：IPC 来源校验要求中心是子帧，主帧导航会被判为非法来源。
+        const managerDoc = "document.getElementById('harness-frame')?.contentDocument"
+        await win.webContents.executeJavaScript(`(() => {
+          const frame = document.getElementById('harness-frame')
+          if (!frame) throw new Error('缺少 harness-frame')
+          frame.src = ${JSON.stringify(ctx.managerUrl)}
+        })()`)
+        const managerMounted = await waitFor(
+          async () => (await win.webContents.executeJavaScript(
+            `(() => {
+              const d = ${managerDoc}
+              return !!d && d.body?.classList.contains('manager-embedded') === true
+            })()`,
+          )) === true,
+          15_000,
+        )
+        if (!managerMounted) {
+          console.error(`SMOKE FAIL: 内嵌管理中心未挂载 ${JSON.stringify(await snapshot(win))}`)
+          finishSmoke(1)
+          return
+        }
+        const ready = await waitFor(
+          async () => {
+            const dom = await snapshot(win, managerDoc)
             return (
               (dom.pluginStatus ?? '').includes('共') &&
               (dom.skillsStatus ?? '').includes('共') &&
@@ -160,22 +221,24 @@ export function wireSmoke(ctx: SmokeContext): void {
           35_000,
         )
         if (!ready) {
-          console.error(`SMOKE FAIL: Plugin/Skills 面板未完成加载 ${JSON.stringify(await snapshot(win))}`)
+          console.error(`SMOKE FAIL: Plugin/Skills 面板未完成加载 ${JSON.stringify(await snapshot(win, managerDoc))}`)
           finishSmoke(1)
           return
         }
         // 驱动 MCP JSON→YAML 转换（只读，不写 profile）
         await win.webContents.executeJavaScript(`(() => {
-          const ta = document.getElementById('mcp-json')
+          const doc = ${managerDoc}
+          const ta = doc.getElementById('mcp-json')
           ta.value = JSON.stringify({ mcpServers: {
             github: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], env: { GITHUB_TOKEN: 'x' } },
             remote: { type: 'http', url: 'https://mcp.example.com/search', headers: { Authorization: 'Bearer t' } }
           }})
-          document.getElementById('mcp-convert').click()
+          doc.getElementById('mcp-convert').click()
         })()`)
         const converted = await waitFor(
-          win,
-          async () => (await win.webContents.executeJavaScript(`document.getElementById('mcp-preview').textContent.length > 0`)) as boolean,
+          async () => (await win.webContents.executeJavaScript(
+            `${managerDoc}.getElementById('mcp-preview').textContent.length > 0`,
+          )) as boolean,
           5000,
         )
         if (!converted) {
@@ -185,12 +248,13 @@ export function wireSmoke(ctx: SmokeContext): void {
         }
         const screenshotOk = await assertDomAndScreenshot(
           win,
-          'm0-smoke',
+          'm0-manager',
           (dom) => {
             const d = dom as DomSnapshot
             return (
-              JSON.stringify(d.tabs) === JSON.stringify(['harness', 'plugin', 'mcp', 'skills', 'feedback']) &&
-              d.active === 'harness' &&
+              JSON.stringify(d.tabs) === JSON.stringify(FIVE_TABS) &&
+              // manager.html?embedded=1&tab=plugin 默认停在 Plugin 中心（壳层才是 harness）
+              d.active === 'plugin' &&
               (d.panels?.every(Boolean) ?? false) &&
               d.title === APP_TITLE &&
               (d.pluginStatus ?? '').includes('共') &&
@@ -206,13 +270,15 @@ export function wireSmoke(ctx: SmokeContext): void {
           },
           ctx.artifactsDir,
           false,
+          managerDoc,
         )
         if (!screenshotOk) return
         // MCP 转换结果单独校验（预览必须与 patch 同构）
         const mcp = (await win.webContents.executeJavaScript(`(() => {
-          const preview = document.getElementById('mcp-preview').textContent
-          const warnings = document.getElementById('mcp-warnings').textContent
-          return { preview, warnings, servers: document.getElementById('mcp-servers').textContent }
+          const doc = ${managerDoc}
+          const preview = doc.getElementById('mcp-preview').textContent
+          const warnings = doc.getElementById('mcp-warnings').textContent
+          return { preview, warnings, servers: doc.getElementById('mcp-servers').textContent }
         })()`)) as { preview: string; warnings: string; servers: string }
         if (!mcp.preview.trimStart().startsWith('- insert:') || !mcp.preview.includes('dsh-mcp-client') || !mcp.preview.includes('streamable-http')) {
           console.error(`SMOKE FAIL: MCP 转换异常 ${JSON.stringify(mcp)}`)
@@ -221,7 +287,7 @@ export function wireSmoke(ctx: SmokeContext): void {
         }
         console.log(`SMOKE OK: MCP convert 端到端通过（${JSON.stringify(mcp.servers)}）`)
         finishSmoke(0)
-      })()
+      })
     })
     return
   }
@@ -235,9 +301,8 @@ export function wireSmoke(ctx: SmokeContext): void {
     }
   })
   onShellDidFinishLoad(win, () => {
-    void (async () => {
+    runSmokeTask('Harness 冒烟', async () => {
       const mounted = await waitFor(
-        win,
         async () => {
           const src = (await win.webContents.executeJavaScript(`document.getElementById('harness-frame').src`)) as string
           return src.startsWith('http://127.0.0.1:')
@@ -252,7 +317,13 @@ export function wireSmoke(ctx: SmokeContext): void {
       const screenshotOk = await assertDomAndScreenshot(
         win,
         'm1-harness',
-        (dom) => dom.title === APP_TITLE && dom.bodyLen > 0,
+        // 壳层是 desktop-host：自身文案全被 CSS 隐藏，Harness 渲染在 iframe 里，
+        // 因此壳层 bodyLen 合法为 0，不能拿它当「有内容」的判据。
+        // 真正要守的是：标题/面板结构完整，且 iframe 已连上真实 Harness。
+        (dom) =>
+          dom.title === APP_TITLE &&
+          (dom.panels?.every(Boolean) ?? false) &&
+          (dom.harnessStatus ?? '').includes('已连接'),
         ctx.artifactsDir,
         false,
       )
@@ -265,7 +336,6 @@ export function wireSmoke(ctx: SmokeContext): void {
       }
       // 状态条（renderer 经 harness:status / frame-loaded 更新）
       const connected = await waitFor(
-        win,
         async () => {
           const status = (await win.webContents.executeJavaScript(`document.getElementById('harness-status').textContent`)) as string
           return status.includes('已连接') || harnessFrameLoaded
@@ -285,7 +355,6 @@ export function wireSmoke(ctx: SmokeContext): void {
       const oldSrc = src
       await win.webContents.executeJavaScript(`document.getElementById('harness-restart').click()`)
       const remounted = await waitFor(
-        win,
         async () => {
           const current = (await win.webContents.executeJavaScript(`document.getElementById('harness-frame').src`)) as string
           return current !== oldSrc && current.startsWith('http://127.0.0.1:')
@@ -299,7 +368,6 @@ export function wireSmoke(ctx: SmokeContext): void {
       }
       const newSrc = (await win.webContents.executeJavaScript(`document.getElementById('harness-frame').src`)) as string
       const reconnected = await waitFor(
-        win,
         async () => {
           const status = (await win.webContents.executeJavaScript(`document.getElementById('harness-status').textContent`)) as string
           return status.includes('已连接')
@@ -313,7 +381,7 @@ export function wireSmoke(ctx: SmokeContext): void {
       }
       console.log(`SMOKE OK: harness 重启后 iframe 重挂载（${oldSrc} → ${newSrc}，状态已连接）`)
       finishSmoke(0)
-    })()
+    })
   })
 }
 

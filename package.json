@@ -2,7 +2,7 @@
   "name": "dsh-desktop-hub",
   "version": "0.1.0",
   "productName": "DSH Desktop Hub",
-  "description": "DSH Desktop Hub — DeepSeek Harness 桌面管理控制台（多 Tab：Harness / Plugin / MCP / Skills）",
+  "description": "DSH Desktop Hub — DeepSeek Harness 桌面客户端（账号登录 + Plugin / MCP / Skills 管理）",
   "repository": {
     "type": "git",
     "url": "https://github.com/FlashingChen/dsh-desktop-hub.git"
@@ -11,9 +11,9 @@
   "type": "module",
   "main": "dist/main/main.js",
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.renderer.json",
     "test": "npm run build && node --test",
-    "build": "tsc -p tsconfig.json && node scripts/build-preload.mjs && tsc -p tsconfig.renderer.json && node scripts/copy-renderer.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json && node scripts/build-preload.mjs && tsc -p tsconfig.renderer.json && node scripts/copy-renderer.mjs",
     "start": "electron .",
     "smoke": "electron . --smoke",
     "smoke:plugin": "npm run build && node scripts/smoke-plugin-remove.mjs",

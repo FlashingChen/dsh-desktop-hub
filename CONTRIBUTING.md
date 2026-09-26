@@ -59,6 +59,16 @@ npm run smoke
 
 `npm start`、`npm run smoke:harness` 和 `npm run verify:m1` 会启动真实 Harness。它们可能读取或影响本机的 `web` profile，测试插件安装、移除或 MCP 写入时请使用临时 `DSH_HOME`，不要直接操作重要的个人配置。
 
+### 在 macOS 上跑真实 Harness 冒烟
+
+`resources/rt` 里 dsh 依赖的原生模块（`node-addon-require-builtin`）带 hardened runtime 签名的 `node` 进程**无法加载**：macOS 库校验要求加载的 `.node` 与宿主进程 Team ID 一致，会报 `code signature ... not valid for use in process`。用 PATH 上一个未开 hardened runtime 的 `node` 即可：
+
+```sh
+DSH_DESKTOP_ALLOW_PATH_NODE=1 DSH_NODE="$(command -v node)" npm run smoke:harness
+```
+
+`--harness-smoke` 与 `--smoke` 断言的壳层契约不同：壳层是 `desktop-host`，自身文案被 CSS 隐藏、Harness 渲染在 iframe 里，因此壳层 `document.body.innerText` 合法为 `0`，不能用它判断「有没有内容」。中心数据只在 `manager.html?embedded=1`（子帧）里加载，地址契约见 `src/core/manager-url.ts`。
+
 ## 项目结构和改动边界
 
 - `src/core/`：Harness、Plugin、MCP、Skills、市场和反馈等核心逻辑。优先把可测试逻辑放在这里。

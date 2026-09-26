@@ -100,7 +100,6 @@ function compareVersion(a: number[], b: number[]): number {
 }
 
 function bundledExecExists(): boolean {
-  const candidates: string[] = []
   const base = process.resourcesPath ?? join(process.cwd(), 'resources')
   const roots = [
     ...(process.resourcesPath ? [join(base, 'app', 'resources'), join(base, 'app.asar.unpacked', 'resources'), base] : [base]),
@@ -115,8 +114,8 @@ function bundledExecExists(): boolean {
 }
 
 function bundledDshVersion(): string | null {
-  // 读取打包 manifest 中的 dshVersion（最可靠）
   const candidates: string[] = []
+  // 读取打包 manifest 中的 dshVersion（最可靠）
   try {
     // 相对当前模块 src/core → dist/core 两种布局
     const here = dirname(fileURLToPath(import.meta.url))
@@ -167,7 +166,6 @@ export function dshSupportsVersioned(): boolean {
   }
   // 2) 看系统 dsh --version（以及 PATH 回退）
   // 复用 resolve 逻辑但避免循环依赖：直接找 PATH 上的 dsh
-  const pathCandidates = (process.env.PATH ?? '').split(':')
   // 简单探测：which dsh 变种，spawnSync 直接试 dsh
   for (const bin of ['dsh', '/opt/homebrew/bin/dsh', '/usr/local/bin/dsh']) {
     const v = systemDshVersion(bin)

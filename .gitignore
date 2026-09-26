@@ -5,6 +5,9 @@ artifacts/
 *.log
 .DS_Store
 frontend/
+# 旧版 runtime 本地残留；当前 builder 使用 resources/nd，但不得暴露或误提交这棵大目录。
 resources/node/
+resources/nd/*.zip
+resources/nd/*.tar.gz
 # 私有反馈服务端：部署到 Cloudflare Worker，不进入公开仓库
 github-issue-server/

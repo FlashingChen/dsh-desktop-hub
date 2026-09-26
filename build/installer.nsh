@@ -29,6 +29,19 @@ Var /GLOBAL DshCheckRound
 Var /GLOBAL DshSelfName
 Var /GLOBAL DshDummy
 
+; $INSTDIR is selected by the user. Never interpolate it into a PowerShell command:
+; values such as an apostrophe would change the command's syntax. Pass it as a child
+; process environment value instead; System::Call arguments are not reparsed as code.
+!define DSH_INSTALL_DIR_ENV "DSH_DESKTOP_HUB_INSTALL_DIR"
+
+!macro DSH_SET_INSTALL_DIR_ENV
+  System::Call 'Kernel32::SetEnvironmentVariable(t, t)i ("${DSH_INSTALL_DIR_ENV}", "$INSTDIR").r0'
+!macroend
+
+!macro DSH_CLEAR_INSTALL_DIR_ENV
+  System::Call 'Kernel32::SetEnvironmentVariable(t, p)i ("${DSH_INSTALL_DIR_ENV}", 0).r0'
+!macroend
+
 ; ---- 保持旧版 per-user 语义，同时兼容已有 per-machine 安装 ----
 ; 交互安装/卸载：没有真实 HKLM 安装时跳过安装范围页，固定当前用户。
 !macro customInstallMode
@@ -56,8 +69,10 @@ Var /GLOBAL DshDummy
   ; 安装目录下全部进程（harness 捆绑 node.exe 孤儿、插件/MCP 孙进程）。
   ; 绝不按 `node.exe` 镜像名杀 —— 目标用户是开发者，会误杀系统里其他 Node 进程。
   ${if} $IsPowerShellAvailable == 0
-    nsExec::Exec `"$PowerShellPath" -NoProfile -C "Get-CimInstance -ClassName Win32_Process | ? {$$_.Path -and $$_.Path.StartsWith('$INSTDIR', 'CurrentCultureIgnoreCase')} | % { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }"`
+    !insertmacro DSH_SET_INSTALL_DIR_ENV
+    nsExec::Exec `"$PowerShellPath" -NoProfile -C "$$root=[Environment]::GetEnvironmentVariable('${DSH_INSTALL_DIR_ENV}','Process'); if ([string]::IsNullOrWhiteSpace($$root)) { exit 1 }; $$isDriveFull=$$root.Length -ge 3 -and [int]$$root[1] -eq 58 -and ([int]$$root[2] -eq 92 -or [int]$$root[2] -eq 47); $$isUnc=$$root.Length -ge 2 -and [int]$$root[0] -eq 92 -and [int]$$root[1] -eq 92; if (-not ($$isDriveFull -or $$isUnc)) { exit 1 }; try { $$full=[IO.Path]::GetFullPath($$root) } catch { exit 1 }; $$pathRoot=[IO.Path]::GetPathRoot($$full); if ([string]::IsNullOrWhiteSpace($$pathRoot)) { exit 1 }; $$trimmed=$$full.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar); $$trimmedRoot=$$pathRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar); if ([string]::Equals($$trimmed,$$trimmedRoot,[StringComparison]::OrdinalIgnoreCase)) { exit 1 }; $$prefix=$$trimmed+[IO.Path]::DirectorySeparatorChar; Get-CimInstance -ClassName Win32_Process | ? {$$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$prefix, [StringComparison]::OrdinalIgnoreCase)} | % { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }"`
     Pop $DshDummy
+    !insertmacro DSH_CLEAR_INSTALL_DIR_ENV
   ${else}
     ; 无 PowerShell：wmic 兜底（wmic 不存在则失败无害）。
     ; WQL LIKE 按目录名子串匹配（产品目录名唯一；wmic 直接调用，不经 cmd，避免 % 变量展开干扰）。
@@ -69,8 +84,10 @@ Var /GLOBAL DshDummy
 ; ---- 复查：仍有存活进程返回 0，无则非 0（与默认 FIND_PROCESS 语义一致） ----
 !macro DSH_FIND_APP_PROCESS _RESULT
   ${if} $IsPowerShellAvailable == 0
-    nsExec::Exec `"$PowerShellPath" -NoProfile -C "if ((Get-CimInstance -ClassName Win32_Process | ? {$$_.Path -and $$_.Path.StartsWith('$INSTDIR', 'CurrentCultureIgnoreCase')}).Count -gt 0) { exit 0 } else { exit 1 }"`
+    !insertmacro DSH_SET_INSTALL_DIR_ENV
+    nsExec::Exec `"$PowerShellPath" -NoProfile -C "$$root=[Environment]::GetEnvironmentVariable('${DSH_INSTALL_DIR_ENV}','Process'); if ([string]::IsNullOrWhiteSpace($$root)) { exit 0 }; $$isDriveFull=$$root.Length -ge 3 -and [int]$$root[1] -eq 58 -and ([int]$$root[2] -eq 92 -or [int]$$root[2] -eq 47); $$isUnc=$$root.Length -ge 2 -and [int]$$root[0] -eq 92 -and [int]$$root[1] -eq 92; if (-not ($$isDriveFull -or $$isUnc)) { exit 0 }; try { $$full=[IO.Path]::GetFullPath($$root) } catch { exit 0 }; $$pathRoot=[IO.Path]::GetPathRoot($$full); if ([string]::IsNullOrWhiteSpace($$pathRoot)) { exit 0 }; $$trimmed=$$full.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar); $$trimmedRoot=$$pathRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar); if ([string]::Equals($$trimmed,$$trimmedRoot,[StringComparison]::OrdinalIgnoreCase)) { exit 0 }; $$prefix=$$trimmed+[IO.Path]::DirectorySeparatorChar; if ((Get-CimInstance -ClassName Win32_Process | ? {$$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$prefix, [StringComparison]::OrdinalIgnoreCase)}).Count -gt 0) { exit 0 } else { exit 1 }"`
     Pop ${_RESULT}
+    !insertmacro DSH_CLEAR_INSTALL_DIR_ENV
   ${else}
     ; 无 PS：按镜像名查（不带用户名过滤）；node.exe 孤儿依赖 DSH_KILL_APP_TREE 的 wmic 兜底
     nsExec::Exec `"$CmdPath" /C tasklist /FI "IMAGENAME eq ${APP_EXECUTABLE_FILENAME}" /FO CSV /NH | "$SYSDIR\findstr.exe" /B /I /C:"\"${APP_EXECUTABLE_FILENAME}\""`

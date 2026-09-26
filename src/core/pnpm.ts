@@ -1,18 +1,15 @@
 // pnpm 构建脚本策略：把一次明确的插件安装失败转换为可审计、幂等的 allowBuilds 更新。
-import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { isMap, parseDocument } from 'yaml'
 import { atomicWriteWithBackup } from './mcp.js'
+import { withWorkspaceLock } from './workspace-lock.js'
+
+export { isProcessAlive, withWorkspaceLock } from './workspace-lock.js'
+export type { WorkspaceLockOptions } from './workspace-lock.js'
 
 const PACKAGE_NAME_RE = /^(?:@[A-Za-z0-9_.-]+\/)?[A-Za-z0-9_.-]+$/
 const BUILD_DEP_PATH_RE = /^(?:@[A-Za-z0-9_.-]+\/)?[A-Za-z0-9_.-]+@(?:git\+|github:|file:|https?:\/\/).+$/
 const ANSI_RE = /\u001b\[[0-?]*[ -/]*[@-~]/g
-const LOCK_RETRY_LIMIT = 40
-const LOCK_RETRY_MS = 25
-const LOCK_STALE_MS = 30_000
-
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
-}
 
 function isBuildApprovalKey(value: string): boolean {
   return PACKAGE_NAME_RE.test(value) || BUILD_DEP_PATH_RE.test(value)
@@ -73,40 +70,6 @@ export function parseBuildApprovalKeys(output: string): string[] {
 export interface ApproveIgnoredBuildsResult {
   changed: boolean
   approved: string[]
-}
-
-function withWorkspaceLock<T>(workspaceFile: string, task: () => T): T {
-  const lockFile = `${workspaceFile}.lock`
-  let fd: number | undefined
-  for (let attempt = 0; attempt < LOCK_RETRY_LIMIT; attempt++) {
-    try {
-      fd = openSync(lockFile, 'wx', 0o600)
-      break
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code
-      if (code !== 'EEXIST') throw err
-      try {
-        if (Date.now() - statSync(lockFile).mtimeMs > LOCK_STALE_MS) unlinkSync(lockFile)
-      } catch {
-        /* another writer may have removed/replaced the lock */
-      }
-      sleepSync(LOCK_RETRY_MS)
-    }
-  }
-  if (fd === undefined) throw new Error(`等待 pnpm-workspace.yaml 锁超时: ${workspaceFile}`)
-  try {
-    return task()
-  } finally {
-    try {
-      closeSync(fd)
-    } finally {
-      try {
-        unlinkSync(lockFile)
-      } catch {
-        /* lock may already have been cleaned up after a stale-owner recovery */
-      }
-    }
-  }
 }
 
 /**

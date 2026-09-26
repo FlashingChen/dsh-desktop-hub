@@ -6,7 +6,7 @@
 
 **无需 Node.js，不碰 YAML，一站式使用和管理 DeepSeek Harness。**
 
-DeepSeek Harness 官方 Web UI 桌面客户端 —— 内置插件市场、MCP 市场、Skills 市场与三套本地管理台。
+DeepSeek Harness 官方 Web UI 桌面客户端 —— 支持 DeepSeek 账号登录，并内置插件、MCP 与 Skills 管理台。
 
 > 注：本项目是社区维护的开源项目，非 DeepSeek 官方产品。
 
@@ -19,7 +19,7 @@ DeepSeek Harness 官方 Web UI 桌面客户端 —— 内置插件市场、MCP �
 
 </div>
 
-<img src="assets/demo/harness.png" width="900" alt="DSH Desktop Hub 主界面：左侧五 Tab 工作区，主区域为 DeepSeek Harness 官方 Web UI" />
+<img src="assets/demo/harness.png" width="900" alt="DSH Desktop Hub 主界面：左侧工作区，主区域为 DeepSeek Harness 官方 Web UI" />
 
 ---
 
@@ -49,6 +49,10 @@ DeepSeek Harness 官方 Web UI 桌面客户端 —— 内置插件市场、MCP �
 
 > **市场数据来源声明**：各来源的运行时地址、用途、缓存策略、许可证边界和安全限制见 [`MARKET_SOURCES.md`](MARKET_SOURCES.md)。上游目录的收录不等于 DSH 安全背书。
 
+### DeepSeek 账号登录
+
+账号登录、退出与授权状态统一由 Harness 设置管理。Desktop Hub 提供插件、MCP 与 Skills 管理，不再提供独立的账号管理入口。也可以在 Harness 设置中配置 API Key。
+
 ### MCP 市场与配置转换 —— 粘贴即用
 
 Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH 插件行 YAML（`${VAR}` 自动转 `!!js process.env.VAR`，sse / 非法 serverName 会警告）→ 确认后写入 profile patch，官方 HMR 热生效。市场条目若声明环境变量，会在安装卡片中先填写密钥，DSH 将值写入当前 MCP 配置，用户不需要再手动设置系统环境变量。
@@ -70,7 +74,7 @@ Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH �
 ## 快速开始
 
 1. **下载安装**：macOS 下载 DMG（v0.3.5 起已签名并公证，可直接打开）；Windows 下载 EXE（当前未签名，首次运行需放行一次：SmartScreen → 更多信息 → 仍要运行）。
-2. **配置模型**：在 Harness Tab 的官方 Web UI 里填入 API Key。首次启动会有分步引导带你认识各功能区，之后可随时从侧栏「使用引导」重看。
+2. **连接账号**：在 Harness 设置中登录 DeepSeek 账号或配置 API Key。
 3. **开始使用**：直接对话；需要外部工具时，到 MCP / Skills / Plugin Tab 管理。
 
 > 当前为预览版（macOS arm64，已签名并公证；Windows x64 未签名）。
@@ -79,8 +83,9 @@ Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH �
 
 | 状态 | 项目 |
 |---|---|
-| ✅ | 基础版：五 Tab 壳（含反馈入口）+ MCP / Skills / Plugin 管理 + 内置运行时 |
+| ✅ | 基础版：Harness 主界面 + 桌面管理面板 + MCP / Skills / Plugin 管理 + 内置运行时 |
 | ✅ | 扩展中心 MVP：Plugin 市场、MCP 市场、Skills 市场（随包精选目录） |
+| ✅ | DeepSeek 账号：使用 Harness 内置的账号设置 |
 | 🚧 | Profile 切换（当前固定 `web`） |
 | Planned | Model Manager（API Key / 模型管理面板） |
 | Planned | Doctor（环境自检与一键修复） |
@@ -93,7 +98,7 @@ Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH �
 
 ## 社区与反馈
 
-应用内置第五个“反馈”Tab。匿名/署名反馈会提交到可访问的反馈服务，再由 bot 整理为 GitHub Issue，普通用户不需要访问 GitHub。诊断环境信息默认不附加，用户可以单独复制诊断信息或完整反馈；网络不可用时可复制内容发送到 QQ 群。
+应用内置“反馈”Tab。匿名/署名反馈会提交到可访问的反馈服务，再由 bot 整理为 GitHub Issue，普通用户不需要访问 GitHub。诊断环境信息默认不附加，用户可以单独复制诊断信息或完整反馈；网络不可用时可复制内容发送到 QQ 群。
 
 - [Issues](https://github.com/FlashingChen/dsh-desktop-hub/issues)：维护者与能访问 GitHub 的开发者直接查看问题
 - [Discussions](https://github.com/FlashingChen/dsh-desktop-hub/discussions)：使用讨论与想法交流
@@ -112,11 +117,11 @@ Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH �
 ```
 渲染进程（sandbox）             preload                   主进程                    核心逻辑                   捆绑运行时
 ┌──────────────────┐   ┌──────────────────┐   ┌────────────────────┐   ┌──────────────────┐   ┌─────────────────────────┐
-│ 五 Tab 壳         │   │ window.dshDesktop│   │ IPC handlers       │   │ src/core/         │   │ resources/              │
+│ 六 Tab 壳         │   │ window.dshDesktop│   │ IPC handlers       │   │ src/core/         │   │ resources/              │
 │ index.html       │──▶│ contextBridge    │──▶│ harness:url         │──▶│ harness.ts        │──▶│ node/（Node v24.10.0）   │
 │ renderer.ts      │   │ preload.cjs      │   │ plugins:list/       │   │ plugins.ts        │   │ dsh-runtime/            │
 │ (harness iframe) │◀──│ (CJS, sandbox)   │◀──│   install/remove/    │   │ mcp.ts            │   │  @deepseek-ai/dsh       │
-│                  │   │                  │   │   update             │   │ skills.ts         │   │  (0.1.0-rc.6)           │
+│                  │   │                  │   │   update             │   │ skills.ts         │   │  (0.1.7-rc.2)           │
 │                  │   │                  │   │ mcp:list/convert/    │   └──────────────────┘   │        │                │
 │                  │   │                  │   │   apply/update/     │            │ spawn(detached) ▼                │
 │                  │   │                  │   │   delete             │            └──── dsh web --port 0 ─────┘                │
@@ -128,11 +133,11 @@ Claude Code / Cursor 导出的 MCP JSON，粘贴进去 → 自动转换成 DSH �
 
 ```mermaid
 flowchart LR
-    UI["渲染进程（sandbox）<br/>五 Tab 壳 index.html + renderer.ts"]
+    UI["渲染进程（sandbox）<br/>六 Tab 壳 index.html + renderer.ts"]
     PRE["preload.cjs<br/>contextBridge → window.dshDesktop"]
     MAIN["主进程 main.ts<br/>IPC handlers + harness 生命周期"]
     CORE["src/core 纯逻辑<br/>harness / plugins / mcp / skills"]
-    RT["捆绑运行时 resources/<br/>Node v24.10.0 + @deepseek-ai/dsh@0.1.0-rc.6"]
+    RT["捆绑运行时 resources/<br/>Node v24.10.0 + @deepseek-ai/dsh@0.1.7-rc.2"]
     WEB["dsh web → http://127.0.0.1:PORT"]
     UI -->|IPC invoke| PRE --> MAIN
     MAIN --> CORE
@@ -147,13 +152,13 @@ flowchart LR
 启动 → registerIpc() → resolveDshExec()（打包内 runtime 优先，回退 PATH）
   → spawn dsh web --port 0（独立进程组）→ 解析 127.0.0.1:PORT → 轮询 HTTP 200（就绪超时 120s）
   → BrowserWindow（1280×800，sandbox + contextIsolation + preload.cjs）
-  → 加载五 Tab 壳（file://dist/renderer/index.html）
+  → 加载六 Tab 壳（file://dist/renderer/index.html）
   → renderer 经 IPC 取 harness URL → iframe 挂载官方 Web UI
   → 创建系统托盘；普通关闭按钮隐藏窗口，托盘菜单可重新显示或退出
 退出 → 托盘「退出」/应用菜单 → will-quit → harness.stop()：SIGTERM 进程组 → 2s 兜底 SIGKILL → app.quit
 ```
 
-- 默认（无 flag）＝产品行为：启动 harness + 五 Tab 壳；关闭窗口后继续驻留托盘，托盘菜单提供「显示窗口 / 退出」。
+- 默认（无 flag）＝产品行为：启动 harness + 六 Tab 壳；关闭窗口后继续驻留托盘，托盘菜单提供「显示窗口 / 退出」。
 - 冒烟模式：`--smoke`（不启 harness，DOM + 真实数据断言）；`--harness-smoke`（真实 harness + iframe 加载断言）。
 
 ## 目录结构
@@ -163,7 +168,7 @@ dsh-desktop-hub/
 ├── src/
 │   ├── main/main.ts            # Electron 主进程：窗口 + 托盘 + IPC + harness 进程生命周期
 │   ├── preload/preload.ts      # contextBridge 白名单 API（sandbox，编译为 preload.cjs）
-│   ├── renderer/               # 五 Tab 壳：index.html + renderer.ts（纯脚本，无模块）
+│   ├── renderer/               # 六 Tab 壳：index.html + renderer.ts（纯脚本，无模块）
 │   └── core/                   # 纯逻辑（可单测）：harness.ts / plugins.ts / plugin-ops.ts / pnpm.ts / mcp.ts / skills.ts / feedback.ts / diagnostics.ts
 ├── tests/                      # node --test 单测（从 dist/ 导入，需先 build）
 ├── scripts/
@@ -192,10 +197,10 @@ dsh-desktop-hub/
 |---|---|
 | `npm install` | 安装依赖（electron / typescript / electron-builder / electron-updater / yaml） |
 | `npm run build` | 三套 tsc（main+core → preload CJS → renderer）+ 拷贝 index.html，产物 `dist/` |
-| `npm run typecheck` | `tsc --noEmit`（main + core + preload；renderer 类型检查含在 `verify` 中） |
+| `npm run typecheck` | 顺序检查 `tsconfig.json` 与 `tsconfig.renderer.json`（main + core + preload + renderer） |
 | `npm test` | `node --test` 单测（自动发现 `tests/`，Windows 兼容；**需先 build**，测试从 dist 导入） |
-| `npm start` | 产品模式：启动 harness + 五 Tab 壳（需 dsh 可用且 `~/.dsh` 存在 web profile）；默认反馈地址为 `https://feedback.flashingchen.xyz/v1/feedback`，可用 `DSH_FEEDBACK_ENDPOINT` 覆盖 |
-| `npm run smoke` | 骨架冒烟（不启 harness）：五 Tab DOM + 真实插件/MCP/skills 数据断言，截屏 `artifacts/m0-smoke.png` |
+| `npm start` | 产品模式：启动 harness + 六 Tab 壳（需 dsh 可用且 `~/.dsh` 存在 web profile）；默认反馈地址为 `https://feedback.flashingchen.xyz/v1/feedback`，可用 `DSH_FEEDBACK_ENDPOINT` 覆盖 |
+| `npm run smoke` | 骨架冒烟（不启 harness）：六 Tab DOM + 真实插件/MCP/skills 数据断言，截屏 `artifacts/m0-smoke.png` |
 | `npm run smoke:harness` | 真实 harness 冒烟：iframe 挂载 + 状态「已连接」，截屏 `artifacts/m1-harness.png` |
 | `npm run verify:m1` | M1 实机验证：真实启动 dsh web → HTTP 200 → 优雅停止 → 端口关闭无孤儿 |
 | `npm run verify` | 一键门禁：骨架契约 + 构建产物 + typecheck×2 + 单测全绿（`npm test` 已改为先 build） |
@@ -205,14 +210,22 @@ dsh-desktop-hub/
 ```sh
 npm run build                          # 1. 构建 dist/
 node scripts/bundle-runtime.mjs        # 2. 捆绑运行时（首次/更新）：下载 Node v24.10.0 +
-                                      #    安装 @deepseek-ai/dsh@0.1.0-rc.6 到 resources/
+                                      #    安装 @deepseek-ai/dsh@0.1.7-rc.2 到 resources/
 npx electron-builder --mac dmg zip --arm64 # 3. macOS：DMG 首装 + zip（签名版本的更新载荷）
 npx electron-builder --win nsis --x64  # 4. Windows：release/DSH-Desktop-Hub-<version>-x64.exe
 ```
 
-- `bundle-runtime.mjs`：下载官方 Node v24.10.0（win/darwin/linux × x64/arm64）到 `resources/nd`，用捆绑 npm 以 `--ignore-scripts` 安装锁定版本 `@deepseek-ai/dsh@0.1.0-rc.6` 到 `resources/rt`；`RUNTIME_TARGET=win32` 可在 macOS 上交叉捆绑 Windows 运行时（含 .cmd shim 生成）。
-- `electron-builder.yml`：`files` 含 `dist/**/*` + `resources/**/*`；`asar: false`（产物直放 `resources/app`，压低 Windows 安装路径深度）；mac 目标 DMG + zip（arm64，签名后 zip 作为自动更新载荷）+ Windows 目标 NSIS（x64，assisted per-user，可选择安装目录）；macOS 签名与公证由 Release CI 的 secrets 驱动。
+- `bundle-runtime.mjs`：下载官方 Node v24.10.0（win/darwin/linux × x64/arm64）到 `resources/nd`，用捆绑 npm 以 `--ignore-scripts` 安装锁定版本 `@deepseek-ai/dsh@0.1.7-rc.2` 到 `resources/rt`；该版本提供官方账号授权 RPC；`RUNTIME_TARGET=win32` 可在 macOS 上交叉捆绑 Windows 运行时（含 .cmd shim 生成）。`nd/*.zip` 与 `nd/*.tar.gz` 只作为下载校验/复用缓存，不进入安装包。
+- `electron-builder.yml`：`files` 含 `dist/**/*` + 解压后的 `resources/**/*`，并排除 Node 官方压缩缓存；`asar: false`（产物直放 `resources/app`，压低 Windows 安装路径深度）；mac 目标 DMG + zip（arm64，签名后 zip 作为自动更新载荷）+ Windows 目标 NSIS（x64，assisted per-user，可选择安装目录）；macOS 签名与公证由 Release CI 的 secrets 驱动。
 - 打包后的应用在 PATH 仅 `/usr/bin:/bin`（无系统 node/dsh）的环境下可用捆绑运行时启动。
+
+## 凭据文件导致启动失败（Issue #45）
+
+旧版桌面端捆绑的 DSH `0.1.0-rc.6` 只支持平铺凭据文件；较新的 DSH 会写入包含 `version: 1`、`refs` 和可选 `records` 的格式。共用同一个 DSH_HOME 时，旧运行时会将数字版本字段误当成凭据，报 `the value for "version" ... must be a string` 并退出。
+
+捆绑运行时现锁定为 `0.1.7-rc.2`，直接支持版本化凭据格式，也由官方凭据提供器迁移合法的旧版平铺格式，并提供官方 DeepSeek 账号授权流程。无需手动给 `version` 加引号或删除凭据。请勿将凭据文件上传到 Issue。
+
+实机回归：构建后，将 `DSH_TEST_RESOURCES` 设置为包含 `rt/`、`nd/` 的运行时目录，使用捆绑 Node 执行 `scripts/smoke-credentials.mjs`。脚本在临时 DSH_HOME 中分别验证新版凭据原样保留、旧版凭据迁移、HTTP 200 与退出后端口关闭，不读取真实用户凭据。
 
 ## Release
 
@@ -233,14 +246,14 @@ git push origin v0.3.0
 
 | 层级 | 内容 |
 |---|---|
-| 契约测试 `tests/skeleton.test.mjs` | 骨架文件齐全；package.json 脚本与 devDependencies；五 Tab 契约；contextIsolation + sandbox + nodeIntegration:false；tsconfig strict |
+| 契约测试 `tests/skeleton.test.mjs` | 骨架文件齐全；package.json 脚本与 devDependencies；六 Tab 契约；contextIsolation + sandbox + nodeIntegration:false；tsconfig strict |
 | Harness `tests/harness.test.mjs`（5 例，不依赖真实 dsh） | `findDsh` 可解析；`dshHome` 默认/覆盖；真实 web profile 发现（首个 bundle = dsh-base）；忽略非 profile 目录；`parseHarnessUrl` |
 | Plugin `tests/plugins.test.mjs`（17 例） | bundles ∪ dependencies 分类；排序稳定；`buildPluginCommand` 命令形态；`normalizeInstallSpec` GitHub 链接归一化；聚合仓库识别/拦截；pnpm ignored builds 与 Git prepare 授权、显式拒绝保护；`runPluginOp` 退出码 + 取消；`deactivatePluginIfActive` 幂等清理（remove 后残留激活行） |
 | Plugin 生命周期 `tests/plugin-ops.test.mjs`（2 例） | 启动立即返回 token；完成推送失败时仍可查询终态 |
 | 权限策略 `tests/permissions.test.mjs`（7 例） | Harness iframe 剪贴板权限精确放行；主帧、其他来源与未知权限继续拒绝 |
 | MCP `tests/mcp.test.mjs`（18 例） | 混合 stdio+http 解析；sse / 非法 serverName 警告；格式拒绝；YAML 与官方示例同构；`${VAR}` → `!!js process.env.VAR`；patch 提取 / 替换 / 编辑 / 删除保留注释；空 patch 新建 / 备份事务；`!!js` 行在 merge/update/delete 后保真（AST 行级操作 + `$js` 哨兵） |
 | Skills `tests/skills.test.mjs`（15 例） | rank 合并 + shadowed；custom/bundled 根扫描；frontmatter 往返一致；kebab-case 校验落盘；可见性切换（含扁平 skill 文件名回退）；zip/.skill 导入（含资源文件、包裹目录剥离、拒绝无 SKILL.md、目录穿越拒绝）；GitHub URL 解析；ClawHub 固定版本导入 |
-| `npm run smoke` | 五 Tab 就绪；反馈面板/二维码存在；Plugin/Skills 面板加载完成；MCP 转换端到端（preview 含 `dsh-mcp-client` / `streamable-http`）；不依赖特定 profile 数据 |
+| `npm run smoke` | 六 Tab 就绪；反馈面板/二维码存在；Plugin/Skills 面板加载完成；MCP 转换端到端（preview 含 `dsh-mcp-client` / `streamable-http`）；不依赖特定 profile 数据 |
 | `npm run smoke:plugin` | 临时 `DSH_HOME` 中执行真实 `dsh plugin remove`，确认退出码与 package.json 依赖删除；不触碰用户 profile |
 | `npm run smoke:harness` | harness 就绪；iframe 挂载 `http://127.0.0.1:PORT`；状态条「已连接」（`#harness-status`）；重启后 iframe 重挂载到新端口 |
 | `npm run verify:m1` | 真实 dsh web 启动并 HTTP 200（页面 ≥100B）；优雅停止后端口关闭、无孤儿进程 |

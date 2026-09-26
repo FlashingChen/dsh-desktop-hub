@@ -1,9 +1,9 @@
 // Electron 主进程：窗口安全边界 + IPC（来源校验）+ harness 生命周期 + 插件/MCP/Skills 管理
-import { type ChildProcess } from 'node:child_process'
+import { spawn as spawnProcess, type ChildProcess } from 'node:child_process'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shell, Tray, type IpcMainInvokeEvent, type WebContents } from 'electron'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import { dirname, join, relative, isAbsolute, basename } from 'node:path'
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { homedir, release as osRelease } from 'node:os'
 import {
   startHarness,
@@ -20,13 +20,11 @@ import {
   classifyInstallSpec,
   deactivatePlugin,
   deactivatePluginIfActive,
-  isPluginActive,
   listPlugins,
   runPluginOp,
 } from '../core/plugins.js'
 import { PluginOpRunner } from '../core/plugin-ops.js'
 import {
-  MCP_PLUGIN,
   convertJsonToYaml,
   extractMcpServers,
   replaceMcpRows,
@@ -35,12 +33,13 @@ import {
   deleteMcpRow,
   atomicWriteWithBackup,
   readPatch,
-  type McpRow,
+  validateMcpApplyInput,
+  validateMcpUpdateInput,
 } from '../core/mcp.js'
-import { scanSkills, createSkill, setInvocation, importSkillFromZip, importSkillFromGitHub, importSkillFromClawHub, type SkillSummary } from '../core/skills.js'
+import { scanSkillsDetailed, resolveSkillIdentity, createSkill, setInvocation, importSkillFromZip, importSkillFromGitHub, importSkillFromClawHub, type SkillSummary } from '../core/skills.js'
 import { IPC, type PluginOpAction, type HarnessStatus } from '../core/ipc.js'
 import { DIAGNOSTIC_FORMAT_VERSION, formatDiagnostics, type DiagnosticHarnessState } from '../core/diagnostics.js'
-import { checkCredentialsFile, backupAndMigrate, credentialsPath, dshSupportsVersioned } from '../core/credentials-migration.js'
+import { checkCredentialsFile } from '../core/credentials-migration.js'
 import { normalizeFeedbackInput, toFeedbackPayload } from '../core/feedback.js'
 import { submitFeedback } from '../core/feedback-client.js'
 import { initLog, log } from '../core/log.js'
@@ -48,14 +47,25 @@ import { fetchMarketItems, preflightPluginSpec, type MarketKind } from '../core/
 import { getTrayWindowAction } from '../core/tray.js'
 import { wireSmoke } from './smoke.js'
 import { createPermissionHandlers } from './permissions.js'
+import { createNavigationGuard, isAllowedIpcSender, isAllowedNavigation } from './navigation.js'
+import { embeddedManagerUrl } from '../core/manager-url.js'
+import { loadInitialPage, type InitialPageLoadFailure } from './window-load.js'
 import { createUpdater } from './updater.js'
+import {
+  validateClawHubImportInput,
+  validateMcpDeleteId,
+  validatePluginStartInput,
+  validateSkillCreateInput,
+  validateSkillImportUrl,
+  validateSkillToggleInput,
+} from './ipc-validation.js'
+import { TrackedTaskRegistry } from './tracked-tasks.js'
+import { startLocalRendererServer, type LocalRendererServer } from './renderer-server.js'
 
 const APP_NAME = 'DSH Desktop Hub'
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const RENDERER_HTML = join(__dirname, '..', 'renderer', 'index.html')
-// 必须用 pathToFileURL：Windows 下 `file://${path}` 会产生 file://C:\... 的非法 URL（冒号在 host 位+反斜杠），
-// 主帧 did-fail-load ERR_INVALID_URL → 白屏。pathToFileURL 输出 file:///C:/... 跨平台合法。
-const RENDERER_URL = pathToFileURL(RENDERER_HTML).href
+const RENDERER_ROOT = join(__dirname, '..', 'renderer')
+let RENDERER_URL = ''
 const ARTIFACTS_DIR = join(__dirname, '..', '..', 'artifacts')
 
 const argv = process.argv
@@ -71,11 +81,18 @@ log(`argv=${JSON.stringify(argv)}`)
 const SLOW_START_LOG_MS = 45_000
 
 app.setName(APP_NAME)
+// In development Electron's resourcesPath points into node_modules/electron,
+// while packaged builds place this app's resources under app/resources.
+// Resolve from Electron's actual app path so both launches use this project's
+// bundled DSH version instead of an unrelated global `dsh` on PATH.
+process.env.DSH_DESKTOP_RESOURCES_DIR = join(app.getAppPath(), 'resources')
+if (!app.isPackaged) process.env.DSH_DESKTOP_ALLOW_PATH_NODE = '1'
 // Windows 任务栏分组/通知归属（须在 ready 前设置）；其他平台无此概念
 if (process.platform === 'win32') app.setAppUserModelId('com.dshdesktophub.app')
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
+let rendererServer: LocalRendererServer | null = null
 let harness: HarnessHandle | null = null
 let lastHarnessStatus: HarnessStatus = { state: 'starting' }
 /** 上次成功就绪的 Harness 启动耗时（ms）；诊断与慢启动日志用（Issue #35） */
@@ -91,6 +108,8 @@ let quitting = false
 let autoRestartTimer: NodeJS.Timeout | null = null
 /** 启动中（尚未就绪）的 dsh 子进程：退出时若仍在途则必须清理，防孤儿 */
 let startingProc: ChildProcess | null = null
+/** 启动清理失败/世代失效后仍需重试的确切 ChildProcess，避免后续启动覆盖唯一句柄。 */
+const harnessCleanupRetries = new Set<ChildProcess>()
 /** 每次主动停止都会递增；让被取消的启动 Promise 不能重新夺回 harness 状态或触发自动重启。 */
 let harnessStartGeneration = 0
 /** 自动重启墙钟限流：10 分钟内最多 8 次（防 crash-after-ready 死循环绕过计数） */
@@ -114,15 +133,108 @@ function canAutoRestart(): boolean {
 
 /** M2 管理的目标 profile（与 harness 启动一致）；M5 将支持切换 */
 const ACTIVE_PROFILE = 'web'
+const DESKTOP_HUB_PLUGIN_NAME = '@dsh-desktop-hub/manager'
+let desktopHubPluginPromise: Promise<string> | null = null
 
 // ---- 单实例锁：两个实例同时操作同一 profile/patch 会写冲突（P2-11）----
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
-  app.quit()
+  if (SMOKE || HARNESS_SMOKE) {
+    const mode = HARNESS_SMOKE ? '--harness-smoke' : '--smoke'
+    const message = `${mode} 无法获取单实例锁；已有 DSH Desktop Hub 实例正在运行，冒烟断言未执行`
+    log(`SMOKE FAIL: ${message}`)
+    console.error(`SMOKE FAIL: ${message}`)
+    app.exit(1)
+  } else {
+    app.quit()
+  }
 }
 
 function activeProfile(): DshProfile | null {
   return listProfiles(dshHome()).find((p) => p.name === ACTIVE_PROFILE) ?? null
+}
+
+function bundledDesktopHubPluginDir(): string {
+  const roots = [
+    join(process.cwd(), 'resources', 'plugins', 'dsh-desktop-hub'),
+    ...(process.resourcesPath
+      ? [
+          join(process.resourcesPath, 'app', 'resources', 'plugins', 'dsh-desktop-hub'),
+          join(process.resourcesPath, 'app.asar.unpacked', 'resources', 'plugins', 'dsh-desktop-hub'),
+          join(process.resourcesPath, 'plugins', 'dsh-desktop-hub'),
+        ]
+      : []),
+  ]
+  const source = roots.find((root) => existsSync(join(root, 'package.json')))
+  if (!source) throw new Error('桌面管理器 DSH 插件资源缺失')
+  return source
+}
+
+function runPnpm(args: string[], cwd: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawnProcess('pnpm', args, {
+      cwd,
+      env: runtimePathEnv(ACTIVE_PROFILE, cwd),
+      stdio: 'ignore',
+      windowsHide: true,
+      shell: false,
+    })
+    const timeout = setTimeout(() => {
+      proc.kill('SIGTERM')
+      reject(new Error('安装桌面管理器 DSH 插件超时'))
+    }, 90_000)
+    proc.once('error', (error) => {
+      clearTimeout(timeout)
+      reject(new Error(`准备桌面管理器 DSH 插件失败：${error.message}`))
+    })
+    proc.once('exit', (code, signal) => {
+      clearTimeout(timeout)
+      if (code === 0) resolve()
+      else reject(new Error(`准备桌面管理器 DSH 插件失败（code=${code ?? 'null'}${signal ? `, signal=${signal}` : ''}）`))
+    })
+  })
+}
+
+/** Install the bundled UI extension as a profile dependency and activate it only for this desktop launch. */
+async function ensureDesktopHubPlugin(): Promise<string> {
+  if (desktopHubPluginPromise) return desktopHubPluginPromise
+  desktopHubPluginPromise = (async () => {
+    const profile = activeProfile()
+    if (!profile) throw new Error(`DSH profile「${ACTIVE_PROFILE}」不存在，无法挂载桌面管理器插件`)
+    const source = bundledDesktopHubPluginDir()
+    const destination = join(app.getPath('userData'), 'plugins', 'dsh-desktop-hub')
+    mkdirSync(destination, { recursive: true })
+    for (const file of ['package.json', 'index.js', 'client.js', 'cordis.patch.yml']) {
+      copyFileSync(join(source, file), join(destination, file))
+    }
+
+    const packageJson = JSON.parse(readFileSync(join(profile.dir, 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, unknown>
+    }
+    const currentSpec = packageJson.dependencies?.[DESKTOP_HUB_PLUGIN_NAME]
+    if (currentSpec !== undefined) {
+      if (typeof currentSpec !== 'string' || (!currentSpec.startsWith('file:') && !currentSpec.startsWith('link:'))) {
+        throw new Error(`DSH profile 中的「${DESKTOP_HUB_PLUGIN_NAME}」依赖与桌面管理器插件冲突`)
+      }
+      const localPath = currentSpec.slice(currentSpec.indexOf(':') + 1)
+      const linkedPath = isAbsolute(localPath) ? localPath : join(profile.dir, localPath)
+      if (realpathSync(linkedPath) !== realpathSync(destination)) {
+        throw new Error(`DSH profile 中的「${DESKTOP_HUB_PLUGIN_NAME}」依赖指向其他目录`)
+      }
+    } else {
+      await runPnpm(['add', '--save-exact', '--ignore-scripts', destination], profile.dir)
+    }
+
+    const installedPackage = join(profile.dir, 'node_modules', '@dsh-desktop-hub', 'manager', 'package.json')
+    if (!existsSync(installedPackage)) throw new Error('桌面管理器 DSH 插件未能链接到 web profile')
+    const installedManifest = JSON.parse(readFileSync(installedPackage, 'utf8')) as { name?: unknown }
+    if (installedManifest.name !== DESKTOP_HUB_PLUGIN_NAME) throw new Error('web profile 中的桌面管理器插件包名无效')
+    return join(destination, 'cordis.patch.yml')
+  })().catch((error: unknown) => {
+    desktopHubPluginPromise = null
+    throw error
+  })
+  return desktopHubPluginPromise
 }
 
 interface RuntimeManifest {
@@ -143,6 +255,26 @@ function readRuntimeManifest(): RuntimeManifest | null {
       if (value && typeof value === 'object') return value as RuntimeManifest
     } catch {
       /* optional diagnostic metadata; ignore malformed/missing manifest */
+    }
+  }
+  return null
+}
+
+function readDshRuntimeVersion(): string | null {
+  const manifestVersion = readRuntimeManifest()?.dshVersion
+  if (typeof manifestVersion === 'string' && manifestVersion.trim()) return manifestVersion
+
+  const packageFiles = [
+    join(process.cwd(), 'resources', 'rt', 'package.json'),
+    join(__dirname, '..', '..', 'resources', 'rt', 'package.json'),
+  ]
+  for (const file of packageFiles) {
+    try {
+      const value = JSON.parse(readFileSync(file, 'utf8')) as { dependencies?: Record<string, unknown> }
+      const version = value.dependencies?.['@deepseek-ai/dsh']
+      if (typeof version === 'string' && version.trim()) return version
+    } catch {
+      /* Packaged builds use the generated runtime manifest; development can read resources/rt/package.json. */
     }
   }
   return null
@@ -202,12 +334,12 @@ async function fetchJson(url: string, timeoutMs = 10000): Promise<unknown> {
   } finally { clearTimeout(t) }
 }
 
-// ---- IPC 来源校验（P1-2 / P2-9）：只接受壳层主帧，拒绝 harness iframe / 外部页 ----
+// ---- IPC 来源校验（P1-2 / P2-9）：只接受壳层主帧与内嵌管理中心子帧，拒绝 harness iframe / 外部页 ----
 function assertRendererSender(event: IpcMainInvokeEvent): void {
   const frame = event.senderFrame
-  const isMainFrame = frame === event.sender.mainFrame
-  if (!isMainFrame || frame?.url !== RENDERER_URL) {
-    throw new Error('IPC 来源校验失败：拒绝非壳层主帧调用')
+  const url = frame?.url ?? ''
+  if (!frame || !isAllowedIpcSender(url, frame === event.sender.mainFrame, RENDERER_URL)) {
+    throw new Error('IPC 来源校验失败：拒绝非壳层主帧与非法管理中心帧调用')
   }
 }
 
@@ -219,7 +351,6 @@ function shellWebContents(): WebContents | null {
   return null
 }
 
-// ---- 应用更新：启动后自动检查，下载/安装必须由用户确认 ----
 const updater = createUpdater()
 const UPDATE_CHECK_DELAY_MS = 8_000
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60_000
@@ -241,14 +372,25 @@ function scheduleUpdateChecks(): void {
 
 // ---- profile 写操作串行化：插件 patch 与 MCP patch 都落在同一文件上（P1-5）----
 let mutationChain: Promise<unknown> = Promise.resolve()
+let pendingMutations = 0
+let mutationsShuttingDown = false
 function serializeMutation<T>(task: () => Promise<T> | T): Promise<T> {
+  if (mutationsShuttingDown) return Promise.reject(new Error('应用正在退出，无法开始新的写操作'))
+  pendingMutations += 1
   const next = mutationChain.then(task, task)
-  mutationChain = next.then(
+  const tracked = next.finally(() => {
+    pendingMutations -= 1
+  })
+  mutationChain = tracked.then(
     () => undefined,
     () => undefined,
   )
-  return next
+  return tracked
 }
+
+// 网络 Skill 导入会长时间等待远端响应，但写入的不是 profile patch。独立跟踪，
+// 让退出可以 drain 已登记导入，同时不占用插件/MCP 的串行 mutationChain。
+const skillImportTasks = new TrackedTaskRegistry()
 
 // ---- 插件操作：启动/完成分离 + 流式输出 + 可取消 + 有界缓冲（P1-5 / P2-10）----
 // IPC 的 start-op 只能确认「已登记」，不能等待 dsh 子进程结束；完成由 plugin-op:done
@@ -293,6 +435,7 @@ async function requestPluginBuildApproval(keys: string[]): Promise<boolean> {
 }
 
 function startPluginOp(action: PluginOpAction, args: string[], finalize?: () => void) {
+  if (pluginOps.isShuttingDown()) return { ok: false as const, error: '应用正在退出，无法启动新的插件操作' }
   const exec = resolveDshExec()
   if (!exec) return { ok: false as const, error: '未找到 dsh 可执行文件' }
   const profile = activeProfile()
@@ -328,10 +471,13 @@ function resolveSkillRoot(source: SkillSummary['source']): string {
   }
 }
 
-function resolveScannedSkill(name: string, source: SkillSummary['source']): SkillSummary {
-  const skills = scanSkills({ dshHome: dshHome() })
-  const skill = skills.find((s) => s.name === name && s.source === source)
-  if (!skill) throw new Error(`skill「${name}」（${source}）不存在或不在允许的扫描根内`)
+function resolveScannedSkill(
+  id: string,
+  source: SkillSummary['source'],
+  kind: SkillSummary['kind'],
+): SkillSummary {
+  const skill = resolveSkillIdentity({ dshHome: dshHome() }, { id, source, kind })
+  if (!skill.canToggle) throw new Error(`skill 来源「${source}」不允许通过壳层修改`)
   const root = resolveSkillRoot(source)
   const pathReal = realpathSync(skill.path)
   const rootReal = realpathSync(root)
@@ -341,14 +487,19 @@ function resolveScannedSkill(name: string, source: SkillSummary['source']): Skil
     throw new Error(`skill 路径越界: ${skill.path}`)
   }
   const base = dirname(pathReal).split(/[\\/]/).pop() ?? ''
-  const isBundle = basename(pathReal) === 'SKILL.md' && base === name
-  const isFlat = basename(pathReal) === `${name}.md`
+  const isBundle = skill.kind === 'bundle' && basename(pathReal) === 'SKILL.md' && base === skill.name
+  const isFlat = skill.kind === 'flat' && basename(pathReal) === `${skill.name}.md`
   if (!isBundle && !isFlat) throw new Error(`skill 不是扫描到的 SKILL.md 或扁平文件: ${pathReal}`)
   return skill
 }
 
 // ---- IPC 注册 ----
 function registerIpc(): void {
+  ipcMain.handle(IPC.runtimeInfo, (event) => {
+    assertRendererSender(event)
+    return { appVersion: app.getVersion(), dshVersion: readDshRuntimeVersion() }
+  })
+
   ipcMain.handle(IPC.updatesGetStatus, (event) => {
     assertRendererSender(event)
     return updater.status()
@@ -377,35 +528,6 @@ function registerIpc(): void {
   ipcMain.handle(IPC.harnessRestart, (event) => {
     assertRendererSender(event)
     return restartHarness()
-  })
-
-  ipcMain.handle(IPC.credentialsStatus, (event) => {
-    assertRendererSender(event)
-    const cred = checkCredentialsFile()
-    return { format: cred.format, path: credentialsPath(), text: cred.text?.slice(0, 200) ?? undefined, supportsVersioned: dshSupportsVersioned() }
-  })
-
-  ipcMain.handle(IPC.credentialsMigrate, (event) => {
-    assertRendererSender(event)
-    const result = backupAndMigrate()
-    if (result.ok && result.migrated) log(`credentials: 已迁移 ${result.formatBefore} → ${result.formatAfter} 备份 ${result.backupPath}`)
-    else if (!result.ok) log(`credentials: 迁移失败 ${result.error}`)
-    return result.ok ? { ok: true as const, backupPath: result.backupPath } : { ok: false as const, error: result.error }
-  })
-
-  ipcMain.handle(IPC.credentialsOpenBackup, async (event, backupPath: unknown) => {
-    assertRendererSender(event)
-    if (typeof backupPath !== 'string' || !backupPath) return { ok: false as const, error: '无效备份路径' }
-    // 仅允许打开 .credentials.yaml.bak-* 备份，且必须在 DSH_HOME 内（防目录穿越）
-    const home = dshHome()
-    const rel = relative(home, backupPath)
-    if (!rel || rel.startsWith('..') || isAbsolute(rel) || !backupPath.includes('.credentials.yaml.bak-')) return { ok: false as const, error: '路径不在允许范围' }
-    try {
-      await shell.openPath(backupPath)
-      return { ok: true as const }
-    } catch (err) {
-      return { ok: false as const, error: err instanceof Error ? err.message : String(err) }
-    }
   })
 
   ipcMain.handle(IPC.feedbackDiagnostics, (event) => {
@@ -506,7 +628,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle(IPC.pluginsActivate, (event, name: unknown) => {
+  ipcMain.handle(IPC.pluginsActivate, async (event, name: unknown) => {
     assertRendererSender(event)
     const profile = activeProfile()
     if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, output: '' }
@@ -521,7 +643,7 @@ function registerIpc(): void {
       if (entry.activationSource === 'patch') {
         return { ok: true as const, output: '插件已经激活', backup: '' }
       }
-      return serializeMutation(() => {
+      return await serializeMutation(() => {
         const patch = readPatch(profile.dir)
         const result = writePluginPatch(profile, activatePlugin(patch, packageName))
         return { ...result, output: `插件「${packageName}」已激活；请重启 Harness` }
@@ -531,7 +653,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle(IPC.pluginsDeactivate, (event, name: unknown) => {
+  ipcMain.handle(IPC.pluginsDeactivate, async (event, name: unknown) => {
     assertRendererSender(event)
     const profile = activeProfile()
     if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, output: '' }
@@ -546,7 +668,7 @@ function registerIpc(): void {
       if (entry.activationSource === 'none') {
         return { ok: false as const, error: `插件「${packageName}」未激活`, output: '' }
       }
-      return serializeMutation(() => {
+      return await serializeMutation(() => {
         const patch = readPatch(profile.dir)
         const result = writePluginPatch(profile, deactivatePlugin(patch, packageName))
         return { ...result, output: `插件「${packageName}」已停用；package 依赖仍保留` }
@@ -568,23 +690,19 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.pluginsStartOp, (event, action: unknown, args: unknown) => {
     assertRendererSender(event)
-    if (action !== 'add' && action !== 'remove' && action !== 'update') {
-      return { ok: false as const, error: 'action 无效' }
-    }
-    if (!Array.isArray(args) || args.some((a) => typeof a !== 'string')) {
-      return { ok: false as const, error: 'args 无效' }
-    }
-    if (action === 'add' && args.length !== 1) return { ok: false as const, error: '安装需要 spec 参数' }
-    let operationArgs = args as string[]
-    if (action === 'add') {
+    const validated = validatePluginStartInput(action, args)
+    if (!validated.ok) return { ok: false as const, error: validated.error }
+    const operationAction = validated.value.action
+    let operationArgs = validated.value.args
+    if (operationAction === 'add') {
       const plan = classifyInstallSpec(operationArgs[0])
       if (plan.kind === 'routing-suite') return { ok: false as const, error: plan.message }
       if (!plan.normalized) return { ok: false as const, error: '插件 spec 无效' }
       // Renderer 已经预处理过一次；主进程仍再次归一化，防止绕过 UI 的调用把网页 URL 送进 pnpm。
       operationArgs = [plan.normalized]
     }
-    const removeName = action === 'remove' ? operationArgs[0] : undefined
-    return startPluginOp(action, operationArgs, removeName === undefined ? undefined : () => {
+    const removeName = operationAction === 'remove' ? operationArgs[0] : undefined
+    return startPluginOp(operationAction, operationArgs, removeName === undefined ? undefined : () => {
       // 已在 PluginOpRunner 的 profile mutation 串行区内，不能再次进入 serializeMutation。
       const profile = activeProfile()
       if (!profile) throw new Error(`profile「${ACTIVE_PROFILE}」不存在，无法清理插件激活行`)
@@ -624,23 +742,18 @@ function registerIpc(): void {
     return convertJsonToYaml(jsonText)
   })
 
-  ipcMain.handle(IPC.mcpApply, (event, input: unknown) => {
+  ipcMain.handle(IPC.mcpApply, async (event, input: unknown) => {
     assertRendererSender(event)
     const profile = activeProfile()
     if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, backup: '' }
-    const payload = (input ?? {}) as { rows?: unknown; mode?: unknown }
-    if (!Array.isArray(payload.rows) || payload.rows.length === 0) {
-      return { ok: false as const, error: '没有可写入的服务器', backup: '' }
-    }
-    const mode = payload.mode === 'replace' ? 'replace' : 'merge'
-    const normalized = payload.rows.map(normalizeMcpRow)
-    if (normalized.some((row): row is null => row === null)) {
-      return { ok: false as const, error: 'MCP 服务器格式无效', backup: '' }
-    }
+    const validated = validateMcpApplyInput(input)
+    if (!validated.ok) return { ok: false as const, error: validated.error, backup: '' }
     try {
-      return serializeMutation(() => {
+      return await serializeMutation(() => {
         const patch = readPatch(profile.dir)
-        const next = mode === 'replace' ? replaceMcpRows(patch, normalized as McpRow[]) : mergeMcpRows(patch, normalized as McpRow[])
+        const next = validated.value.mode === 'replace'
+          ? replaceMcpRows(patch, validated.value.rows)
+          : mergeMcpRows(patch, validated.value.rows)
         return writeMcpPatch(profile, next, extractMcpServers(next).length)
       })
     } catch (err) {
@@ -648,19 +761,15 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle(IPC.mcpUpdate, (event, input: unknown) => {
+  ipcMain.handle(IPC.mcpUpdate, async (event, input: unknown) => {
     assertRendererSender(event)
     const profile = activeProfile()
     if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, backup: '' }
-    if (!input || typeof input !== 'object') return { ok: false as const, error: '输入无效', backup: '' }
-    const payload = input as { id?: unknown; row?: unknown }
-    const id = typeof payload.id === 'string' ? payload.id.trim() : ''
-    if (!id) return { ok: false as const, error: 'MCP id 无效', backup: '' }
-    const row = normalizeMcpRow(payload.row)
-    if (!row) return { ok: false as const, error: 'MCP 服务器格式无效', backup: '' }
+    const validated = validateMcpUpdateInput(input)
+    if (!validated.ok) return { ok: false as const, error: validated.error, backup: '' }
     try {
-      return serializeMutation(() => {
-        const next = updateMcpRow(readPatch(profile.dir), { ...row, id })
+      return await serializeMutation(() => {
+        const next = updateMcpRow(readPatch(profile.dir), validated.value.row)
         return writeMcpPatch(profile, next, extractMcpServers(next).length)
       })
     } catch (err) {
@@ -668,14 +777,15 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle(IPC.mcpDelete, (event, id: unknown) => {
+  ipcMain.handle(IPC.mcpDelete, async (event, id: unknown) => {
     assertRendererSender(event)
     const profile = activeProfile()
     if (!profile) return { ok: false as const, error: `profile「${ACTIVE_PROFILE}」不存在`, backup: '' }
-    if (typeof id !== 'string' || !id.trim()) return { ok: false as const, error: 'MCP id 无效', backup: '' }
+    const validated = validateMcpDeleteId(id)
+    if (!validated.ok) return { ok: false as const, error: validated.error, backup: '' }
     try {
-      return serializeMutation(() => {
-        const next = deleteMcpRow(readPatch(profile.dir), id.trim())
+      return await serializeMutation(() => {
+        const next = deleteMcpRow(readPatch(profile.dir), validated.value)
         return writeMcpPatch(profile, next, extractMcpServers(next).length)
       })
     } catch (err) {
@@ -688,7 +798,21 @@ function registerIpc(): void {
     try {
       // 随包 skills：官方 Config.bundledSkillDir 默认取 $DSH_BUNDLED_SKILL_DIR，存在才扫描
       const bundledDir = process.env.DSH_BUNDLED_SKILL_DIR || undefined
-      return { ok: true as const, skills: scanSkills({ dshHome: dshHome(), bundledDir }) }
+      const scanned = scanSkillsDetailed({ dshHome: dshHome(), bundledDir })
+      const skills = scanned.skills.map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        description: skill.description,
+        whenToUse: skill.whenToUse,
+        modelInvocable: skill.modelInvocable,
+        userInvocable: skill.userInvocable,
+        source: skill.source,
+        kind: skill.kind,
+        shadowed: skill.shadowed,
+        canToggle: skill.canToggle,
+        bodyPreview: skill.bodyPreview,
+      }))
+      return { ok: true as const, skills, warnings: scanned.warnings }
     } catch (err) {
       return { ok: false as const, error: (err as Error).message, skills: [] }
     }
@@ -696,17 +820,17 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.skillsCreate, (event, input: unknown) => {
     assertRendererSender(event)
-    const payload = input as { name?: unknown; description?: unknown; body?: unknown; overwrite?: unknown }
-    if (typeof payload.name !== 'string' || typeof payload.description !== 'string' || typeof payload.body !== 'string') {
-      return { ok: false as const, error: '输入无效', path: '' }
-    }
+    if (mutationsShuttingDown) return { ok: false as const, error: '应用正在退出，无法开始新的写操作', path: '' }
+    const validated = validateSkillCreateInput(input)
+    if (!validated.ok) return { ok: false as const, error: validated.error, path: '' }
+    const payload = validated.value
     try {
       const path = createSkill({
         root: join(dshHome(), 'skills'),
         name: payload.name,
         description: payload.description,
         body: payload.body,
-        overwrite: payload.overwrite === true,
+        overwrite: payload.overwrite,
       })
       return { ok: true as const, path }
     } catch (err) {
@@ -716,12 +840,12 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.skillsToggle, (event, input: unknown) => {
     assertRendererSender(event)
-    const payload = input as { id?: unknown; source?: unknown; kind?: unknown; value?: unknown }
-    if (typeof payload.id !== 'string' || !payload.id.trim()) return { ok: false as const, error: 'skill id 无效' }
-    if (payload.kind !== 'model' && payload.kind !== 'user') return { ok: false as const, error: 'kind 无效' }
-    if (typeof payload.value !== 'boolean') return { ok: false as const, error: 'value 无效' }
+    if (mutationsShuttingDown) return { ok: false as const, error: '应用正在退出，无法开始新的写操作' }
+    const validated = validateSkillToggleInput(input)
+    if (!validated.ok) return { ok: false as const, error: validated.error }
+    const payload = validated.value
     try {
-      const skill = resolveScannedSkill(payload.id.trim(), payload.source as SkillSummary['source'])
+      const skill = resolveScannedSkill(payload.id, payload.source, payload.skillKind)
       setInvocation(skill.path, payload.kind, payload.value)
       return { ok: true as const }
     } catch (err) {
@@ -731,6 +855,7 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.skillsImportFile, (event, buffer: unknown, overwrite: unknown) => {
     assertRendererSender(event)
+    if (mutationsShuttingDown) return { ok: false as const, error: '应用正在退出，无法开始新的写操作', result: null }
     if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) return { ok: false as const, error: '文件无效', result: null }
     if (buffer.byteLength > 20 * 1024 * 1024) return { ok: false as const, error: '文件超过 20MB 上限', result: null }
     try {
@@ -743,9 +868,13 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.skillsImportUrl, async (event, url: unknown, overwrite: unknown) => {
     assertRendererSender(event)
-    if (typeof url !== 'string' || !url.trim()) return { ok: false as const, error: '链接无效', result: null }
+    const validated = validateSkillImportUrl(url)
+    if (!validated.ok) return { ok: false as const, error: validated.error, result: null }
     try {
-      const result = await importSkillFromGitHub(url, { root: join(dshHome(), 'skills'), overwrite: overwrite === true })
+      const result = await skillImportTasks.start(() => importSkillFromGitHub(
+        validated.value,
+        { root: join(dshHome(), 'skills'), overwrite: overwrite === true },
+      ))
       return { ok: true as const, result }
     } catch (err) {
       return { ok: false as const, error: (err as Error).message, result: null }
@@ -754,15 +883,13 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.skillsImportClawHub, async (event, input: unknown, overwrite: unknown) => {
     assertRendererSender(event)
-    if (!input || typeof input !== 'object') return { ok: false as const, error: 'ClawHub 条目无效', result: null }
-    const payload = input as { owner?: unknown; slug?: unknown; version?: unknown }
-    if (typeof payload.owner !== 'string' || typeof payload.slug !== 'string') return { ok: false as const, error: 'ClawHub owner/slug 无效', result: null }
+    const validated = validateClawHubImportInput(input)
+    if (!validated.ok) return { ok: false as const, error: validated.error, result: null }
     try {
-      const result = await importSkillFromClawHub({
-        owner: payload.owner,
-        slug: payload.slug,
-        version: typeof payload.version === 'string' ? payload.version : undefined,
-      }, { root: join(dshHome(), 'skills'), overwrite: overwrite === true })
+      const result = await skillImportTasks.start(() => importSkillFromClawHub(
+        validated.value,
+        { root: join(dshHome(), 'skills'), overwrite: overwrite === true },
+      ))
       return { ok: true as const, result }
     } catch (err) {
       return { ok: false as const, error: (err as Error).message, result: null }
@@ -786,7 +913,6 @@ function registerIpc(): void {
   })
 }
 
-// ---- patch 写入助手 ----
 function writeMcpPatch(profile: { dir: string }, next: string, rowCount: number) {
   const patchFile = join(profile.dir, 'cordis.patch.yml')
   const backup = atomicWriteWithBackup(patchFile, next)
@@ -799,21 +925,7 @@ function writePluginPatch(profile: { dir: string }, next: string) {
   return { ok: true as const, backup }
 }
 
-function normalizeMcpRow(value: unknown): McpRow | null {
-  if (!value || typeof value !== 'object') return null
-  const row = value as Partial<McpRow>
-  if (!row.config || typeof row.config !== 'object' || Array.isArray(row.config)) return null
-  if (typeof row.id !== 'string' || !row.id.trim()) return null
-  return { id: row.id.trim(), name: MCP_PLUGIN, config: row.config as Record<string, unknown> }
-}
-
 // ---- 窗口与安全 ----
-function isAllowedNavigation(url: string): boolean {
-  if (url === RENDERER_URL) return true
-  if (/^file:\/\/.+?\/dist\/renderer\/index\.html$/.test(url)) return true
-  return /^http:\/\/127\.0\.0\.1:\d+/.test(url)
-}
-
 function currentHarnessOrigin(): string | null {
   if (!harness) return null
   try {
@@ -898,18 +1010,37 @@ function createTray(): void {
   }
 }
 
+function openExternalHttpUrl(url: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return
+
+  const reportFailure = (error: unknown): void => {
+    const detail = error instanceof Error ? error.message : String(error)
+    log(`external-link: 系统浏览器打开 ${parsed.protocol} 链接失败 —— ${detail}`)
+  }
+  try {
+    void shell.openExternal(parsed.href).catch(reportFailure)
+  } catch (error) {
+    reportFailure(error)
+  }
+}
+
 function hardenWindow(win: BrowserWindow): void {
   // 拒绝任意 popup：http(s) 外部链接交给系统浏览器，其余一律 deny（P2-9）
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('https://') || url.startsWith('http://')) {
-      void shell.openExternal(url)
-    }
+    openExternalHttpUrl(url)
     return { action: 'deny' }
   })
-  // 主帧导航白名单：只允许壳层 renderer 与 harness loopback
-  win.webContents.on('will-navigate', (event, url) => {
-    if (!isAllowedNavigation(url)) event.preventDefault()
-  })
+  // 用户/页面发起的任意 frame 导航与服务端重定向执行同一白名单策略。
+  // will-frame-navigate 已覆盖主 frame，不再重复注册仅处理主 frame 的 will-navigate。
+  const guardNavigation = createNavigationGuard(RENDERER_URL, () => harness?.url ?? null)
+  win.webContents.on('will-frame-navigate', guardNavigation)
+  win.webContents.on('will-redirect', guardNavigation)
   // 权限默认拒绝，但必须放行可信 Harness iframe 的剪贴板读写。
   // Electron 会分别走 permission check 与 permission request 两条路径；两者必须使用同一策略，
   // 否则即使 request 放行，check 仍返回 false，navigator.clipboard 也会静默失败。
@@ -920,6 +1051,17 @@ function hardenWindow(win: BrowserWindow): void {
   win.webContents.session.setPermissionCheckHandler((_wc, permission, requestingOrigin, details) =>
     permissionHandlers.check(permission, requestingOrigin, details),
   )
+}
+
+function handleInitialPageLoadFailure(failure: InitialPageLoadFailure): void {
+  const message = `窗口初始页面加载失败 [${failure.source}]：${failure.detail}`
+  log(`window: ${message}`)
+  // A user/system quit can abort an otherwise valid in-flight load. Keep that
+  // rejection in the log, but do not turn an intentional shutdown into a crash.
+  if (quitRequested || sessionEnding || quitting) return
+  if (SMOKE || HARNESS_SMOKE) console.error(`SMOKE FAIL: ${message}`)
+  process.exitCode = 1
+  app.quit()
 }
 
 function createWindow(url: string): void {
@@ -935,8 +1077,18 @@ function createWindow(url: string): void {
       sandbox: true,
     },
   })
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (level >= 2) log(`renderer console error [${sourceId}:${line}] ${message}`)
+  })
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (errorCode === -3) return
+    log(`renderer load failed (mainFrame=${isMainFrame}, code=${errorCode}) ${errorDescription}: ${validatedURL}`)
+  })
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    log(`renderer process exited (reason=${details.reason}, exitCode=${details.exitCode})`)
+  })
   hardenWindow(mainWindow)
-  void mainWindow.loadURL(url)
+  loadInitialPage(mainWindow, url, handleInitialPageLoadFailure)
   mainWindow.on('close', (event) => {
     // 普通点右上角关闭只隐藏窗口，Harness 与后台进程继续运行；托盘菜单「退出」才真正退出。
     if (SMOKE || HARNESS_SMOKE || quitRequested || sessionEnding || !tray) return
@@ -963,9 +1115,15 @@ function createSkeletonWindow(): void {
   createWindow(RENDERER_URL)
   // harness iframe 导航完成时推送状态（iframe load 事件对长连接页面不可靠）
   mainWindow?.webContents.on('did-frame-navigate', (_e, frameURL, _code, _status, isMainFrame) => {
-    if (!isMainFrame && harness && frameURL.startsWith(harness.url)) {
+    const activeHarness = harness
+    if (
+      !isMainFrame
+      && activeHarness
+      && frameURL !== RENDERER_URL
+      && isAllowedNavigation(frameURL, RENDERER_URL, activeHarness.url)
+    ) {
       mainWindow?.webContents.send(IPC.harnessFrameLoaded, frameURL)
-      sendHarnessStatus({ state: 'ready', url: harness.url })
+      sendHarnessStatus({ state: 'ready', url: activeHarness.url })
     }
   })
 }
@@ -976,6 +1134,7 @@ function watchHarness(proc: HarnessHandle['proc']): void {
     // quitting：will-quit 清理期间不再触发自动重启（防关闭竞态 respawn 出孤儿）
     if (restarting || stoppingHarness || autoRestartTimer || quitting) return
     log(`harness: 意外退出（code=${code}, signal=${signal ?? ''}），自动重启`)
+
     harness = null
     if (!canAutoRestart()) {
       sendHarnessStatus({ state: 'exited', code, signal, error: 'Harness 反复异常退出，已停止自动重启；请点击重启按钮' })
@@ -1000,9 +1159,11 @@ function sendHarnessStatus(status: HarnessStatus): void {
 /** 同步启动 harness 并等待就绪（冒烟模式 / 手动重启共用；失败抛错且不改窗口状态） */
 async function startHarnessAndWatch(): Promise<void> {
   const generation = ++harnessStartGeneration
+  let spawnedProc: ChildProcess | null = null
   sendHarnessStatus({ state: 'starting' })
   const startedAt = Date.now()
   try {
+    const desktopHubPatch = await ensureDesktopHubPlugin()
     const exec = resolveDshExec()
     if (!exec) {
       log('harness: resolveDshExec 返回 null —— 捆绑运行时缺失且系统无 dsh')
@@ -1011,6 +1172,7 @@ async function startHarnessAndWatch(): Promise<void> {
     log(`harness: 使用${exec.node ? '捆绑' : 'PATH 回退'}运行时（node=${exec.node ?? 'PATH'}，dsh=${exec.exec}）`)
     const next = await startHarness({
       profile: ACTIVE_PROFILE,
+      patchFiles: [desktopHubPatch],
       readyTimeoutMs: 180_000,
       onLog: (line) => {
         log(`dsh: ${line}`)
@@ -1018,8 +1180,15 @@ async function startHarnessAndWatch(): Promise<void> {
         if (recentDshLog.length > 10) recentDshLog.shift()
       },
       onSpawn: (proc) => {
+        spawnedProc = proc
         if (generation !== harnessStartGeneration) {
-          void stopTree(proc)
+          harnessCleanupRetries.add(proc)
+          void stopTree(proc).then(
+            () => harnessCleanupRetries.delete(proc),
+            (err: unknown) => {
+              log(`harness: 清理已失效启动进程失败 —— ${err instanceof Error ? err.message : String(err)}`)
+            },
+          )
           return
         }
         startingProc = proc
@@ -1028,11 +1197,18 @@ async function startHarnessAndWatch(): Promise<void> {
     })
     // stopHarness() 可能在 startHarness() 等待期间取消了这一代；不能让已停止的进程重新成为当前 harness。
     if (generation !== harnessStartGeneration || stoppingHarness || quitting) {
-      await next.stop()
+      try {
+        await next.stop()
+      } catch (error) {
+        harnessCleanupRetries.add(next.proc)
+        log(`harness: 清理已失效就绪进程失败 —— ${error instanceof Error ? error.message : String(error)}`)
+      }
       return
     }
+
     harness = next
-    startingProc = null
+    if (startingProc === next.proc) startingProc = null
+    harnessCleanupRetries.delete(next.proc)
     watchHarness(next.proc)
     lastHarnessStartupMs = Date.now() - startedAt
     log(`harness: 就绪 ${next.url}（启动耗时 ${(lastHarnessStartupMs / 1000).toFixed(1)}s）`)
@@ -1042,9 +1218,12 @@ async function startHarnessAndWatch(): Promise<void> {
     }
     sendHarnessStatus({ state: 'ready', url: next.url })
   } catch (err) {
+    // startHarness 仅在原始启动错误之后的 stopTree 也失败时抛 AggregateError。
+    // 将这一代的确切句柄转入 retry set，后续世代覆盖 startingProc 也不会丢失它。
+    if (err instanceof AggregateError && spawnedProc) harnessCleanupRetries.add(spawnedProc)
+    if (startingProc === spawnedProc) startingProc = null
     // 被主动停止/新一代启动取消的 Promise 不算启动失败，也不能触发自动重试。
     if (generation !== harnessStartGeneration || stoppingHarness || quitting) return
-    startingProc = null
     const msg = err instanceof Error ? err.message : String(err)
     // 附上 dsh 最近输出（截断），让 UI 直接显示真实失败原因而不是干等 180s 或笼统报错
     const tail = recentDshLog.slice(-10).join('\n').slice(0, 800)
@@ -1080,20 +1259,40 @@ function scheduleAutoRestart(reason: string): void {
 /** 主动停止（手动重启 / 退出用）：抑制 watchHarness 的自动重启 */
 async function stopHarness(): Promise<void> {
   stoppingHarness = true
+
   // 先使所有在途启动失效，再等待其子进程退出，避免旧 Promise 重新写回 harness。
   harnessStartGeneration += 1
+  const errors: unknown[] = []
   try {
-    if (startingProc) {
+    const activeHarness = harness
+    const startingProcesses = new Set(harnessCleanupRetries)
+    if (startingProc) startingProcesses.add(startingProc)
+    if (activeHarness) startingProcesses.delete(activeHarness.proc)
+    for (const proc of startingProcesses) {
       try {
-        await stopTree(startingProc)
-      } catch {
-        /* 已退出 */
+        await stopTree(proc)
+        harnessCleanupRetries.delete(proc)
+        if (startingProc === proc) startingProc = null
+      } catch (error) {
+        harnessCleanupRetries.add(proc)
+        const detail = error instanceof Error ? error.message : String(error)
+        errors.push(new Error(`Harness 启动进程树停止失败（pid=${proc.pid ?? 'unknown'}）：${detail}`, { cause: error }))
       }
-      startingProc = null
     }
-    if (harness) await harness.stop()
+    if (activeHarness) {
+      try {
+        await activeHarness.stop()
+        if (harness === activeHarness) harness = null
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        errors.push(new Error(`Harness 运行进程树停止失败（pid=${activeHarness.proc.pid ?? 'unknown'}）：${detail}`, { cause: error }))
+      }
+    }
+    if (errors.length > 0) {
+      const detail = errors.map((error) => error instanceof Error ? error.message : String(error)).join('；')
+      throw new AggregateError(errors, `Harness 后台进程清理失败：${detail}`)
+    }
   } finally {
-    harness = null
     stoppingHarness = false
   }
 }
@@ -1150,24 +1349,29 @@ app.on('second-instance', () => {
   showMainWindow()
 })
 
-app.whenReady().then(async () => {
+function handleStartupFatal(error: unknown): void {
+  const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+  log(`startup: fatal —— ${detail}`)
+  console.error(`STARTUP FATAL: ${detail}`)
+  process.exitCode = 1
+  // 统一走正常退出事件，让 will-quit 有机会停止已启动或仍在途的 Harness。
+  app.quit()
+}
+
+void app.whenReady().then(async () => {
+  rendererServer = await startLocalRendererServer(RENDERER_ROOT)
+  RENDERER_URL = rendererServer.url
   registerIpc()
   updater.setup((status) => sendPluginEvent(IPC.updatesStatus, status))
   if (SMOKE) {
     createSkeletonWindow()
-    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: false })
+    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: false, managerUrl: embeddedManagerUrl(RENDERER_URL) })
     return
   }
   if (HARNESS_SMOKE) {
-    try {
-      await startHarnessAndWatch()
-    } catch (err) {
-      log(`harness-smoke: 启动失败 — ${String(err)}`)
-      app.exit(1)
-      return
-    }
+    await startHarnessAndWatch()
     createSkeletonWindow()
-    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: true })
+    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: true, managerUrl: embeddedManagerUrl(RENDERER_URL) })
     return
   }
   // 默认产品行为：窗口先行（立即出现，状态「连接中」，绝不因 harness 慢而空白/退出），
@@ -1180,7 +1384,7 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     showMainWindow()
   })
-})
+}).catch(handleStartupFatal)
 
 function releaseExitResources(): void {
   clearTimeout(autoRestartTimer ?? undefined)
@@ -1195,17 +1399,69 @@ function releaseExitResources(): void {
   }
 }
 
-/** 停止退出时仍在途的 dsh 进程；Windows session-end 也复用同一条清理路径。 */
+/** 停止退出时仍在途的 Harness；由统一后台清理链在 mutation drain 后调用。 */
 async function stopHarnessForExit(): Promise<void> {
-  if (startingProc) {
+  await stopHarness()
+}
+
+let backgroundStopPromise: Promise<void> | null = null
+
+function hasBackgroundWorkForExit(): boolean {
+  return pluginOps.hasActiveOperations()
+    || pendingMutations > 0
+    || skillImportTasks.pendingCount() > 0
+    || harnessCleanupRetries.size > 0
+    || Boolean(harness || startingProc)
+}
+
+const MUTATION_EXIT_TIMEOUT_MS = 2_000
+const SKILL_IMPORT_EXIT_TIMEOUT_MS = 2_000
+const HARNESS_EXIT_TIMEOUT_MS = 5_000
+
+function waitForExitStage<T>(label: string, task: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}在 ${timeoutMs}ms 内未完成`)), timeoutMs)
+  })
+  return Promise.race([task, timeout]).finally(() => clearTimeout(timer))
+}
+
+/**
+ * 退出顺序必须固定：先禁止/取消插件操作，再 drain profile 写队列，最后停止 Harness。
+ * shutdown 会先 cancel 当前插件进程，因此等待 mutationChain 不会和插件 execute 相互死锁。
+ */
+function stopBackgroundWorkForExit(): Promise<void> {
+  if (backgroundStopPromise) return backgroundStopPromise
+  mutationsShuttingDown = true
+  skillImportTasks.beginShutdown()
+  backgroundStopPromise = (async () => {
+    const errors: unknown[] = []
     try {
-      await stopTree(startingProc)
-    } catch {
-      /* 已退出 */
+      await pluginOps.shutdown()
+    } catch (error) {
+      errors.push(error)
     }
-    startingProc = null
-  }
-  if (harness) await stopHarness()
+    try {
+      await waitForExitStage('profile 写队列收口', mutationChain, MUTATION_EXIT_TIMEOUT_MS)
+    } catch (error) {
+      errors.push(error)
+    }
+    try {
+      await waitForExitStage('Skill 导入收口', skillImportTasks.drain(), SKILL_IMPORT_EXIT_TIMEOUT_MS)
+    } catch (error) {
+      errors.push(error)
+    }
+    try {
+      await waitForExitStage('Harness 清理', stopHarnessForExit(), HARNESS_EXIT_TIMEOUT_MS)
+    } catch (error) {
+      errors.push(error)
+    }
+    if (errors.length > 0) {
+      const detail = errors.map((error) => error instanceof Error ? error.message : String(error)).join('；')
+      throw new AggregateError(errors, `后台任务退出清理失败：${detail}`)
+    }
+  })()
+  return backgroundStopPromise
 }
 
 function currentExitCode(): number {
@@ -1221,11 +1477,11 @@ function markWindowsSessionEnding(): void {
 function handleWindowsQuerySessionEnd(event: { preventDefault: () => void }): void {
   markWindowsSessionEnding()
   // query-session-end 是唯一可以在 Windows 关机/重启/注销前争取清理时间的事件。
-  if (!(harness || startingProc) || quitting) return
+  if (!hasBackgroundWorkForExit() || quitting) return
   quitting = true
   event.preventDefault()
-  void stopHarnessForExit()
-    .catch((err) => log(`session-end: Harness 清理失败 —— ${err instanceof Error ? err.message : String(err)}`))
+  void stopBackgroundWorkForExit()
+    .catch((err) => log(`session-end: 后台任务清理失败 —— ${err instanceof Error ? err.message : String(err)}`))
     .finally(() => app.exit(currentExitCode()))
 }
 
@@ -1247,16 +1503,21 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', (e) => {
   releaseExitResources()
+  if (rendererServer) {
+    const server = rendererServer
+    rendererServer = null
+    void server.close().catch((error) => log(`renderer: 本机静态服务关闭失败 —— ${error instanceof Error ? error.message : String(error)}`))
+  }
   clearTimeout(updateInitialTimer ?? undefined)
   updateInitialTimer = null
   clearInterval(updateInterval ?? undefined)
   updateInterval = null
-  // 启动在途的子进程也要清理（detached 的 dsh web 无主存活会占用 profile 与 watcher）
-  if ((harness || startingProc) && !quitting) {
+  // detached 的 Harness / plugin 子进程与已确认的 profile 写操作都必须在退出前收口。
+  if (hasBackgroundWorkForExit() && !quitting) {
     quitting = true
     e.preventDefault()
-    void stopHarnessForExit()
-      .catch((err) => log(`will-quit: Harness 清理失败 —— ${err instanceof Error ? err.message : String(err)}`))
+    void stopBackgroundWorkForExit()
+      .catch((err) => log(`will-quit: 后台任务清理失败 —— ${err instanceof Error ? err.message : String(err)}`))
       .finally(() => {
         // app.quit() does not guarantee propagation of Node's process.exitCode
         // through Electron's native quit path. Cleanup is complete now, so use

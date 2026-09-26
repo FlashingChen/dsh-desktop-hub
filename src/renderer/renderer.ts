@@ -1,7 +1,7 @@
 // 渲染进程：Tab 切换 + Plugin 面板（M2）
 // 注意：本文件不得包含 import/export（浏览器普通脚本，CSP 禁止模块加载）
 // 安全约定：任何来自主进程/磁盘的数据（skill 名/描述/路径、插件名、输出文本）
-// 一律用 textContent / DOM API 渲染，绝不拼进 innerHTML（防注入，见 AUDIT P1-2）。
+// 一律用 textContent / DOM API 渲染，绝不拼接 HTML 字符串（防注入，见 AUDIT P1-2）。
 
 type ActivationSource = 'bundle' | 'patch' | 'none'
 
@@ -137,6 +137,9 @@ interface FeedbackSubmitResult {
 }
 
 interface DesktopApi {
+  runtime: {
+    info: () => Promise<{ appVersion: string; dshVersion: string | null }>
+  }
   harness: {
     url: () => Promise<string | null>
     restart: () => Promise<{ ok: boolean; url?: string; error?: string }>
@@ -171,7 +174,7 @@ interface DesktopApi {
   skills: {
     list: () => Promise<SkillsListResult>
     create: (input: { name: string; description: string; body: string; overwrite?: boolean }) => Promise<{ ok: boolean; path?: string; error?: string }>
-    toggle: (input: { id: string; source: string; kind: 'model' | 'user'; value: boolean }) => Promise<{ ok: boolean; error?: string }>
+    toggle: (input: { id: string; source: string; skillKind: 'bundle' | 'flat'; kind: 'model' | 'user'; value: boolean }) => Promise<{ ok: boolean; error?: string }>
     importFile: (buffer: ArrayBuffer, overwrite: boolean) => Promise<SkillsImportResult>
     importUrl: (url: string, overwrite: boolean) => Promise<SkillsImportResult>
     importClawHub: (input: { owner: string; slug: string; version?: string }, overwrite: boolean) => Promise<SkillsImportResult>
@@ -196,11 +199,6 @@ interface DesktopApi {
     issueDetail: (issueNumber: number) => Promise<{ ok: boolean; issue?: { number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[]; body_preview?: string }; code?: string; message?: string }>
     openIssue: (issueNumber: number) => Promise<{ ok: boolean; error?: string }>
   }
-  credentials: {
-    status: () => Promise<{ format: string; path: string; text?: string; error?: string }>
-    migrate: () => Promise<{ ok: boolean; backupPath?: string; error?: string }>
-    openBackup: (backupPath: string) => Promise<{ ok: boolean; error?: string }>
-  }
 }
 
 interface SkillsImportResult {
@@ -210,11 +208,13 @@ interface SkillsImportResult {
 }
 
 interface SkillsSummary {
+  id: string
   name: string
   description: string
   source: string
-  path: string
+  kind: 'bundle' | 'flat'
   shadowed: boolean
+  canToggle: boolean
   modelInvocable: boolean
   userInvocable: boolean
 }
@@ -222,6 +222,7 @@ interface SkillsSummary {
 interface SkillsListResult {
   ok: boolean
   skills?: SkillsSummary[]
+  warnings?: string[]
   error?: string
 }
 
@@ -253,9 +254,66 @@ interface McpApplyResult {
 }
 
 type DesktopWindow = Window & { dshDesktop?: DesktopApi }
-const api = (window as DesktopWindow).dshDesktop
+const EMBEDDED_MANAGER = document.body.classList.contains('manager-embedded')
+const api = (window.top as DesktopWindow).dshDesktop ?? (window as DesktopWindow).dshDesktop
 
-const TABS = ['harness', 'plugin', 'mcp', 'skills', 'feedback'] as const
+// The manager runs in an iframe, so inherit the active Harness palette explicitly.
+if (EMBEDDED_MANAGER) {
+  window.addEventListener('message', (event: MessageEvent<unknown>) => {
+    if (event.source !== window.parent || window.parent === window) return
+    try {
+      const origin = new URL(event.origin)
+      if (origin.protocol !== 'http:' || origin.hostname !== '127.0.0.1') return
+    } catch { return }
+    if (!event.data || typeof event.data !== 'object') return
+    const data = event.data as { type?: string; theme?: Record<string, unknown>; colorScheme?: string }
+    if (data.type !== 'dsh-desktop-hub/theme' || !data.theme || typeof data.theme !== 'object') return
+    for (const key of ['--surface', '--canvas', '--surface-subtle', '--ink', '--ink-soft', '--ink-faint', '--line', '--line-strong', '--brand', '--brand-dark']) {
+      const value = data.theme[key]
+      if (typeof value === 'string' && CSS.supports('color', value)) document.body.style.setProperty(key, value)
+    }
+    if (data.colorScheme === 'light' || data.colorScheme === 'dark') document.body.style.colorScheme = data.colorScheme
+  })
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function reportDetachedFailure(label: string, error: unknown, reporter?: (message: string) => void): void {
+  const message = `${label}失败：${errorText(error)}`
+  try {
+    console.error(`[renderer] ${message}`, error)
+  } catch {
+    /* DevTools may already be torn down. */
+  }
+  if (!reporter) return
+  try {
+    reporter(message)
+  } catch (reporterError) {
+    try {
+      console.error(`[renderer] ${label}失败，且错误状态无法显示`, reporterError)
+    } catch {
+      /* Renderer teardown must not create another escaping error. */
+    }
+  }
+}
+
+/** Event/timer/startup 中不被 await 的 Promise 必须统一从这里离开。 */
+function fireAndForget(
+  label: string,
+  task: () => Promise<unknown>,
+  reporter?: (message: string) => void,
+): void {
+  const reject = (error: unknown): void => reportDetachedFailure(label, error, reporter)
+  try {
+    void task().catch(reject)
+  } catch (error) {
+    reject(error)
+  }
+}
+
+const TABS = ['harness', 'plugin', 'mcp', 'skills', 'updates', 'feedback'] as const
 type TabId = (typeof TABS)[number]
 
 const harnessFullscreenButton = document.getElementById('harness-fullscreen')
@@ -278,8 +336,15 @@ function switchTab(id: TabId): void {
     panel?.classList.toggle('active', active)
     panel?.setAttribute('aria-hidden', String(!active))
   }
-  if (id === 'feedback') { void refreshFeedbackDiagnostics(); void refreshMyFeedback(); void refreshCommunityIssues() }
-  if (id === 'harness') void checkCredentialsMigration()
+  if (id === 'feedback') {
+    fireAndForget('刷新反馈诊断', () => refreshFeedbackDiagnostics(), (message) => setFeedbackStatus(message, 'error'))
+  }
+  for (const tabId of ['plugin', 'mcp', 'skills', 'updates', 'feedback'] as const) {
+    const managerTab = document.querySelector(`[data-manager-tab="${tabId}"]`)
+    const active = id === tabId
+    managerTab?.classList.toggle('active', active)
+    managerTab?.setAttribute('aria-selected', String(active))
+  }
 }
 
 harnessFullscreenButton?.addEventListener('click', () => {
@@ -312,6 +377,10 @@ for (const t of TABS) {
     document.querySelector<HTMLElement>(`[data-tab="${next}"]`)?.focus()
     switchTab(next)
   })
+}
+
+for (const id of ['plugin', 'mcp', 'skills', 'updates', 'feedback'] as const) {
+  document.querySelector(`[data-manager-tab="${id}"]`)?.addEventListener('click', () => switchTab(id))
 }
 
 function setStatus(text: string, kind: 'error' | 'ok' = 'ok'): void {
@@ -350,9 +419,9 @@ function appendOpOutput(text: string): void {
   opResultText = (opResultText + text).slice(-2000)
 }
 
-async function refreshPlugins(): Promise<void> {
+async function refreshPlugins(): Promise<boolean> {
   const el = document.getElementById('plugin-rows')
-  if (!el || !api) return
+  if (!el || !api) return false
   el.replaceChildren()
   const loading = document.createElement('tr')
   const td = document.createElement('td')
@@ -366,13 +435,19 @@ async function refreshPlugins(): Promise<void> {
     installedPluginEntries = []
     setStatus(`加载失败: ${res.error ?? '未知错误'}`, 'error')
     renderMarket('plugin')
-    return
+    return false
   }
   installedPluginEntries = res.entries
   for (const p of res.entries) {
     const tr = document.createElement('tr')
     const tdName = document.createElement('td')
     tdName.textContent = p.name
+    const catalogItem = marketItems.plugin.find((item) => item.kind === 'plugin'
+      && (item.packageName === p.name || pluginSpecIdentity(item.spec) === pluginSpecIdentity(p.spec)))
+    const repository = githubRepositoryUrl(p.spec) ?? (catalogItem ? marketGithubUrl(catalogItem) : undefined)
+    const repositoryLink = document.createElement('div')
+    appendGithubLink(repositoryLink, p.name, repository)
+    tdName.appendChild(repositoryLink)
     const tdSource = document.createElement('td')
     tdSource.textContent = SOURCE_LABEL[p.source]
     const tdSpec = document.createElement('td')
@@ -398,18 +473,24 @@ async function refreshPlugins(): Promise<void> {
         const deactivate = document.createElement('button')
         deactivate.className = 'quiet'
         deactivate.textContent = '停用'
-        deactivate.addEventListener('click', () => void deactivatePlugin(p.name))
+        deactivate.addEventListener('click', () => {
+          fireAndForget(`停用插件「${p.name}」`, () => deactivatePlugin(p.name), (message) => setStatus(message, 'error'))
+        })
         tdOps.appendChild(deactivate)
       } else {
         const activate = document.createElement('button')
         activate.textContent = '激活'
-        activate.addEventListener('click', () => void activatePlugin(p.name))
+        activate.addEventListener('click', () => {
+          fireAndForget(`激活插件「${p.name}」`, () => activatePlugin(p.name), (message) => setStatus(message, 'error'))
+        })
         tdOps.appendChild(activate)
       }
       const remove = document.createElement('button')
       remove.className = 'quiet'
       remove.textContent = '移除'
-      remove.addEventListener('click', () => void removePlugin(p.name))
+      remove.addEventListener('click', () => {
+        fireAndForget(`移除插件「${p.name}」`, () => removePlugin(p.name), (message) => setStatus(message, 'error'))
+      })
       tdOps.appendChild(remove)
     }
     tr.append(tdName, tdSource, tdSpec, tdOps)
@@ -417,6 +498,7 @@ async function refreshPlugins(): Promise<void> {
   }
   setStatus(`profile「${res.profile}」共 ${res.entries.length} 个包`)
   renderMarket('plugin')
+  return true
 }
 
 async function activatePlugin(name: string): Promise<void> {
@@ -447,7 +529,7 @@ function scheduleOpRecovery(token: string): void {
   clearOpRecoveryTimer()
   opRecoveryTimer = window.setTimeout(() => {
     opRecoveryTimer = null
-    void recoverPluginOp(token)
+    fireAndForget('恢复插件操作状态', () => recoverPluginOp(token), (message) => setStatus(message, 'error'))
   }, OP_RECOVERY_DELAY_MS)
 }
 
@@ -495,12 +577,13 @@ async function runPluginOpUi(
       setStatus(`启动失败: ${started.error ?? ''}`, 'error')
       return
     }
-    activeOpToken = started.token
+    const token = started.token
+    activeOpToken = token
     opResultText = ''
     setOpControls(true)
     setStatus(`${label}中…（输出如下，可取消）`, 'ok')
     // done push 可能早于 invoke 响应；立即查询一次权威终态，避免等到 watchdog。
-    void recoverPluginOp(started.token, false)
+    fireAndForget('确认插件操作状态', () => recoverPluginOp(token, false), (message) => setStatus(message, 'error'))
   } catch (error) {
     activeOpAfterDone = null
     setStatus(`启动失败: ${error instanceof Error ? error.message : String(error)}`, 'error')
@@ -526,7 +609,6 @@ async function installPlugin(): Promise<void> {
   const display = raw === spec ? spec : `${raw}\n归一化为：${spec}`
   if (!confirm(`确认安装插件「${display}」到 profile「web」？\n安装完成后会自动重启 Harness，使插件生效。\n插件代码将在本机执行（沙箱之外）。\n若 pnpm 拒绝构建脚本，会列出明确报告的包并逐包再次确认；允许后才写入 allowBuilds 并重试。`)) return
   await runPluginOpUi('add', [spec], '安装', async () => {
-    await refreshPlugins()
     await restartHarnessForPluginChange(`插件「${spec}」安装`)
   })
 }
@@ -543,7 +625,6 @@ async function updateAllPlugins(): Promise<void> {
   if (!api) return
   if (!confirm('确认更新 profile「web」的全部插件？\n将执行 dsh plugin update，完成后会自动重启 Harness。\n更新可能执行第三方 pnpm 构建脚本；如需授权会逐包再次确认。')) return
   await runPluginOpUi('update', [], '更新', async () => {
-    await refreshPlugins()
     await restartHarnessForPluginChange('插件更新')
   })
 }
@@ -560,6 +641,27 @@ async function cancelPluginOp(): Promise<void> {
   setStatus('已发送取消请求（SIGTERM）', 'ok')
 }
 
+async function finalizePluginOp(
+  done: PluginOpDone,
+  afterDone: ((done: PluginOpDone) => void | Promise<void>) | null,
+  operationStatus: string,
+  operationKind: 'error' | 'ok',
+): Promise<void> {
+  try {
+    const refreshed = await refreshPlugins()
+    if (!refreshed) throw new Error('插件列表刷新失败')
+    if (done.exitCode === 0 && afterDone) {
+      await afterDone(done)
+      return
+    }
+    // refreshPlugins 会写入列表摘要；没有成功后续动作时恢复插件操作本身的权威终态。
+    setStatus(operationStatus, operationKind)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    setStatus(`${operationStatus}\n操作已完成但刷新/后续处理失败：${detail}`, 'error')
+  }
+}
+
 function handlePluginOpDone(done: PluginOpDone): void {
   if (done.token !== activeOpToken) return
   const afterDone = activeOpAfterDone
@@ -569,11 +671,14 @@ function handlePluginOpDone(done: PluginOpDone): void {
   setOpControls(false)
   appendOpOutput(done.output)
   const head = done.exitCode === 0 ? '操作成功' : `操作失败（exit=${done.exitCode ?? 'signal ' + (done.signal ?? '?')}）`
-  setStatus(`${head}\n${opResultText.slice(-2000)}`, done.exitCode === 0 ? 'ok' : 'error')
-  void (async () => {
-    await refreshPlugins()
-    if (done.exitCode === 0 && afterDone) await afterDone(done)
-  })()
+  const operationStatus = `${head}\n${opResultText.slice(-2000)}`
+  const operationKind = done.exitCode === 0 ? 'ok' : 'error'
+  setStatus(operationStatus, operationKind)
+  fireAndForget(
+    '收敛插件操作终态',
+    () => finalizePluginOp(done, afterDone, operationStatus, operationKind),
+    (message) => setStatus(message, 'error'),
+  )
 }
 
 api?.plugins.onOpChunk((token, text) => {
@@ -584,10 +689,18 @@ api?.plugins.onOpChunk((token, text) => {
 
 api?.plugins.onOpDone(handlePluginOpDone)
 
-document.getElementById('plugin-install')?.addEventListener('click', () => void installPlugin())
-document.getElementById('plugin-refresh')?.addEventListener('click', () => void refreshPlugins())
-document.getElementById('plugin-update-all')?.addEventListener('click', () => void updateAllPlugins())
-document.getElementById('plugin-cancel')?.addEventListener('click', () => void cancelPluginOp())
+document.getElementById('plugin-install')?.addEventListener('click', () => {
+  fireAndForget('安装插件', () => installPlugin(), (message) => setStatus(message, 'error'))
+})
+document.getElementById('plugin-refresh')?.addEventListener('click', () => {
+  fireAndForget('刷新插件列表', () => refreshPlugins(), (message) => setStatus(message, 'error'))
+})
+document.getElementById('plugin-update-all')?.addEventListener('click', () => {
+  fireAndForget('更新插件', () => updateAllPlugins(), (message) => setStatus(message, 'error'))
+})
+document.getElementById('plugin-cancel')?.addEventListener('click', () => {
+  fireAndForget('取消插件操作', () => cancelPluginOp(), (message) => setStatus(message, 'error'))
+})
 
 // ---- 扩展市场：三个市场共享目录加载、搜索与卡片交互 ----
 const marketItems: Record<MarketKind, MarketItem[]> = { plugin: [], mcp: [], skill: [] }
@@ -727,15 +840,32 @@ function createMarketLink(url: string | undefined, className: string, text: stri
 }
 
 const marketNumberFormatter = new Intl.NumberFormat('zh-CN')
-const GITHUB_REPOSITORY_URL = /^https:\/\/(?:www\.)?github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/|$)/i
+function githubRepositoryUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  const shorthand = value.match(/^github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:#.*)?$/)
+  try {
+    const url = new URL(shorthand ? `https://github.com/${shorthand[1]}` : value.replace(/^git\+/, ''))
+    if (!['http:', 'https:'].includes(url.protocol) || !['github.com', 'www.github.com'].includes(url.hostname)
+      || url.username || url.password || url.port) return undefined
+    const [, owner, rawRepo] = url.pathname.split('/')
+    const repo = rawRepo?.replace(/\.git$/, '')
+    if (!owner || !repo || !/^[A-Za-z0-9_-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repo)
+      || repo === '.' || repo === '..') return undefined
+    return `https://github.com/${owner}/${repo}`
+  } catch { return undefined }
+}
 
 function marketGithubUrl(item: MarketItem): string | undefined {
-  const url = item.kind === 'plugin'
-    ? item.sourceUrl
-    : item.kind === 'skill' && item.install.type === 'github'
-      ? item.install.url
-      : undefined
-  return url && GITHUB_REPOSITORY_URL.test(url) ? url : undefined
+  return githubRepositoryUrl(item.sourceUrl)
+    ?? (item.kind === 'plugin' ? githubRepositoryUrl(item.spec)
+      : item.kind === 'skill' && item.install.type === 'github' ? githubRepositoryUrl(item.install.url) : undefined)
+}
+
+function appendGithubLink(parent: HTMLElement, name: string, repositoryUrl?: string): void {
+  const url = repositoryUrl ?? `https://github.com/search?type=repositories&q=${encodeURIComponent(name)}`
+  const link = createMarketLink(url, 'market-source-link github-repository-link', repositoryUrl ? 'GitHub ↗' : '在 GitHub 查找 ↗',
+    repositoryUrl ? '打开 GitHub 仓库' : '目录未提供 GitHub 仓库地址，按名称查找')
+  if (link) parent.appendChild(link)
 }
 
 function appendMarketGithubStars(parent: HTMLElement, item: MarketItem): void {
@@ -751,7 +881,23 @@ function createMarketCard(item: MarketItem): HTMLElement {
   card.className = 'market-card'
   const head = document.createElement('div')
   head.className = 'market-card-head'
+  const icon = document.createElement('span')
+  icon.className = 'market-card-icon'
+  icon.setAttribute('aria-hidden', 'true')
+  const paths = {
+    plugin: 'M8 4v4m8-4v4M5 8h14v11H5zM8 12h8m-8 4h5',
+    mcp: 'M9 12a3 3 0 1 0-6 0 3 3 0 0 0 6 0m11-6a3 3 0 1 0-6 0 3 3 0 0 0 6 0m0 12a3 3 0 1 0-6 0 3 3 0 0 0 6 0M9 10l5-3m-5 7 5 3',
+    skill: 'm12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z',
+  }
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 24 24')
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+  path.setAttribute('d', paths[item.kind])
+  svg.appendChild(path)
+  icon.appendChild(svg)
+  head.appendChild(icon)
   const titleWrap = document.createElement('div')
+  titleWrap.className = 'market-card-title-wrap'
   appendMarketText(titleWrap, 'market-card-title', item.name)
   appendMarketText(titleWrap, 'market-card-author', `${item.author} · ${item.version}`)
   head.appendChild(titleWrap)
@@ -769,8 +915,15 @@ function createMarketCard(item: MarketItem): HTMLElement {
   card.appendChild(head)
 
   appendMarketText(card, 'market-card-description', item.description)
-  const sourceLink = createMarketLink(item.sourceUrl, 'market-source-link', '查看来源 ↗')
-  if (sourceLink) card.appendChild(sourceLink)
+  const links = document.createElement('div')
+  links.className = 'market-card-links'
+  const repositoryUrl = marketGithubUrl(item)
+  if (item.kind === 'plugin' || item.kind === 'mcp') appendGithubLink(links, item.name, repositoryUrl)
+  if (!repositoryUrl || item.kind === 'skill') {
+    const sourceLink = createMarketLink(item.sourceUrl, 'market-source-link', '查看来源 ↗')
+    if (sourceLink) links.appendChild(sourceLink)
+  }
+  card.appendChild(links)
   const meta = document.createElement('div')
   meta.className = 'market-card-meta'
   appendMarketText(meta, '', item.category)
@@ -827,14 +980,23 @@ function createMarketCard(item: MarketItem): HTMLElement {
   action.textContent = activePlugin ? '已激活' : needsPluginActivation ? '激活' : item.kind === 'plugin' ? '安装并激活' : '安装'
   action.addEventListener('click', () => {
     if (item.kind === 'plugin') {
-      if (needsPluginActivation && installedPlugin) void activatePlugin(installedPlugin.name)
-      else void installMarketPlugin(item)
+      if (needsPluginActivation && installedPlugin) {
+        fireAndForget(
+          `激活市场插件「${installedPlugin.name}」`,
+          () => activatePlugin(installedPlugin.name),
+          (message) => setStatus(message, 'error'),
+        )
+      } else {
+        fireAndForget(`安装市场插件「${item.name}」`, () => installMarketPlugin(item), (message) => setStatus(message, 'error'))
+      }
     } else if (item.kind === 'mcp') {
       const envValues = Object.fromEntries(
         mcpEnvNames.map((name) => [name, (card.querySelector(`[data-mcp-env="${name}"]`) as HTMLInputElement | null)?.value ?? '']),
       )
-      void installMarketMcp(item, envValues)
-    } else void installMarketSkill(item)
+      fireAndForget(`安装市场 MCP「${item.name}」`, () => installMarketMcp(item, envValues), (message) => setMcpStatus(message, 'error'))
+    } else {
+      fireAndForget(`安装市场 Skill「${item.name}」`, () => installMarketSkill(item), (message) => setImportStatus(message, 'error'))
+    }
   })
   footer.appendChild(action)
   card.appendChild(footer)
@@ -878,6 +1040,14 @@ function setMarketCaption(kind: MarketKind, online: boolean, cached: boolean, er
   caption.title = error ?? ''
 }
 
+function setMarketFailure(kind: MarketKind, message: string): void {
+  const suffix = marketPanelNames[kind]
+  const caption = document.querySelector<HTMLElement>(`#${suffix}-market-view .market-toolbar-caption`)
+  if (!caption) return
+  caption.textContent = message
+  caption.title = message
+}
+
 async function refreshMarket(kind: MarketKind, query = ''): Promise<void> {
   if (!api) return
   const requestId = ++marketRequestSeq[kind]
@@ -890,13 +1060,33 @@ async function refreshMarket(kind: MarketKind, query = ''): Promise<void> {
     return
   }
   marketItems[kind] = res.items
+  // Catalogs and installed lists load independently; upgrade fallback links when metadata arrives.
+  for (const item of res.items) {
+    const repository = marketGithubUrl(item)
+    if (!repository) continue
+    const index = item.kind === 'plugin'
+      ? installedPluginEntries.findIndex((entry) => item.packageName === entry.name || pluginSpecIdentity(item.spec) === pluginSpecIdentity(entry.spec))
+      : item.kind === 'mcp'
+        ? managedMcpRows.findIndex((row) => item.row.id === row.id || (!!mcpTarget(row) && mcpTarget(item.row) === mcpTarget(row)))
+        : -1
+    if (index < 0) continue
+    const tableId = item.kind === 'plugin' ? 'plugin-rows' : 'mcp-server-rows'
+    const link = document.querySelector<HTMLAnchorElement>(`#${tableId} tr:nth-child(${index + 1}) .github-repository-link`)
+    if (link) {
+      link.href = repository
+      link.textContent = 'GitHub ↗'
+      link.title = '打开 GitHub 仓库'
+    }
+  }
   marketVisibleLimits[kind] = 60
   setMarketCaption(kind, res.online === true, res.cached === true, res.error)
   renderMarket(kind)
 }
 
 function refreshAllMarkets(): void {
-  ;(['plugin', 'mcp', 'skill'] as MarketKind[]).forEach((kind) => void refreshMarket(kind))
+  ;(['plugin', 'mcp', 'skill'] as MarketKind[]).forEach((kind) => {
+    fireAndForget(`刷新 ${kind} 市场`, () => refreshMarket(kind), (message) => setMarketFailure(kind, message))
+  })
 }
 
 async function installMarketPlugin(item: PluginMarketItem): Promise<void> {
@@ -919,15 +1109,19 @@ async function installMarketPlugin(item: PluginMarketItem): Promise<void> {
       setStatus(`已安装「${item.name}」，但未在 profile 清单找到 ${packageName}；请在已安装列表手动激活。`, 'error')
       return
     }
+    let activationChanged = false
     if (entry.activationSource === 'none') {
       const activated = await api.plugins.activate(entry.name)
       if (!activated.ok) {
         setStatus(`已安装但激活失败：${activated.error ?? '请在已安装列表手动激活'}`, 'error')
-        await refreshPlugins()
         return
       }
+      activationChanged = true
     }
-    await refreshPlugins()
+    if (activationChanged) {
+      const refreshed = await refreshPlugins()
+      if (!refreshed) throw new Error('激活后插件列表刷新失败')
+    }
     await restartHarnessForPluginChange(`插件「${item.name}」安装并激活`)
   })
 }
@@ -941,7 +1135,7 @@ async function installMarketMcp(item: McpMarketItem, envValues: Record<string, s
     return
   }
   const config = fillMcpEnvValues(item.row.config, envValues) as Record<string, unknown>
-  if (envNames.length > 0) {
+  if (envNames.length > 0 && config.transport === 'stdio') {
     const existingEnv = config.env && typeof config.env === 'object' && !Array.isArray(config.env)
       ? { ...(config.env as Record<string, unknown>) }
       : {}
@@ -1002,11 +1196,21 @@ for (const kind of ['plugin', 'mcp', 'skill'] as MarketKind[]) {
     marketVisibleLimits[kind] = 60
     renderMarket(kind)
     if (marketSearchTimers[kind] !== undefined) window.clearTimeout(marketSearchTimers[kind])
-    marketSearchTimers[kind] = window.setTimeout(() => void refreshMarket(kind, input?.value.trim() ?? ''), 350)
+    marketSearchTimers[kind] = window.setTimeout(() => {
+      fireAndForget(
+        `搜索 ${kind} 市场`,
+        () => refreshMarket(kind, input?.value.trim() ?? ''),
+        (message) => setMarketFailure(kind, message),
+      )
+    }, 350)
   })
   document.getElementById(`${suffix}-market-refresh`)?.addEventListener('click', () => {
     const input = document.getElementById(`${suffix}-market-search`) as HTMLInputElement | null
-    void refreshMarket(kind, input?.value.trim() ?? '')
+    fireAndForget(
+      `刷新 ${kind} 市场`,
+      () => refreshMarket(kind, input?.value.trim() ?? ''),
+      (message) => setMarketFailure(kind, message),
+    )
   })
 }
 
@@ -1020,10 +1224,6 @@ function setMcpStatus(text: string, kind: 'error' | 'ok' = 'ok'): void {
   if (!el) return
   el.textContent = text
   el.className = `status ${kind}`
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 }
 
 function mcpTransport(row: McpRow): string {
@@ -1068,31 +1268,48 @@ function setMcpEditorState(): void {
 function renderMcpRows(rows: McpRow[]): void {
   const el = document.getElementById('mcp-server-rows')
   if (!el) return
+  el.replaceChildren()
   if (rows.length === 0) {
-    el.innerHTML = '<tr><td colspan="4">暂无 MCP 服务器</td></tr>'
+    const tr = document.createElement('tr')
+    const td = document.createElement('td')
+    td.colSpan = 4
+    td.textContent = '暂无 MCP 服务器'
+    tr.append(td)
+    el.append(tr)
     return
   }
-  el.innerHTML = rows
-    .map((row) => {
-      const name = typeof row.config.serverName === 'string' ? row.config.serverName : row.id
-      const target = redactMcpTarget(mcpTarget(row))
-      return `<tr>
-        <td>${escapeHtml(name)}</td>
-        <td>${escapeHtml(mcpTransport(row))}</td>
-        <td title="${escapeHtml(target)}">${escapeHtml(target)}</td>
-        <td>
-          <button data-mcp-edit="${escapeHtml(row.id)}">编辑</button>
-          <button class="quiet" data-mcp-delete="${escapeHtml(row.id)}">删除</button>
-        </td>
-      </tr>`
+  for (const row of rows) {
+    const name = typeof row.config.serverName === 'string' ? row.config.serverName : row.id
+    const target = redactMcpTarget(mcpTarget(row))
+    const tr = document.createElement('tr')
+    const nameCell = document.createElement('td')
+    const transportCell = document.createElement('td')
+    const targetCell = document.createElement('td')
+    const actionsCell = document.createElement('td')
+    const editButton = document.createElement('button')
+    const deleteButton = document.createElement('button')
+
+    nameCell.textContent = name
+    const catalogItem = marketItems.mcp.find((item) => item.kind === 'mcp'
+      && (item.row.id === row.id || (!!mcpTarget(row) && mcpTarget(item.row) === mcpTarget(row))))
+    const repositoryLink = document.createElement('div')
+    appendGithubLink(repositoryLink, name, catalogItem ? marketGithubUrl(catalogItem) : undefined)
+    nameCell.appendChild(repositoryLink)
+    transportCell.textContent = mcpTransport(row)
+    targetCell.textContent = target
+    targetCell.title = target
+    editButton.textContent = '编辑'
+    editButton.addEventListener('click', () => startMcpEdit(row.id))
+    deleteButton.className = 'quiet'
+    deleteButton.textContent = '删除'
+    deleteButton.addEventListener('click', () => {
+      fireAndForget(`删除 MCP「${row.id}」`, () => deleteMcpServer(row.id), (message) => setMcpStatus(message, 'error'))
     })
-    .join('')
-  el.querySelectorAll<HTMLElement>('[data-mcp-edit]').forEach((button) => {
-    button.addEventListener('click', () => startMcpEdit(String(button.dataset.mcpEdit)))
-  })
-  el.querySelectorAll<HTMLElement>('[data-mcp-delete]').forEach((button) => {
-    button.addEventListener('click', () => void deleteMcpServer(String(button.dataset.mcpDelete)))
-  })
+
+    actionsCell.append(editButton, document.createTextNode(' '), deleteButton)
+    tr.append(nameCell, transportCell, targetCell, actionsCell)
+    el.append(tr)
+  }
 }
 
 async function refreshMcpServers(): Promise<void> {
@@ -1123,7 +1340,7 @@ async function refreshMcpServers(): Promise<void> {
   renderMarket('mcp')
 }
 
-/** 深度还原 !!js 哨兵（{ $js: 'process.env.X' } → '${X}'；其他表达式保持字面字符串），
+/** 深度还原 !!js 哨兵（{ $js: 'process.env.X' } → '${X}'）。
  * 供 MCP 编辑表单使用：转换回 renderRowsYaml 时 ${X} 会重新生成 !!js，动态语义闭环。 */
 function restoreJsRefs(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(restoreJsRefs)
@@ -1131,11 +1348,26 @@ function restoreJsRefs(value: unknown): unknown {
     const o = value as Record<string, unknown>
     if (typeof o.$js === 'string') {
       const m = o.$js.match(/^process\.env\.([A-Za-z_][A-Za-z0-9_]*)$/)
-      return m ? `\${${m[1]}}` : o.$js
+      if (!m) throw new Error(`包含暂不支持安全往返的 !!js 表达式「${o.$js.slice(0, 120)}」`)
+      return `\${${m[1]}}`
     }
     return Object.fromEntries(Object.entries(o).map(([k, v]) => [k, restoreJsRefs(v)]))
   }
   return value
+}
+
+function prepareMcpEdit(row: McpRow): { json: string; config: Record<string, unknown> } {
+  const restoredConfig = restoreJsRefs(row.config) as Record<string, unknown>
+  const jsonConfig = { ...restoredConfig }
+  const transport = jsonConfig.transport
+  const serverName = typeof jsonConfig.serverName === 'string' ? jsonConfig.serverName : row.id
+  delete jsonConfig.serverName
+  delete jsonConfig.transport
+  if (transport === 'streamable-http') jsonConfig.type = 'http'
+  return {
+    json: JSON.stringify({ mcpServers: { [serverName]: jsonConfig } }, null, 2),
+    config: restoredConfig,
+  }
 }
 
 function startMcpEdit(id: string): void {
@@ -1143,17 +1375,20 @@ function startMcpEdit(id: string): void {
   const input = document.getElementById('mcp-json') as HTMLTextAreaElement | null
   const preview = document.getElementById('mcp-preview') as HTMLPreElement | null
   if (!row || !input) return
-  const config = { ...row.config }
-  const transport = config.transport
-  const serverName = typeof config.serverName === 'string' ? config.serverName : row.id
-  delete config.serverName
-  delete config.transport
-  if (transport === 'streamable-http') config.type = 'http'
-  input.value = JSON.stringify({ mcpServers: { [serverName]: config } }, null, 2)
+  const serverName = typeof row.config.serverName === 'string' ? row.config.serverName : row.id
+  let prepared: ReturnType<typeof prepareMcpEdit>
+  try {
+    prepared = prepareMcpEdit(row)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    setMcpStatus(`无法在桌面编辑器中编辑 MCP「${serverName}」：${detail}。请手工编辑 cordis.patch.yml；原配置未修改。`, 'error')
+    return
+  }
+  input.value = prepared.json
   if (preview) preview.textContent = ''
   editingMcpId = row.id
   // 哨兵还原后作为编辑草稿：即使不重新转换，保存时 ${VAR} 也能恢复 !!js
-  mcpDraftRows = [{ ...row, config: restoreJsRefs(row.config) as Record<string, unknown> }]
+  mcpDraftRows = [{ ...row, config: prepared.config }]
   setMcpEditorState()
   setMcpStatus(`正在编辑 MCP「${serverName}」；转换后可保存修改`, 'ok')
 }
@@ -1235,10 +1470,16 @@ async function deleteMcpServer(id: string): Promise<void> {
   }
 }
 
-document.getElementById('mcp-convert')?.addEventListener('click', () => void convertPreview())
-document.getElementById('mcp-apply')?.addEventListener('click', () => void applyMcp())
+document.getElementById('mcp-convert')?.addEventListener('click', () => {
+  fireAndForget('转换 MCP 配置', () => convertPreview(), (message) => setMcpStatus(message, 'error'))
+})
+document.getElementById('mcp-apply')?.addEventListener('click', () => {
+  fireAndForget('保存 MCP 配置', () => applyMcp(), (message) => setMcpStatus(message, 'error'))
+})
 document.getElementById('mcp-cancel-edit')?.addEventListener('click', cancelMcpEdit)
-document.getElementById('mcp-list')?.addEventListener('click', () => void refreshMcpServers())
+document.getElementById('mcp-list')?.addEventListener('click', () => {
+  fireAndForget('刷新 MCP 列表', () => refreshMcpServers(), (message) => setMcpStatus(message, 'error'))
+})
 setMcpEditorState()
 
 // ---- Skills 面板 ----
@@ -1279,9 +1520,16 @@ async function refreshSkills(): Promise<void> {
   installedSkillEntries = res.skills
   for (const s of res.skills) {
     const tr = document.createElement('tr')
-    if (s.shadowed) tr.className = 'dim'
+    if (s.shadowed) {
+      tr.className = 'dim'
+      tr.title = '当前被更高优先级 Skill 遮蔽；此处设置会在该项成为生效项后使用'
+    }
     const tdName = document.createElement('td')
     tdName.textContent = s.name
+    const kindTag = document.createElement('span')
+    kindTag.className = 'tag'
+    kindTag.textContent = s.kind === 'bundle' ? '目录包' : '扁平文件'
+    tdName.appendChild(kindTag)
     if (s.shadowed) {
       const tag = document.createElement('span')
       tag.className = 'tag'
@@ -1295,14 +1543,28 @@ async function refreshSkills(): Promise<void> {
     const tdModel = document.createElement('td')
     const tdUser = document.createElement('td')
     // 只有用户级（~/.dsh/skills、~/.agents/skills）允许壳层切换；项目/自定义/随包只读展示
-    if (s.source === 'user-dsh' || s.source === 'user-agents') {
+    if (s.canToggle) {
       const btnModel = document.createElement('button')
       btnModel.textContent = s.modelInvocable ? '开' : '关'
-      btnModel.addEventListener('click', () => void toggleSkill(s.name, s.source, 'model', !s.modelInvocable))
+      if (s.shadowed) btnModel.title = '当前被遮蔽；设置会在该项成为生效项后使用'
+      btnModel.addEventListener('click', () => {
+        fireAndForget(
+          `切换 Skill「${s.name}」模型可见性`,
+          () => toggleSkill(s, 'model', !s.modelInvocable),
+          (message) => setSkillsStatus(message, 'error'),
+        )
+      })
       tdModel.appendChild(btnModel)
       const btnUser = document.createElement('button')
       btnUser.textContent = s.userInvocable ? '开' : '关'
-      btnUser.addEventListener('click', () => void toggleSkill(s.name, s.source, 'user', !s.userInvocable))
+      if (s.shadowed) btnUser.title = '当前被遮蔽；设置会在该项成为生效项后使用'
+      btnUser.addEventListener('click', () => {
+        fireAndForget(
+          `切换 Skill「${s.name}」用户可见性`,
+          () => toggleSkill(s, 'user', !s.userInvocable),
+          (message) => setSkillsStatus(message, 'error'),
+        )
+      })
       tdUser.appendChild(btnUser)
     } else {
       const spanModel = document.createElement('span')
@@ -1319,15 +1581,18 @@ async function refreshSkills(): Promise<void> {
     tr.append(tdName, tdDesc, tdSource, tdModel, tdUser)
     el.appendChild(tr)
   }
-  setSkillsStatus(`共 ${res.skills.length} 个 skill（含被遮蔽项）`)
+  const warningText = res.warnings?.length
+    ? `；扫描警告 ${res.warnings.length} 项：${res.warnings.slice(0, 2).join('；')}`
+    : ''
+  setSkillsStatus(`共 ${res.skills.length} 个 skill（含被遮蔽项）${warningText}`, res.warnings?.length ? 'error' : 'ok')
   renderMarket('skill')
 }
 
-async function toggleSkill(id: string, source: string, kind: 'model' | 'user', value: boolean): Promise<void> {
+async function toggleSkill(skill: SkillsSummary, kind: 'model' | 'user', value: boolean): Promise<void> {
   if (!api) return
   const label = kind === 'model' ? '模型可见' : '用户可见'
-  if (!confirm(`确认将「${id}」的${label}切换为${value ? '开启' : '关闭'}？`)) return
-  const res = await api.skills.toggle({ id, source, kind, value })
+  if (!confirm(`确认将「${skill.name}」（${skill.kind === 'bundle' ? '目录包' : '扁平文件'}）的${label}切换为${value ? '开启' : '关闭'}？`)) return
+  const res = await api.skills.toggle({ id: skill.id, source: skill.source, skillKind: skill.kind, kind, value })
   setSkillsStatus(res.ok ? `${label}已更新，即时生效` : `失败: ${res.error ?? ''}`, res.ok ? 'ok' : 'error')
   await refreshSkills()
 }
@@ -1347,8 +1612,12 @@ async function createSkill(): Promise<void> {
   if (res.ok) await refreshSkills()
 }
 
-document.getElementById('skills-refresh')?.addEventListener('click', () => void refreshSkills())
-document.getElementById('skill-create')?.addEventListener('click', () => void createSkill())
+document.getElementById('skills-refresh')?.addEventListener('click', () => {
+  fireAndForget('刷新 Skills 列表', () => refreshSkills(), (message) => setSkillsStatus(message, 'error'))
+})
+document.getElementById('skill-create')?.addEventListener('click', () => {
+  fireAndForget('创建 Skill', () => createSkill(), (message) => setSkillsStatus(message, 'error'))
+})
 
 // ---- Skills 导入（.skill/.zip/GitHub 链接）----
 function setImportStatus(text: string, kind: 'error' | 'ok' = 'ok'): void {
@@ -1377,17 +1646,46 @@ async function importFromUrl(): Promise<void> {
   if (res.ok) await refreshSkills()
 }
 
+const MAX_SKILL_IMPORT_BYTES = 20 * 1024 * 1024
+
+function skillImportFileSizeError(size: number): string | null {
+  if (!Number.isFinite(size) || size <= 0) return '文件为空，无法导入'
+  if (size > MAX_SKILL_IMPORT_BYTES) return '文件超过 20MB 上限，未读取或导入'
+  return null
+}
+
+async function importSkillFileWithinLimit(
+  file: Pick<File, 'size' | 'arrayBuffer'>,
+  importer: (buffer: ArrayBuffer) => Promise<SkillsImportResult>,
+): Promise<{ ok: true; result: SkillsImportResult } | { ok: false; error: string }> {
+  const error = skillImportFileSizeError(file.size)
+  if (error) return { ok: false, error }
+  const buffer = await file.arrayBuffer()
+  return { ok: true, result: await importer(buffer) }
+}
+
 async function importFromFile(): Promise<void> {
   const input = document.getElementById('skill-file') as HTMLInputElement | null
   if (!input || !api || !input.files?.length) return
   const file = input.files[0]
+  const sizeError = skillImportFileSizeError(file.size)
+  if (sizeError) {
+    setImportStatus(sizeError, 'error')
+    input.value = ''
+    return
+  }
   if (!confirm(`确认导入「${file.name}」到 ~/.dsh/skills？\n（若已存在同名 skill 将覆盖）`)) {
     input.value = ''
     return
   }
   setImportStatus(`导入中: ${file.name}`)
-  const buffer = await file.arrayBuffer()
-  const res = await api.skills.importFile(buffer, true)
+  const attempt = await importSkillFileWithinLimit(file, (buffer) => api.skills.importFile(buffer, true))
+  if (!attempt.ok) {
+    setImportStatus(attempt.error, 'error')
+    input.value = ''
+    return
+  }
+  const res = attempt.result
   setImportStatus(
     res.ok ? `导入成功: ${res.result?.name}（${res.result?.installed.length} 个文件）` : `导入失败: ${res.error ?? ''}`,
     res.ok ? 'ok' : 'error',
@@ -1396,8 +1694,12 @@ async function importFromFile(): Promise<void> {
   if (res.ok) await refreshSkills()
 }
 
-document.getElementById('skill-import-url-btn')?.addEventListener('click', () => void importFromUrl())
-document.getElementById('skill-import-file')?.addEventListener('click', () => void importFromFile())
+document.getElementById('skill-import-url-btn')?.addEventListener('click', () => {
+  fireAndForget('从 URL 导入 Skill', () => importFromUrl(), (message) => setImportStatus(message, 'error'))
+})
+document.getElementById('skill-import-file')?.addEventListener('click', () => {
+  fireAndForget('从文件导入 Skill', () => importFromFile(), (message) => setImportStatus(message, 'error'))
+})
 
 // ---- Feedback 面板：隐私选择 + 诊断复制 + 反馈 API ----
 type FeedbackMode = 'anonymous' | 'signed'
@@ -1551,10 +1853,18 @@ async function submitFeedbackUi(): Promise<void> {
 document.querySelectorAll<HTMLButtonElement>('[data-feedback-mode]').forEach((button) => {
   button.addEventListener('click', () => setFeedbackMode(button.dataset.feedbackMode === 'signed' ? 'signed' : 'anonymous'))
 })
-document.getElementById('feedback-refresh-diagnostics')?.addEventListener('click', () => void refreshFeedbackDiagnostics())
-document.getElementById('feedback-copy-diagnostics')?.addEventListener('click', () => void copyDiagnostics())
-document.getElementById('feedback-copy-full')?.addEventListener('click', () => void copyFullFeedback())
-document.getElementById('feedback-submit')?.addEventListener('click', () => void submitFeedbackUi())
+document.getElementById('feedback-refresh-diagnostics')?.addEventListener('click', () => {
+  fireAndForget('刷新反馈诊断', () => refreshFeedbackDiagnostics(), (message) => setFeedbackStatus(message, 'error'))
+})
+document.getElementById('feedback-copy-diagnostics')?.addEventListener('click', () => {
+  fireAndForget('复制诊断信息', () => copyDiagnostics(), (message) => setFeedbackStatus(message, 'error'))
+})
+document.getElementById('feedback-copy-full')?.addEventListener('click', () => {
+  fireAndForget('复制完整反馈', () => copyFullFeedback(), (message) => setFeedbackStatus(message, 'error'))
+})
+document.getElementById('feedback-submit')?.addEventListener('click', () => {
+  fireAndForget('提交反馈', () => submitFeedbackUi(), (message) => setFeedbackStatus(message, 'error'))
+})
 setFeedbackMode('anonymous')
 
 // ---- Feedback 追踪 + 已读 + 社区镜像 ----
@@ -1619,8 +1929,8 @@ function markAllRead(): void {
     const updated = el.dataset.updatedAt
     if (num && updated) setRead(`issue-${num}`, updated)
   })
-  void refreshMyFeedback()
-  void refreshCommunityIssues()
+  fireAndForget('Refresh feedback', () => refreshMyFeedback())
+  fireAndForget('Refresh feedback', () => refreshCommunityIssues())
   updateFeedbackTabBadge()
 }
 
@@ -1628,7 +1938,7 @@ function updateFeedbackTabBadge(): void {
   const tab = document.getElementById('tab-feedback')
   const receipts = getStoredReceipts()
   // async check unread without blocking
-  void (async () => {
+  fireAndForget('Refresh feedback badge', async () => {
     if (receipts.length === 0) { tab?.removeAttribute('data-unread'); return }
     try {
       if (!api) return
@@ -1644,49 +1954,67 @@ function updateFeedbackTabBadge(): void {
       if (hasUnread) tab?.setAttribute('data-unread','1')
       else tab?.removeAttribute('data-unread')
     } catch {}
-  })()
+  })
+}
+
+function feedbackNode(tag: string, className: string, text = ''): HTMLElement {
+  const node = document.createElement(tag)
+  node.className = className
+  node.textContent = text
+  return node
+}
+
+function feedbackCard(title: string, state: string, number: number | null, unread: boolean, updatedAt: string) {
+  const item = feedbackNode('div', `feedback-item ${unread ? 'unread' : ''}`)
+  item.dataset.issueNumber = number === null ? '' : String(number)
+  item.dataset.updatedAt = updatedAt
+  const head = feedbackNode('div', 'feedback-item-head')
+  head.append(feedbackNode('span', 'feedback-item-title', title))
+  if (unread) head.append(feedbackNode('span', 'feedback-badge unread-dot', '\u672a\u8bfb'))
+  const labels: Record<string, string> = { open: '\u8fdb\u884c\u4e2d', closed: '\u5df2\u5173\u95ed', queued: '\u6392\u961f\u4e2d', created: '\u5df2\u521b\u5efa' }
+  head.append(feedbackNode('span', `feedback-badge ${['open', 'closed', 'queued'].includes(state) ? state : ''}`, labels[state] ?? state))
+  head.append(feedbackNode('span', 'feedback-badge', number ? `#${number}` : '\u2014'))
+  const meta = feedbackNode('div', 'feedback-item-meta')
+  const actions = feedbackNode('div', 'feedback-item-actions')
+  item.append(head, meta, actions)
+  return { item, meta, actions }
+}
+
+function feedbackButton(parent: HTMLElement, label: string, key: string, value: string, quiet = false): void {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.textContent = label
+  button.dataset[key] = value
+  if (quiet) button.className = 'quiet'
+  parent.append(button)
 }
 
 function renderMyFeedback(items: Array<{ receiptId: string; status: string; issueNumber: number | null; createdAt: string; updatedAt: string; github?: { number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[] } | null }>): void {
   const list = document.getElementById('feedback-my-list')
   const badge = document.getElementById('feedback-my-unread')
   if (!list) return
+  list.replaceChildren()
   if (items.length === 0) {
-    list.innerHTML = '<div class="feedback-empty">暂无提交记录，提交后会在这里出现，可追踪处理进度</div>'
+    list.append(feedbackNode('div', 'feedback-empty', '\u6682\u65e0\u63d0\u4ea4\u8bb0\u5f55'))
     if (badge) badge.hidden = true
     return
   }
   let unreadCount = 0
-  list.innerHTML = items.map(it => {
+  for (const it of items) {
     const github = it.github
-    const title = github?.title ?? '(等待创建 Issue...)'
-    const state = github?.state ?? it.status
-    const stateLabel = state === 'open' ? '进行中' : state === 'closed' ? '已关闭' : state === 'queued' ? '排队中' : state === 'created' ? '已创建' : state
-    const badgeClass = state === 'open' ? 'open' : state === 'closed' ? 'closed' : state === 'queued' ? 'queued' : ''
     const updatedAt = github?.updated_at ?? it.updatedAt ?? it.createdAt
     const unread = updatedAt ? isUnread(it.receiptId, updatedAt) : false
     if (unread) unreadCount++
-    const issueNo = it.issueNumber ? `#${it.issueNumber}` : '—'
-    const escTitle = title.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    const escReceipt = it.receiptId.replace(/&/g,'&amp;')
-    return `<div class="feedback-item ${unread ? 'unread' : ''}" data-receipt-id="${escReceipt}" data-issue-number="${it.issueNumber ?? ''}" data-updated-at="${updatedAt ?? ''}">
-      <div class="feedback-item-head">
-        <span class="feedback-item-title">${escTitle}</span>
-        ${unread ? '<span class="feedback-badge unread-dot">未读</span>' : ''}
-        <span class="feedback-badge ${badgeClass}">${stateLabel}</span>
-        <span class="feedback-badge">${issueNo}</span>
-      </div>
-      <div class="feedback-item-meta">
-        <span>收据 ${escReceipt.slice(0,10)}…</span>
-        <span>${github ? `评论 ${github.comments}` : ''}</span>
-        <span>${updatedAt ? new Date(updatedAt).toLocaleString() : ''}</span>
-      </div>
-      <div class="feedback-item-actions">
-        ${it.issueNumber ? `<button data-open-issue="${it.issueNumber}" type="button">查看 Issue</button>` : '<span class="feedback-badge">同步中</span>'}
-        ${unread ? `<button data-mark-read="${escReceipt}" type="button" class="quiet">标为已读</button>` : ''}
-      </div>
-    </div>`
-  }).join('')
+    const { item, meta, actions } = feedbackCard(github?.title ?? '\u7b49\u5f85\u521b\u5efa Issue...', github?.state ?? it.status, it.issueNumber, unread, updatedAt)
+    item.dataset.receiptId = it.receiptId
+    meta.append(feedbackNode('span', '', `\u6536\u636e ${it.receiptId.slice(0,10)}...`))
+    if (github) meta.append(feedbackNode('span', '', `\u8bc4\u8bba ${github.comments}`))
+    meta.append(feedbackNode('span', '', updatedAt ? new Date(updatedAt).toLocaleString() : ''))
+    if (it.issueNumber) feedbackButton(actions, '\u67e5\u770b Issue', 'openIssue', String(it.issueNumber))
+    else actions.append(feedbackNode('span', 'feedback-badge', '\u540c\u6b65\u4e2d'))
+    if (unread) feedbackButton(actions, '\u6807\u4e3a\u5df2\u8bfb', 'markRead', it.receiptId, true)
+    list.append(item)
+  }
   if (badge) badge.hidden = unreadCount === 0
   list.querySelectorAll<HTMLButtonElement>('[data-open-issue]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1695,8 +2023,8 @@ function renderMyFeedback(items: Array<{ receiptId: string; status: string; issu
       const item = items.find(i => i.issueNumber === num)
       if (item) setRead(item.receiptId, item.github?.updated_at ?? item.updatedAt)
       if (num) setRead(`issue-${num}`, items.find(i=>i.issueNumber===num)?.github?.updated_at ?? new Date().toISOString())
-      void api?.feedback.openIssue(num)
-      setTimeout(() => { void refreshMyFeedback(); updateFeedbackTabBadge() }, 300)
+      fireAndForget('Open feedback issue', async () => { await api?.feedback.openIssue(num) })
+      setTimeout(() => { fireAndForget('Refresh feedback', () => refreshMyFeedback()); updateFeedbackTabBadge() }, 300)
     })
   })
   list.querySelectorAll<HTMLButtonElement>('[data-mark-read]').forEach(btn => {
@@ -1705,7 +2033,7 @@ function renderMyFeedback(items: Array<{ receiptId: string; status: string; issu
       const el = btn.closest('.feedback-item') as HTMLElement | null
       const updated = el?.dataset.updatedAt ?? new Date().toISOString()
       if (rid) setRead(rid, updated)
-      void refreshMyFeedback(); updateFeedbackTabBadge()
+      fireAndForget('Refresh feedback', () => refreshMyFeedback()); updateFeedbackTabBadge()
     })
   })
 }
@@ -1749,42 +2077,28 @@ async function refreshMyFeedback(): Promise<void> {
 function renderCommunityIssues(issues: Array<{ number: number; title: string; state: string; html_url: string; updated_at: string; created_at: string; comments: number; labels: string[]; body_preview?: string }>): void {
   const list = document.getElementById('feedback-issues-list')
   if (!list) return
+  list.replaceChildren()
   if (issues.length === 0) {
-    list.innerHTML = '<div class="feedback-empty">暂无公开反馈</div>'
+    list.append(feedbackNode('div', 'feedback-empty', '\u6682\u65e0\u516c\u5f00\u53cd\u9988'))
     return
   }
-  list.innerHTML = issues.map(iss => {
+  for (const iss of issues) {
     const unread = isUnread(`issue-${iss.number}`, iss.updated_at)
-    const badgeClass = iss.state === 'open' ? 'open' : 'closed'
-    const stateLabel = iss.state === 'open' ? '进行中' : '已关闭'
-    const escTitle = iss.title.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    const labels = iss.labels.slice(0,3).map(l => `<span class="feedback-badge">${l.replace(/&/g,'&amp;')}</span>`).join('')
-    return `<div class="feedback-item ${unread ? 'unread' : ''}" data-issue-number="${iss.number}" data-updated-at="${iss.updated_at}">
-      <div class="feedback-item-head">
-        <span class="feedback-item-title">${escTitle}</span>
-        ${unread ? '<span class="feedback-badge unread-dot">未读</span>' : ''}
-        <span class="feedback-badge ${badgeClass}">${stateLabel}</span>
-        <span class="feedback-badge">#${iss.number}</span>
-      </div>
-      <div class="feedback-item-meta">
-        <span>评论 ${iss.comments}</span>
-        <span>${new Date(iss.updated_at).toLocaleString()}</span>
-        ${labels}
-      </div>
-      ${iss.body_preview ? `<div style="font-size:12px;color:var(--ink-soft);line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${iss.body_preview.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>` : ''}
-      <div class="feedback-item-actions">
-        <button data-open-community="${iss.number}" type="button">查看详情</button>
-        ${unread ? `<button data-mark-community="${iss.number}" type="button" class="quiet">标为已读</button>` : ''}
-      </div>
-    </div>`
-  }).join('')
+    const { item, meta, actions } = feedbackCard(iss.title, iss.state, iss.number, unread, iss.updated_at)
+    meta.append(feedbackNode('span', '', `\u8bc4\u8bba ${iss.comments}`), feedbackNode('span', '', new Date(iss.updated_at).toLocaleString()))
+    for (const label of iss.labels.slice(0,3)) meta.append(feedbackNode('span', 'feedback-badge', label))
+    if (iss.body_preview) item.insertBefore(feedbackNode('p', 'surface-caption', iss.body_preview), actions)
+    feedbackButton(actions, '\u67e5\u770b\u8be6\u60c5', 'openCommunity', String(iss.number))
+    if (unread) feedbackButton(actions, '\u6807\u4e3a\u5df2\u8bfb', 'markCommunity', String(iss.number), true)
+    list.append(item)
+  }
   list.querySelectorAll<HTMLButtonElement>('[data-open-community]').forEach(btn => {
     btn.addEventListener('click', () => {
       const num = Number(btn.dataset.openCommunity)
       const iss = issues.find(i => i.number === num)
       if (iss) setRead(`issue-${num}`, iss.updated_at)
-      void api?.feedback.openIssue(num)
-      setTimeout(() => { void refreshCommunityIssues(); updateFeedbackTabBadge() }, 300)
+      fireAndForget('Open feedback issue', async () => { await api?.feedback.openIssue(num) })
+      setTimeout(() => { fireAndForget('Refresh feedback', () => refreshCommunityIssues()); updateFeedbackTabBadge() }, 300)
     })
   })
   list.querySelectorAll<HTMLButtonElement>('[data-mark-community]').forEach(btn => {
@@ -1792,7 +2106,7 @@ function renderCommunityIssues(issues: Array<{ number: number; title: string; st
       const num = Number(btn.dataset.markCommunity)
       const iss = issues.find(i => i.number === num)
       if (iss) setRead(`issue-${num}`, iss.updated_at)
-      void refreshCommunityIssues(); updateFeedbackTabBadge()
+      fireAndForget('Refresh feedback', () => refreshCommunityIssues()); updateFeedbackTabBadge()
     })
   })
 }
@@ -1820,9 +2134,9 @@ async function refreshCommunityIssues(): Promise<void> {
 function scheduleFeedbackPoll(): void {
   if (feedbackPollTimer !== null) window.clearInterval(feedbackPollTimer)
   feedbackPollTimer = window.setInterval(() => {
-    void refreshMyFeedback()
+    fireAndForget('Refresh feedback', () => refreshMyFeedback())
     // community issues refresh less frequently
-    void refreshCommunityIssues()
+    fireAndForget('Refresh feedback', () => refreshCommunityIssues())
   }, 5 * 60 * 1000)
   // also update badge on load
   updateFeedbackTabBadge()
@@ -1849,7 +2163,7 @@ async function submitFeedbackUiWithStore(): Promise<void> {
       setFeedbackStatus(`反馈已收到，处理编号：${result.receiptId ?? '—'}`, 'ok')
       if (result.receiptId) {
         storeReceipt(result.receiptId)
-        void refreshMyFeedback()
+        fireAndForget('Refresh feedback', () => refreshMyFeedback())
       }
     } else {
       setFeedbackStatus(`提交失败：${result.message ?? result.code ?? '未知错误'}\n可以复制完整反馈后发送到 QQ 群。`, result.code === 'unconfigured' ? 'warn' : 'error')
@@ -1863,33 +2177,33 @@ async function submitFeedbackUiWithStore(): Promise<void> {
 }
 // replace handler
 document.getElementById('feedback-submit')?.replaceWith(document.getElementById('feedback-submit')!.cloneNode(true))
-document.getElementById('feedback-submit')?.addEventListener('click', () => void submitFeedbackUiWithStore())
+document.getElementById('feedback-submit')?.addEventListener('click', () => fireAndForget('Submit feedback', () => submitFeedbackUiWithStore()))
 
-document.getElementById('feedback-my-refresh')?.addEventListener('click', () => void refreshMyFeedback())
+document.getElementById('feedback-my-refresh')?.addEventListener('click', () => fireAndForget('Refresh feedback', () => refreshMyFeedback()))
 document.getElementById('feedback-my-mark-all')?.addEventListener('click', () => markAllRead())
-document.getElementById('feedback-issues-refresh')?.addEventListener('click', () => void refreshCommunityIssues())
+document.getElementById('feedback-issues-refresh')?.addEventListener('click', () => fireAndForget('Refresh feedback', () => refreshCommunityIssues()))
 document.querySelectorAll<HTMLButtonElement>('[data-issues-state]').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll<HTMLButtonElement>('[data-issues-state]').forEach(b => b.classList.remove('active'))
     btn.classList.add('active')
     feedbackIssuesState = btn.dataset.issuesState ?? 'open'
     feedbackIssuesPage = 1
-    void refreshCommunityIssues()
+    fireAndForget('Refresh feedback', () => refreshCommunityIssues())
   })
 })
 document.getElementById('feedback-issues-prev')?.addEventListener('click', () => {
-  if (feedbackIssuesPage > 1) { feedbackIssuesPage--; void refreshCommunityIssues() }
+  if (feedbackIssuesPage > 1) { feedbackIssuesPage--; fireAndForget('Refresh feedback', () => refreshCommunityIssues()) }
 })
 document.getElementById('feedback-issues-next')?.addEventListener('click', () => {
-  feedbackIssuesPage++; void refreshCommunityIssues()
+  feedbackIssuesPage++; fireAndForget('Refresh feedback', () => refreshCommunityIssues())
 })
 
 // initial load
-void refreshMyFeedback()
-void refreshCommunityIssues()
+fireAndForget('Refresh feedback', () => refreshMyFeedback())
+fireAndForget('Refresh feedback', () => refreshCommunityIssues())
 scheduleFeedbackPoll()
 if ('Notification' in window && Notification.permission === 'default') {
-  void Notification.requestPermission()
+  fireAndForget('Request notification permission', () => Notification.requestPermission())
 }
 
 // ---- 应用更新：启动自动检查，下载与重启安装由用户确认 ----
@@ -1902,12 +2216,12 @@ const appUpdateInstall = document.getElementById('app-update-install') as HTMLBu
 let appUpdateInstalling = false
 let lastUpdateStatus: UpdateStatus | null = null
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
 function lastKnownVersion(): string {
   return lastUpdateStatus?.currentVersion ?? 'unknown'
+}
+
+function reportUpdateDetachedFailure(message: string): void {
+  setUpdateStatus({ state: 'error', currentVersion: lastKnownVersion(), error: message })
 }
 
 function updateVersionLabel(version: string | undefined): string {
@@ -2040,9 +2354,15 @@ async function installAppUpdate(): Promise<void> {
   }
 }
 
-appUpdateCheck?.addEventListener('click', () => void checkForAppUpdate())
-appUpdateDownload?.addEventListener('click', () => void downloadAppUpdate())
-appUpdateInstall?.addEventListener('click', () => void installAppUpdate())
+appUpdateCheck?.addEventListener('click', () => {
+  fireAndForget('检查应用更新', () => checkForAppUpdate(), reportUpdateDetachedFailure)
+})
+appUpdateDownload?.addEventListener('click', () => {
+  fireAndForget('下载应用更新', () => downloadAppUpdate(), reportUpdateDetachedFailure)
+})
+appUpdateInstall?.addEventListener('click', () => {
+  fireAndForget('安装应用更新', () => installAppUpdate(), reportUpdateDetachedFailure)
+})
 
 // ---- Harness 面板：内嵌官方 Web UI + 折叠式状态徽章（点击展开 已连接/重新连接/重新启动）----
 
@@ -2050,7 +2370,11 @@ const harnessOverlay = document.querySelector<HTMLElement>('.harness-overlay')
 const harnessBadge = document.getElementById('harness-badge')
 const harnessMenu = document.getElementById('harness-menu')
 const harnessLoading = document.getElementById('harness-loading')
+const harnessLoadingTitle = document.getElementById('harness-loading-title')
 const harnessLoadingText = document.getElementById('harness-loading-text')
+const harnessLoadingSpinner = document.querySelector<HTMLElement>('.harness-loading-spinner')
+const harnessLoadingProgress = document.querySelector<HTMLElement>('.harness-loading-progress')
+const harnessLoadingRetry = document.getElementById('harness-loading-retry') as HTMLButtonElement | null
 let harnessUrlCurrent: string | null = null
 let currentHarnessState = 'starting'
 let reconnectTimer: number | null = null
@@ -2067,13 +2391,35 @@ function setHarnessMenuOpen(open: boolean): void {
   harnessBadge.setAttribute('aria-expanded', String(open))
 }
 
-/** WebView 就绪前的加载层：连接中/重启中/重连中显示指示，就绪或故障时隐藏 */
-function setHarnessLoading(state: string): void {
+/** Branded startup/recovery surface keeps the embedded workspace intentional while it boots. */
+function setHarnessLoading(status: { state: string; error?: string }): void {
   if (!harnessLoading) return
+  const state = status.state
   const active = state === 'starting' || state === 'restarting' || state === 'reconnecting'
-  harnessLoading.hidden = !active
-  if (!harnessLoadingText || !active) return
-  harnessLoadingText.textContent = harnessWaitText(state, 0)
+  const failed = state === 'exited'
+  harnessLoading.dataset.state = state
+  harnessLoading.hidden = !active && !failed
+  if (harnessLoadingSpinner) harnessLoadingSpinner.hidden = !active
+  if (harnessLoadingProgress) harnessLoadingProgress.hidden = !active
+  if (harnessLoadingRetry) harnessLoadingRetry.hidden = !failed
+  if (harnessLoadingTitle) {
+    harnessLoadingTitle.textContent = failed
+      ? '工作区暂时没有连接'
+      : state === 'restarting'
+        ? '正在应用更改'
+        : state === 'reconnecting'
+          ? '正在恢复连接'
+          : '正在准备工作区'
+  }
+  if (harnessLoadingText) {
+    harnessLoadingText.textContent = failed
+      ? status.error ?? 'Harness 已停止运行。你可以重新启动后继续使用。'
+      : state === 'starting'
+        ? '正在启动 DeepSeek Harness。首次启动或更新后可能需要 1–2 分钟。'
+        : state === 'restarting'
+          ? '正在重启 Harness，让新的扩展和配置生效。'
+          : '连接中断了，我们正在重新连接到本机工作区。'
+  }
 }
 
 // ---- 启动等待计时（Issue #35）：让慢启动可见为进度而非卡死，超时后给出可操作建议 ----
@@ -2129,7 +2475,7 @@ function setHarnessStatusText(status: { state: string; url?: string; code?: numb
     reconnectTimer = null
   }
   setHarnessStateClass(status.state)
-  setHarnessLoading(status.state)
+  setHarnessLoading(status)
   let menuText = '状态未知'
   let kind: '' | 'ok' | 'error' = ''
   switch (status.state) {
@@ -2167,88 +2513,65 @@ function setHarnessStatusText(status: { state: string; url?: string; code?: numb
   else if (status.state === 'exited') setHarnessMenuOpen(true)
 }
 
-// Browser canonicalizes a loopback origin to a trailing slash, while the Harness
-// process output is slashless. Compare the normalized form to avoid reloading the
-// iframe on every did-frame-navigate/status pair (especially visible in Windows smoke).
-function sameHarnessUrl(left: string, right: string): boolean {
-  return left.replace(/\/+$/, '') === right.replace(/\/+$/, '')
+// DSH consumes its one-use bootstrap token, then navigates to the same origin
+// without the query string. Compare origins so that navigation never reloads the
+// token URL; a new Harness process gets a new port and therefore a new origin.
+function sameHarnessOrigin(left: string, right: string): boolean {
+  try {
+    return new URL(left).origin === new URL(right).origin
+  } catch {
+    return false
+  }
 }
 
-let credentialsMigrating = false
-async function checkCredentialsMigration(): Promise<void> {
-  if (!api?.credentials) return
-  const banner = document.getElementById('credentials-banner') as HTMLElement | null
-  const textEl = document.getElementById('credentials-banner-text') as HTMLElement | null
-  const btn = document.getElementById('credentials-migrate-btn') as HTMLButtonElement | null
-  if (!banner || !textEl) return
+function reportHarnessFailure(label: string, error: unknown): void {
+  const message = `${label}：${errorText(error)}`
+  console.error(message, error)
   try {
-    const res = await api.credentials.status() as { format: string; path: string; text?: string; supportsVersioned?: boolean }
-    if (res.format === 'flat') {
-      // 版本感知：旧版 dsh（0.1.0-rc.6 仅支持 flat）保持可用，不打扰用户；打包版 (>=0.1.1) 才提示迁移
-      if (res.supportsVersioned === false) {
-        banner.hidden = true
-        return
-      }
-      textEl.textContent = `检测到旧版凭据格式 flat（${res.path}），可一键迁移到 versioned（自动备份原文件）`
-      banner.hidden = false
-      if (btn) { btn.disabled = false; btn.textContent = '一键迁移' }
-      return
-    } else if (res.format === 'unknown') {
-      // 可能是 version: 1 数字误写，主进程已可自动修复
-      textEl.textContent = `凭据文件格式异常（unknown），可尝试一键修复（version 数字→字符串）。路径：${res.path}。${res.text ? `内容：${res.text.slice(0,80)}` : '解析失败'}`
-      banner.hidden = false
-      if (btn) { btn.disabled = false; btn.textContent = '尝试修复' }
-    } else {
-      banner.hidden = true
-    }
-  } catch { banner.hidden = true }
+    setHarnessStatusText({ state: 'exited', code: -1, error: message })
+  } catch {
+    // Renderer teardown can make the DOM unavailable; the async task must still settle.
+  }
 }
-async function doMigrateCredentials(): Promise<void> {
-  if (credentialsMigrating || !api?.credentials) return
-  credentialsMigrating = true
-  const btn = document.getElementById('credentials-migrate-btn') as HTMLButtonElement | null
-  const textEl = document.getElementById('credentials-banner-text') as HTMLElement | null
-  if (btn) btn.disabled = true
-  if (textEl) textEl.textContent = '正在备份并迁移…'
-  try {
-    const res = await api.credentials.migrate()
-    if (res.ok) {
-      if (textEl) textEl.textContent = `迁移成功，备份：${res.backupPath ?? '已备份'}。正在重启 Harness…`
-      await api.harness.restart()
-      setTimeout(() => checkCredentialsMigration(), 1500)
-    } else {
-      if (textEl) textEl.textContent = `迁移失败：${res.error ?? '未知错误'}，请手动检查或复制诊断信息反馈。`
-      if (btn) btn.disabled = false
-    }
-  } finally { credentialsMigrating = false }
+
+function reportHarnessDetachedFailure(message: string): void {
+  setHarnessStatusText({ state: 'exited', code: -1, error: message })
 }
 
 async function mountHarness(): Promise<void> {
   const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
   if (!frame || !api) return
-  setHarnessStatusText({ state: 'starting' })
-  const url = await api.harness.url()
-  // 窗口先行时 harness 可能尚未就绪：保持「连接中…」，等待 onStatus 推送，不误显示已退出
-  if (!url) return
-  frame.src = url
-  void checkCredentialsMigration()
+  try {
+    setHarnessStatusText({ state: 'starting' })
+    const url = await api.harness.url()
+    // 窗口先行时 harness 可能尚未就绪：保持「连接中…」，等待 onStatus 推送，不误显示已退出
+    if (!url) return
+    frame.src = url
+  } catch (error) {
+    reportHarnessFailure('读取 Harness 地址失败', error)
+  }
 }
 
 async function restartHarness(): Promise<boolean> {
   if (!api) return false
-  setHarnessStatusText({ state: 'restarting' })
-  const res = await api.harness.restart()
-  if (!res.ok) {
-    setHarnessStatusText({ state: 'exited', code: -1, error: `重启失败: ${res.error ?? ''}` })
+  try {
+    setHarnessStatusText({ state: 'restarting' })
+    const res = await api.harness.restart()
+    if (!res.ok) {
+      setHarnessStatusText({ state: 'exited', code: -1, error: `重启失败: ${res.error ?? ''}` })
+      return false
+    }
+    // 重启后 --port 0 会换新端口：必须把 iframe 重挂到新 URL，否则停留在已死进程的旧端口
+    const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
+    if (frame && res.url) {
+      frame.src = res.url
+      setHarnessStatusText({ state: 'ready', url: res.url })
+    }
+    return true
+  } catch (error) {
+    reportHarnessFailure('重启失败', error)
     return false
   }
-  // 重启后 --port 0 会换新端口：必须把 iframe 重挂到新 URL，否则停留在已死进程的旧端口
-  const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
-  if (frame && res.url) {
-    frame.src = res.url
-    setHarnessStatusText({ state: 'ready', url: res.url })
-  }
-  return true
 }
 
 async function restartHarnessForPluginChange(label: string): Promise<void> {
@@ -2271,7 +2594,7 @@ async function reconnectHarness(): Promise<void> {
   currentHarnessState = 'reconnecting'
   setHarnessStateClass('starting')
   setHarnessMenuOpen(false)
-  setHarnessLoading('reconnecting')
+  setHarnessLoading({ state: 'reconnecting' })
   if (harnessBadge) harnessBadge.title = '正在重新连接…'
   const el = document.getElementById('harness-status')
   if (el) {
@@ -2291,41 +2614,74 @@ async function reconnectHarness(): Promise<void> {
 
 if (api) {
   api.updates.onStatus((status) => setUpdateStatus(status))
-  void refreshUpdateStatus()
-  api.harness.onFrameLoaded((url) => {
-    setHarnessStatusText({ state: 'ready', url })
-    const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
-    if (frame && !sameHarnessUrl(frame.src, url)) frame.src = url
+  fireAndForget('刷新应用更新状态', () => refreshUpdateStatus(), reportUpdateDetachedFailure)
+  fireAndForget('读取运行时版本', async () => {
+    const info = await api.runtime.info()
+    const runtimeVersion = document.getElementById('dsh-runtime-version')
+    if (runtimeVersion) runtimeVersion.textContent = `Harness ${info.dshVersion ?? '版本未知'}`
   })
-  // 窗口先行：收到 ready 时必须把 iframe 挂到新 URL（首次 mount 时 harness 可能未就绪）
-  void checkCredentialsMigration()
-  api.harness.onStatus((status) => {
-    setHarnessStatusText(status)
-    if (status.state === 'ready' && status.url) {
+  if (!EMBEDDED_MANAGER) {
+    api.harness.onFrameLoaded((url) => {
+      setHarnessStatusText({ state: 'ready', url })
       const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
-      if (frame && !sameHarnessUrl(frame.src, status.url)) frame.src = status.url
+      if (frame && !sameHarnessOrigin(frame.src, url)) frame.src = url
+    })
+    // 窗口先行：收到 ready 时必须把 iframe 挂到新 URL（首次 mount 时 harness 可能未就绪）
+    api.harness.onStatus((status) => {
+      setHarnessStatusText(status)
+      if (status.state === 'ready' && status.url) {
+        const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
+        if (frame && !sameHarnessOrigin(frame.src, status.url)) frame.src = status.url
     }
-  })
-  document.getElementById('harness-reconnect')?.addEventListener('click', () => void reconnectHarness())
-  document.getElementById('harness-restart')?.addEventListener('click', () => void restartHarness())
-  document.getElementById('credentials-migrate-btn')?.addEventListener('click', () => void doMigrateCredentials())
-  document.getElementById('credentials-dismiss-btn')?.addEventListener('click', () => { const b=document.getElementById('credentials-banner'); if(b) b.hidden=true })
-  harnessBadge?.addEventListener('click', () => {
-    setHarnessMenuOpen(harnessMenu ? harnessMenu.hidden : false)
-  })
-  // 点击弹层外空白处收起（自身按钮点击由单独监听处理，这里用 contains 排除）
-  document.addEventListener('click', (event) => {
-    const target = event.target as Node | null
-    if (harnessMenu && !harnessMenu.hidden && harnessOverlay && target && !harnessOverlay.contains(target)) {
-      setHarnessMenuOpen(false)
-    }
-  })
-  void refreshPlugins()
-  void refreshMcpServers()
-  void refreshSkills()
-  refreshAllMarkets()
-  void refreshFeedbackDiagnostics()
-  void mountHarness()
+    })
+    document.getElementById('harness-reconnect')?.addEventListener('click', () => {
+      fireAndForget('重新连接 Harness', () => reconnectHarness(), reportHarnessDetachedFailure)
+    })
+    document.getElementById('harness-restart')?.addEventListener('click', () => {
+      fireAndForget('重新启动 Harness', () => restartHarness(), reportHarnessDetachedFailure)
+    })
+    harnessLoadingRetry?.addEventListener('click', () => {
+      fireAndForget('从启动界面重新启动 Harness', () => restartHarness(), reportHarnessDetachedFailure)
+    })
+    harnessBadge?.addEventListener('click', () => {
+      setHarnessMenuOpen(harnessMenu ? harnessMenu.hidden : false)
+    })
+    // 点击弹层外空白处收起（自身按钮点击由单独监听处理，这里用 contains 排除）
+    document.addEventListener('click', (event) => {
+      const target = event.target as Node | null
+      if (harnessMenu && !harnessMenu.hidden && harnessOverlay && target && !harnessOverlay.contains(target)) {
+        setHarnessMenuOpen(false)
+      }
+    })
+
+    const frame = document.getElementById('harness-frame') as HTMLIFrameElement | null
+    window.addEventListener('message', (event: MessageEvent<unknown>) => {
+      if (!frame?.contentWindow || event.source !== frame.contentWindow) return
+      let dshOrigin: string
+      try {
+        const current = new URL(frame.src)
+        if (current.protocol !== 'http:' || current.hostname !== '127.0.0.1') return
+        dshOrigin = current.origin
+      } catch {
+        return
+      }
+      if (event.origin !== dshOrigin || !event.data || typeof event.data !== 'object') return
+      if ((event.data as { type?: unknown }).type !== 'dsh-desktop-hub/manager-url-request') return
+      const managerUrl = new URL('/manager.html', window.location.origin)
+      managerUrl.searchParams.set('embedded', '1')
+      managerUrl.searchParams.set('tab', 'plugin')
+      frame.contentWindow.postMessage({ type: 'dsh-desktop-hub/manager-url', url: managerUrl.href }, dshOrigin)
+    })
+
+    fireAndForget('挂载 Harness', () => mountHarness(), reportHarnessDetachedFailure)
+  }
+  if (EMBEDDED_MANAGER) {
+    fireAndForget('启动时刷新插件列表', () => refreshPlugins(), (message) => setStatus(message, 'error'))
+    fireAndForget('启动时刷新 MCP 列表', () => refreshMcpServers(), (message) => setMcpStatus(message, 'error'))
+    fireAndForget('启动时刷新 Skills 列表', () => refreshSkills(), (message) => setSkillsStatus(message, 'error'))
+    refreshAllMarkets()
+    fireAndForget('启动时刷新反馈诊断', () => refreshFeedbackDiagnostics(), (message) => setFeedbackStatus(message, 'error'))
+  }
 }
 
 // ---- 首次访问引导：Spotlight 分步教程（纯渲染层，localStorage 记忆完成态）----
@@ -2542,4 +2898,12 @@ window.addEventListener('resize', () => {
 })
 
 // 首次访问（未完成过引导）时自动开始
-if (!readOnboardingDone()) startOnboarding()
+if (EMBEDDED_MANAGER) {
+  const requestedTab = new URLSearchParams(window.location.search).get('tab')
+  if (requestedTab && (TABS as readonly string[]).includes(requestedTab) && requestedTab !== 'harness') {
+    switchTab(requestedTab as Exclude<TabId, 'harness'>)
+  } else {
+    switchTab('plugin')
+  }
+}
+if (!document.body.classList.contains('desktop-host') && !EMBEDDED_MANAGER && !readOnboardingDone()) startOnboarding()

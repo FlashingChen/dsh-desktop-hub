@@ -1,6 +1,7 @@
 // 扩展市场目录：三类条目契约与安装载荷完整性
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -8,6 +9,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const { listMarketItems, findMarketItem, fetchMarketItems } = await import(pathToFileURL(join(root, 'dist', 'core', 'market.js')).href)
+const { validateMcpRow } = await import(pathToFileURL(join(root, 'dist', 'core', 'mcp.js')).href)
+
+test('在线市场成功分支只写一次完整目录缓存', () => {
+  const source = readFileSync(join(root, 'src', 'core', 'market.ts'), 'utf8')
+  assert.equal(
+    source.match(/if \(!normalizedQuery\) writeDiskMarketCache\(options\.cacheDir, kind, all\)/g)?.length,
+    1,
+  )
+})
 
 test('市场目录包含 plugin / mcp / skill 三类条目且 id 唯一', () => {
   const all = listMarketItems()
@@ -40,6 +50,109 @@ test('MCP 市场条目提供 dsh-mcp-client 行与稳定 id', () => {
   const github = findMarketItem('mcp', 'mcp-github')
   assert.deepEqual(github?.requiredEnv, ['GITHUB_PERSONAL_ACCESS_TOKEN'])
   assert.equal(github?.row.config.env?.GITHUB_PERSONAL_ACCESS_TOKEN, '${GITHUB_PERSONAL_ACCESS_TOKEN}')
+})
+
+test('远程 MCP 市场生成的 stdio/HTTP 行均通过共享验证器，无法映射的 HTTP envHint 会告警跳过', async () => {
+  const snapshot = {
+    updated: 'test',
+    servers: [{
+      name: 'validator-compat-stdio',
+      transport: 'stdio',
+      command: 'npx',
+      args: ['-y', 'compat-server'],
+      envHint: ['COMPAT_TOKEN'],
+    }, {
+      name: 'validator-compat-remote',
+      transport: 'streamable-http',
+      url: 'https://mcp.example.com/compat',
+      envHint: [],
+    }, {
+      name: 'validator-compat-remote-auth',
+      transport: 'streamable-http',
+      url: 'https://mcp.example.com/private',
+      envHint: ['UNMAPPED_TOKEN'],
+    }],
+  }
+  const registry = {
+    servers: [{
+      server: {
+        name: 'io.example/validator-compat-header',
+        title: 'validator-compat-header',
+        version: '1.0.0',
+        remotes: [{
+          type: 'streamable-http',
+          url: 'https://registry.example.com/mcp',
+          headers: [{ name: 'Authorization' }],
+        }],
+      },
+    }],
+    metadata: {},
+  }
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (input) => {
+    const url = String(input)
+    const payload = url.includes('api.github.com/repos/LKMeng2001/dsh-mcp-market')
+      ? { content: Buffer.from(JSON.stringify(snapshot)).toString('base64') }
+      : url.startsWith('https://registry.modelcontextprotocol.io/')
+        ? registry
+        : null
+    if (!payload) throw new Error(`unexpected URL: ${url}`)
+    return new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+  try {
+    const result = await fetchMarketItems('mcp', 'validator-compat')
+    const remoteItems = result.items.filter((item) => item.kind === 'mcp' && item.name.includes('validator-compat'))
+    assert.equal(result.online, true)
+    assert.deepEqual(
+      new Set(remoteItems.map((item) => item.name)),
+      new Set(['validator-compat-stdio', 'validator-compat-remote', 'validator-compat-header']),
+    )
+    for (const item of remoteItems) {
+      const validated = validateMcpRow(item.row)
+      assert.equal(validated.ok, true, `${item.name}: ${validated.error ?? ''}`)
+    }
+    const stdio = remoteItems.find((item) => item.name === 'validator-compat-stdio')
+    const remote = remoteItems.find((item) => item.name === 'validator-compat-remote')
+    const headerRemote = remoteItems.find((item) => item.name === 'validator-compat-header')
+    assert.deepEqual(stdio?.row.config.env, { COMPAT_TOKEN: '${COMPAT_TOKEN}' })
+    assert.equal('env' in remote.row.config, false)
+    assert.equal('env' in headerRemote.row.config, false)
+    assert.match(headerRemote.row.config.headers.Authorization, /^\$\{MCP_.*_AUTHORIZATION\}$/)
+    assert.match(result.error, /HTTP headers.*validator-compat-remote-auth/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('市场 HTTP 非成功响应会取消 body，且清理异常不覆盖状态诊断', async () => {
+  const originalFetch = globalThis.fetch
+  let requests = 0
+  let cancellations = 0
+  globalThis.fetch = async () => {
+    const request = ++requests
+    return {
+      ok: false,
+      status: 503,
+      headers: new Headers(),
+      body: {
+        cancel() {
+          cancellations += 1
+          if (request === 1) throw new Error('sync cancel failure')
+          return Promise.reject(new Error('async cancel failure'))
+        },
+      },
+    }
+  }
+  try {
+    const result = await fetchMarketItems('mcp', 'cancel-http-body-contract')
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(result.online, false)
+    assert.match(result.error, /HTTP 503/)
+    assert.ok(requests >= 3, `DSH API/raw 与官方 Registry 均应尝试，实际 ${requests}`)
+    assert.equal(cancellations, requests, '每个 non-ok response 都必须取消 body')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })
 
 test('Skills 市场条目可离线生成有效模板', () => {

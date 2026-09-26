@@ -3,8 +3,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { parseDocument } from 'yaml'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const {
@@ -21,7 +22,42 @@ const {
   activatePlugin,
   deactivatePlugin,
   deactivatePluginIfActive,
+  planPluginSpawn,
 } = await import(pathToFileURL(join(root, 'dist', 'core', 'plugins.js')).href)
+
+test('Windows npm .cmd shim 解析为 node + 独立 argv，不把插件 spec 交给 shell', () => {
+  const bin = mkdtempSync(join(tmpdir(), 'dsh cmd & argv-'))
+  try {
+    const shim = join(bin, 'dsh.cmd')
+    const entry = join(bin, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    const node = 'C:\\Program Files\\nodejs\\node.exe'
+    const args = ['plugin', '--profile', 'web space', 'add', 'github:owner/repo&whoami', '%PATH%', 'x^y|z']
+    mkdirSync(dirname(entry), { recursive: true })
+    writeFileSync(entry, '// fixture')
+    writeFileSync(shim, '@ECHO off\r\n"%_prog%" "%dp0%\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js" %*\r\n')
+
+    const plan = planPluginSpawn(shim, undefined, args, {
+      platform: 'win32',
+      findNode: () => node,
+    })
+    assert.deepEqual(plan, { executable: node, args: [entry, ...args] })
+    assert.equal(plan.args.at(-3), 'github:owner/repo&whoami')
+  } finally {
+    rmSync(bin, { recursive: true, force: true })
+  }
+})
+
+test('Windows .cmd fallback 无标准 JS 入口时 fail closed', () => {
+  assert.throws(
+    () => planPluginSpawn('C:\\tools\\dsh.cmd', undefined, ['plugin'], {
+      platform: 'win32',
+      readShim: () => '@echo off\r\ndsh.exe %*',
+      pathExists: () => false,
+      findNode: () => 'C:\\node.exe',
+    }),
+    /无法解析 Windows dsh shim/,
+  )
+})
 
 test('listPlugins 从 bundles ∪ dependencies 解析并分类', () => {
   const dir = mkdtempSync(join(tmpdir(), 'profile-'))
@@ -57,6 +93,67 @@ test('listPlugins 排序稳定', () => {
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ dependencies: { b: '1', a: '1' }, dsh: { profile: { bundles: ['a'] } } }))
     const names = listPlugins({ name: 't', dir, bundles: ['a'] }).map((e) => e.name)
     assert.deepEqual(names, ['a', 'b'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('listPlugins 过滤畸形 entry，trim/去重并保留其余插件面板内容', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'profile-normalize-'))
+  const warnings = []
+  try {
+    const dependencies = Object.create(null)
+    dependencies[' good-plugin '] = ' ^1.0.0 '
+    dependencies['good-plugin'] = '^1.1.0'
+    dependencies['bad-object'] = { version: '1' }
+    dependencies['bad-null'] = null
+    dependencies['bad-number'] = 7
+    dependencies['bad-empty'] = '   '
+    dependencies.__proto__ = '^9.0.0'
+    dependencies.constructor = '^9.0.0'
+    dependencies.duplicate = '^1.0.0'
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({
+      dependencies,
+      devDependencies: { duplicate: ' ^2.0.0 ', 'dev-only': ' workspace:* ' },
+    }))
+    const entries = listPlugins({
+      name: 'web',
+      dir,
+      bundles: [' bundle-only ', 'bundle-only', {}, 8, '', '__proto__'],
+    }, undefined, { onWarning: (message) => warnings.push(message) })
+    assert.deepEqual(entries.map((entry) => entry.name), ['bundle-only', 'dev-only', 'duplicate', 'good-plugin'])
+    const byName = Object.fromEntries(entries.map((entry) => [entry.name, entry]))
+    assert.equal(byName['good-plugin'].spec, '^1.1.0')
+    assert.equal(byName.duplicate.spec, '^2.0.0', '合法 devDependency 应保持覆盖 dependency 的原语义')
+    assert.equal(byName['dev-only'].spec, 'workspace:*')
+    assert.equal(byName['bundle-only'].spec, '')
+    assert.equal(byName['bundle-only'].inBundles, true)
+    assert.ok(warnings.some((message) => /bad-object.*spec/.test(message)))
+    assert.ok(warnings.some((message) => /bad-null.*spec/.test(message)))
+    assert.ok(warnings.some((message) => /非法包名「__proto__」/.test(message)))
+    assert.ok(warnings.some((message) => /bundle\[2\]/.test(message)))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('listPlugins 对 package 顶层和 dependency 容器畸形给出清晰错误', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'profile-shape-'))
+  const profile = { name: 'web', dir, bundles: [] }
+  try {
+    for (const value of [null, [], 'not-an-object']) {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify(value))
+      assert.throws(() => listPlugins(profile), /package\.json 顶层必须是普通对象/)
+    }
+    for (const [field, value] of [
+      ['dependencies', null],
+      ['dependencies', []],
+      ['dependencies', 'bad'],
+      ['devDependencies', 7],
+    ]) {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ [field]: value }))
+      assert.throws(() => listPlugins(profile), new RegExp(`${field} 必须是普通对象`))
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -176,6 +273,7 @@ test('activatePlugin 为无 dsh.bundle 依赖写入 patch 激活行', () => {
   const activated = activatePlugin(patch, 'dsh-worktree')
   assert.equal(pluginPatchId('dsh-worktree'), 'dsh-worktree')
   assert.equal(isPluginActive(activated, 'dsh-worktree'), true)
+  assert.match(activated, /^# keep\n/, '已有 sequence 的文档头注释必须保留')
   assert.match(activated, /id: dsh-worktree/)
   assert.match(activated, /name: dsh-worktree/)
   assert.match(activated, /mcp-github/)
@@ -184,6 +282,36 @@ test('activatePlugin 为无 dsh.bundle 依赖写入 patch 激活行', () => {
   assert.equal(isPluginActive(deactivated, 'dsh-worktree'), false)
   assert.match(deactivated, /mcp-github/)
   assert.throws(() => deactivatePlugin(deactivated, 'dsh-worktree'), /未激活/)
+})
+
+test('activatePlugin 从空或纯注释 patch 新建内容时保留文档元信息', () => {
+  const empty = activatePlugin('', 'empty-plugin')
+  assert.equal(isPluginActive(empty, 'empty-plugin'), true)
+  assert.equal(parseDocument(empty).errors.length, 0)
+
+  const commented = activatePlugin('# keep plugin note\n# second line\n', 'commented-plugin')
+  assert.match(commented, /^# keep plugin note\n# second line\n/)
+  assert.equal(isPluginActive(commented, 'commented-plugin'), true)
+  assert.equal(parseDocument(commented).errors.length, 0)
+})
+
+test('插件 patch helpers 与 MCP 共用严格 sequence/insert AST 结构边界', () => {
+  const operations = [
+    (patch) => isPluginActive(patch, 'safe-plugin'),
+    (patch) => activatePlugin(patch, 'safe-plugin'),
+    (patch) => deactivatePlugin(patch, 'safe-plugin'),
+    (patch) => deactivatePluginIfActive(patch, 'safe-plugin'),
+  ]
+  for (const patch of ['insert: []\n', 'plain scalar\n']) {
+    for (const operation of operations) assert.throws(() => operation(patch), /顶层必须是 YAML sequence/)
+  }
+  for (const patch of ['- insert: {}\n', '- insert: nope\n', '- insert:\n']) {
+    for (const operation of operations) assert.throws(() => operation(patch), /insert 必须是 YAML sequence/)
+  }
+
+  const activated = activatePlugin('[]\n', 'safe-plugin')
+  assert.equal(isPluginActive(activated, 'safe-plugin'), true)
+  assert.equal(Array.isArray(parseDocument(activated).toJS()), true, '不得把 sequence 节点 push 进 YAML map.items')
 })
 
 
@@ -355,6 +483,170 @@ test('runPluginOp 透传退出码并支持取消', async () => {
     const cancelled = await cancellable.done
     assert.ok(cancelled.signal === 'SIGTERM' || cancelled.exitCode !== 0, `取消必须终止操作：${JSON.stringify(cancelled)}`)
   } finally {
+    rmSync(bin, { recursive: true, force: true })
+  }
+})
+
+test('runPluginOp 取消会终止插件操作生成的孙进程', async () => {
+  const bin = mkdtempSync(join(tmpdir(), 'dsh-cancel-tree-'))
+  const launcher = join(bin, 'launcher.mjs')
+  const grandchild = join(bin, 'grandchild.mjs')
+  const marker = join(bin, 'survived')
+  let op
+  let rootPid
+  let grandchildPid
+  try {
+    writeFileSync(
+      grandchild,
+      "import { writeFileSync } from 'node:fs'\n" +
+        `setTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'survived'), 2_000)\n` +
+        'setInterval(() => {}, 1_000)\n',
+    )
+    writeFileSync(
+      launcher,
+      "import { spawn } from 'node:child_process'\n" +
+        `const child = spawn(process.execPath, [${JSON.stringify(grandchild)}], { stdio: 'ignore' })\n` +
+        'child.unref()\n' +
+        "console.log(`tree-ready ${process.pid} ${child.pid}`)\n" +
+        'setInterval(() => {}, 1_000)\n',
+    )
+
+    op = runPluginOp({
+      dsh: launcher,
+      node: process.execPath,
+      profile: 'web',
+      action: 'add',
+    })
+    const ready = new Promise((resolve, reject) => {
+      let output = ''
+      const timeout = setTimeout(() => reject(new Error(`孙进程未及时启动：${output}`)), 3_000)
+      op.stdout.on('data', (chunk) => {
+        output += String(chunk)
+        const match = output.match(/tree-ready (\d+) (\d+)/)
+        if (!match) return
+        clearTimeout(timeout)
+        rootPid = Number(match[1])
+        grandchildPid = Number(match[2])
+        resolve()
+      })
+    })
+    await ready
+    op.cancel()
+    let cancelTimeout
+    try {
+      await Promise.race([
+        op.done,
+        new Promise((_, reject) => {
+          cancelTimeout = setTimeout(() => reject(new Error('插件取消未及时结束')), 3_000)
+        }),
+      ])
+    } finally {
+      clearTimeout(cancelTimeout)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2_300))
+    assert.equal(existsSync(marker), false, '取消后孙进程不得继续执行延迟写入')
+  } finally {
+    op?.cancel()
+    if (process.platform !== 'win32' && rootPid) {
+      try {
+        process.kill(-rootPid, 'SIGKILL')
+      } catch {
+        /* 已清理 */
+      }
+    }
+    if (grandchildPid) {
+      try {
+        process.kill(grandchildPid, 'SIGKILL')
+      } catch {
+        /* 已清理 */
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    rmSync(bin, { recursive: true, force: true })
+  }
+})
+
+test('runPluginOp 强杀忽略 SIGTERM 的插件进程树并结算取消终态', { skip: process.platform === 'win32' }, async () => {
+  const bin = mkdtempSync(join(tmpdir(), 'dsh-cancel-force-tree-'))
+  const launcher = join(bin, 'launcher.mjs')
+  const grandchild = join(bin, 'grandchild.mjs')
+  const marker = join(bin, 'survived-force-cancel')
+  let op
+  let rootPid
+  let grandchildPid
+  try {
+    writeFileSync(
+      grandchild,
+      "import { writeFileSync } from 'node:fs'\n" +
+        "process.on('SIGTERM', () => {})\n" +
+        `setTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'survived'), 2_500)\n` +
+        'setInterval(() => {}, 1_000)\n',
+    )
+    writeFileSync(
+      launcher,
+      "import { spawn } from 'node:child_process'\n" +
+        "process.on('SIGTERM', () => {})\n" +
+        `const child = spawn(process.execPath, [${JSON.stringify(grandchild)}], { stdio: 'ignore' })\n` +
+        'child.unref()\n' +
+        "console.log(`force-tree-ready ${process.pid} ${child.pid}`)\n" +
+        'setInterval(() => {}, 1_000)\n',
+    )
+
+    op = runPluginOp({
+      dsh: launcher,
+      node: process.execPath,
+      profile: 'web',
+      action: 'add',
+    })
+    await new Promise((resolve, reject) => {
+      let output = ''
+      const timeout = setTimeout(() => reject(new Error(`忽略 SIGTERM 的进程树未及时启动：${output}`)), 3_000)
+      op.stdout.on('data', (chunk) => {
+        output += String(chunk)
+        const match = output.match(/force-tree-ready (\d+) (\d+)/)
+        if (!match) return
+        clearTimeout(timeout)
+        rootPid = Number(match[1])
+        grandchildPid = Number(match[2])
+        resolve()
+      })
+    })
+
+    const cancelStarted = Date.now()
+    op.cancel()
+    op.cancel()
+    let cancelTimeout
+    try {
+      const result = await Promise.race([
+        op.done,
+        new Promise((_, reject) => {
+          cancelTimeout = setTimeout(() => reject(new Error('强制取消未在合理期限内结算')), 3_500)
+        }),
+      ])
+      assert.equal(result.signal, 'SIGKILL', `忽略 SIGTERM 后应由强杀结束：${JSON.stringify(result)}`)
+    } finally {
+      clearTimeout(cancelTimeout)
+    }
+    assert.ok(Date.now() - cancelStarted >= 1_500, '测试必须实际经过 SIGTERM 优雅等待窗口')
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    assert.equal(existsSync(marker), false, '强制取消后孙进程不得执行延迟 marker')
+  } finally {
+    op?.cancel()
+    if (rootPid) {
+      try {
+        process.kill(-rootPid, 'SIGKILL')
+      } catch {
+        /* 已清理 */
+      }
+    }
+    if (grandchildPid) {
+      try {
+        process.kill(grandchildPid, 'SIGKILL')
+      } catch {
+        /* 已清理 */
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
     rmSync(bin, { recursive: true, force: true })
   }
 })

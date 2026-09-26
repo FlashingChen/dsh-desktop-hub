@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 // Channel 名与 src/core/ipc.ts 保持一致（preload 是独立 CJS 编译，不能 import 共享模块；
 // tests/skeleton.test.mjs 断言两者字符级一致）。
 const CH = {
+  runtimeInfo: 'runtime:info',
   harnessUrl: 'harness:url',
   harnessStatus: 'harness:status',
   harnessFrameLoaded: 'harness:frame-loaded',
@@ -34,9 +35,9 @@ const CH = {
   skillsImportClawHub: 'skills:import-clawhub',
   marketList: 'market:list',
   marketPluginPreflight: 'market:plugin-preflight',
-  credentialsStatus: 'credentials:status',
-  credentialsMigrate: 'credentials:migrate',
-  credentialsOpenBackup: 'credentials:open-backup',
+
+
+
   feedbackDiagnostics: 'feedback:diagnostics',
   feedbackCopy: 'feedback:copy',
   feedbackSubmit: 'feedback:submit',
@@ -91,6 +92,9 @@ type PluginOpStatus =
   | { state: 'unknown' }
 
 contextBridge.exposeInMainWorld('dshDesktop', {
+  runtime: {
+    info: (): Promise<{ appVersion: string; dshVersion: string | null }> => ipcRenderer.invoke(CH.runtimeInfo),
+  },
   harness: {
     url: (): Promise<string | null> => ipcRenderer.invoke(CH.harnessUrl),
     restart: (): Promise<{ ok: boolean; url?: string; error?: string }> => ipcRenderer.invoke(CH.harnessRestart),
@@ -136,7 +140,7 @@ contextBridge.exposeInMainWorld('dshDesktop', {
   skills: {
     list: () => ipcRenderer.invoke(CH.skillsList),
     create: (input: { name: string; description: string; body: string; overwrite?: boolean }) => ipcRenderer.invoke(CH.skillsCreate, input),
-    toggle: (input: { id: string; source: string; kind: 'model' | 'user'; value: boolean }) =>
+    toggle: (input: { id: string; source: string; skillKind: 'bundle' | 'flat'; kind: 'model' | 'user'; value: boolean }) =>
       ipcRenderer.invoke(CH.skillsToggle, input),
     importFile: (buffer: ArrayBuffer, overwrite: boolean) => ipcRenderer.invoke(CH.skillsImportFile, buffer, overwrite),
     importUrl: (url: string, overwrite: boolean) => ipcRenderer.invoke(CH.skillsImportUrl, url, overwrite),
@@ -146,11 +150,6 @@ contextBridge.exposeInMainWorld('dshDesktop', {
   market: {
     list: (kind: 'plugin' | 'mcp' | 'skill', query?: string) => ipcRenderer.invoke(CH.marketList, kind, query),
     preflightPlugin: (spec: string) => ipcRenderer.invoke(CH.marketPluginPreflight, spec),
-  },
-  credentials: {
-    status: (): Promise<{ format: string; path: string; text?: string }> => ipcRenderer.invoke(CH.credentialsStatus),
-    migrate: (): Promise<{ ok: boolean; backupPath?: string; error?: string }> => ipcRenderer.invoke(CH.credentialsMigrate),
-    openBackup: (backupPath: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke(CH.credentialsOpenBackup, backupPath),
   },
   feedback: {
     diagnostics: (): Promise<{ ok: boolean; text?: string; error?: string }> => ipcRenderer.invoke(CH.feedbackDiagnostics),

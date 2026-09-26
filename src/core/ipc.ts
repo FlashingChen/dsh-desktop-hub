@@ -2,6 +2,7 @@
 // （renderer 是纯脚本无法 import，保持字符串一致的复制，见 renderer.ts 顶部注释）
 
 export const IPC = {
+  runtimeInfo: 'runtime:info',
   harnessUrl: 'harness:url',
   harnessStatus: 'harness:status',
   harnessFrameLoaded: 'harness:frame-loaded',
@@ -33,9 +34,9 @@ export const IPC = {
   skillsImportClawHub: 'skills:import-clawhub',
   marketList: 'market:list',
   marketPluginPreflight: 'market:plugin-preflight',
-  credentialsStatus: 'credentials:status',
-  credentialsMigrate: 'credentials:migrate',
-  credentialsOpenBackup: 'credentials:open-backup',
+
+
+
   feedbackDiagnostics: 'feedback:diagnostics',
   feedbackCopy: 'feedback:copy',
   feedbackSubmit: 'feedback:submit',
