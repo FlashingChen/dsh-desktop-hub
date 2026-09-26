@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   createNavigationGuard,
   isAllowedFrameNavigation,
+  isAllowedIpcSender,
   isAllowedNavigation,
 } from '../dist/main/navigation.js'
 
@@ -81,4 +82,35 @@ test('navigation policy rejects an absent or untrusted Harness URL', () => {
   assert.equal(isAllowedNavigation(candidate, rendererUrl, 'https://127.0.0.1:3080/'), false)
   assert.equal(isAllowedNavigation(candidate, rendererUrl, 'http://localhost:3080/'), false)
   assert.equal(isAllowedNavigation(candidate, rendererUrl, 'http://owner@127.0.0.1:3080/'), false)
+})
+
+// 中心 UI 跑在 shell 的子帧里（Harness 侧边栏打开 /manager.html?embedded=1），
+// 若 IPC 只认壳层主帧，中心的读/写全部会被拒——这里锁住两条边界。
+test('IPC 接受壳层主帧与内嵌管理中心子帧', () => {
+  const shell = 'http://127.0.0.1:4000/index.html'
+  assert.equal(isAllowedIpcSender(shell, true, shell), true)
+  for (const tab of ['plugin', 'mcp', 'skills', 'updates', 'feedback']) {
+    assert.equal(isAllowedIpcSender(`http://127.0.0.1:4000/manager.html?embedded=1&tab=${tab}`, false, shell), true, tab)
+  }
+})
+
+test('IPC 拒绝主帧偏离壳层，以及非中心子帧（Harness 源 / 外部页 / 畸形 URL）', () => {
+  const shell = 'http://127.0.0.1:4000/index.html'
+  // 主帧必须精确等于壳层地址
+  assert.equal(isAllowedIpcSender('http://127.0.0.1:4000/manager.html?embedded=1&tab=plugin', true, shell), false)
+  assert.equal(isAllowedIpcSender(`${shell}?unexpected=1`, true, shell), false)
+  // Harness 源即使是合法子帧也不得直接调用 IPC
+  assert.equal(isAllowedIpcSender(harnessUrl, false, shell), false)
+  assert.equal(isAllowedIpcSender(`${harnessUrl}/settings`, false, shell), false)
+  // 外部页与畸形/放宽后的 manager 地址一律拒绝
+  assert.equal(isAllowedIpcSender('https://evil.example/', false, shell), false)
+  assert.equal(isAllowedIpcSender('http://127.0.0.1.evil.example:4000/manager.html?embedded=1&tab=plugin', false, shell), false)
+  assert.equal(isAllowedIpcSender('http://127.0.0.1:4001/manager.html?embedded=1&tab=plugin', false, shell), false)
+  assert.equal(isAllowedIpcSender('http://127.0.0.1:4000/manager.html?tab=plugin', false, shell), false)
+  assert.equal(isAllowedIpcSender('http://127.0.0.1:4000/manager.html?embedded=0&tab=plugin', false, shell), false)
+  assert.equal(isAllowedIpcSender('http://127.0.0.1:4000/manager.html?embedded=1&tab=account', false, shell), false)
+  assert.equal(isAllowedIpcSender('http://127.0.0.1:4000/manager.html?embedded=1&tab=plugin&extra=1', false, shell), false)
+  assert.equal(isAllowedIpcSender('http://owner@127.0.0.1:4000/manager.html?embedded=1&tab=plugin', false, shell), false)
+  assert.equal(isAllowedIpcSender('about:blank', false, shell), false)
+  assert.equal(isAllowedIpcSender('not a URL', false, shell), false)
 })

@@ -41,6 +41,15 @@ const {
 } = mod
 
 /**
+ * 原子替换「保留原文件 mode」在 Windows 上不可按 POSIX 位断言：
+ * chmod 只映射 readonly 位，可写文件的 stat().mode 恒为 0666，
+ * 因此 win32 预期 0666，其余平台才断言真实权限位（与 mcp.test.mjs 同口径）。
+ */
+function expectedPreservedMode(unixMode) {
+  return process.platform === 'win32' ? 0o666 : unixMode
+}
+
+/**
  * 构建原始 ZIP（store 方法，不做任何路径规整）。
  * AdmZip.addFile() 会提前清洗 `..` 路径，无法覆盖目录穿越回归；必须手工拼 central directory。
  */
@@ -339,7 +348,9 @@ test('createSkill 校验 kebab-case 并落盘', () => {
       overwrite: true,
     })
     assert.ok(readFileSync(file, 'utf8').includes('覆盖版本'))
-    assert.equal(statSync(file).mode & 0o777, 0o640, 'overwrite 原子替换必须保留 mode')
+    const overwriteMode = statSync(file).mode & 0o777
+    const expectedOverwriteMode = expectedPreservedMode(0o640)
+    assert.equal(overwriteMode, expectedOverwriteMode, `overwrite 原子替换必须保留 mode，预期 ${expectedOverwriteMode.toString(8)}，实际 ${overwriteMode.toString(8)}`)
     assert.throws(() => createSkill({ root: join(dir, 'skills'), name: 'Hello World!', description: '', body: '' }), /kebab-case/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -399,7 +410,9 @@ test('setInvocation 修复非法字符串 name，非法 fallback 则拒绝且保
     assert.equal(parseSkillFile(fixedText).meta.name, 'canonical-name')
     assert.ok(fixedText.includes('license: MIT'))
     assert.ok(fixedText.endsWith('正文\n'))
-    assert.equal(statSync(fixed).mode & 0o777, 0o640, '原子替换必须保留原文件 mode')
+    const fixedMode = statSync(fixed).mode & 0o777
+    const expectedFixedMode = expectedPreservedMode(0o640)
+    assert.equal(fixedMode, expectedFixedMode, `原子替换必须保留原文件 mode，预期 ${expectedFixedMode.toString(8)}，实际 ${fixedMode.toString(8)}`)
 
     const rejected = join(dir, 'skills', 'Bad Directory', 'SKILL.md')
     mkdirSync(dirname(rejected), { recursive: true })

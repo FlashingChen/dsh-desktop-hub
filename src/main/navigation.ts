@@ -65,6 +65,19 @@ export function isAllowedFrameNavigation(
     : isAllowedHarnessNavigation(candidateUrl, harnessUrl) || isAllowedManagerNavigation(candidateUrl, rendererUrl)
 }
 
+/**
+ * IPC 来源策略，与上面的导航策略同口径：主帧只能是壳层本身，子帧只认内嵌管理中心。
+ * 中心 UI 由 Harness 侧边栏在 shell 的子帧中打开（/manager.html?embedded=1），
+ * 若沿用「只接受壳层主帧」会把整个中心的读/写 IPC 全部拒掉。
+ * 判定复用 isAllowedManagerNavigation，因此子帧仍被严格约束在自有 loopback 的
+ * manager.html 上——不放宽到任意子帧或 Harness 源。
+ */
+export function isAllowedIpcSender(candidateUrl: string, isMainFrame: boolean, rendererUrl: string): boolean {
+  return isMainFrame
+    ? candidateUrl === rendererUrl
+    : isAllowedManagerNavigation(candidateUrl, rendererUrl)
+}
+
 export interface NavigationGuardEvent {
   url: string
   isMainFrame: boolean

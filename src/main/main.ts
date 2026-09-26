@@ -47,7 +47,7 @@ import { fetchMarketItems, preflightPluginSpec, type MarketKind } from '../core/
 import { getTrayWindowAction } from '../core/tray.js'
 import { wireSmoke } from './smoke.js'
 import { createPermissionHandlers } from './permissions.js'
-import { createNavigationGuard, isAllowedNavigation } from './navigation.js'
+import { createNavigationGuard, isAllowedIpcSender, isAllowedNavigation } from './navigation.js'
 import { loadInitialPage, type InitialPageLoadFailure } from './window-load.js'
 import { createUpdater } from './updater.js'
 import {
@@ -66,6 +66,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const RENDERER_ROOT = join(__dirname, '..', 'renderer')
 let RENDERER_URL = ''
 const ARTIFACTS_DIR = join(__dirname, '..', '..', 'artifacts')
+
+/**
+ * 内嵌管理中心地址：Plugin/MCP/Skills 中心只渲染在 manager-embedded（manager.html）下，
+ * 与渲染层响应 Harness 侧边栏握手时构造的 URL 保持一致。
+ */
+function embeddedManagerUrl(): string {
+  const url = new URL('/manager.html', RENDERER_URL)
+  url.searchParams.set('embedded', '1')
+  url.searchParams.set('tab', 'plugin')
+  return url.href
+}
 
 const argv = process.argv
 const SMOKE = argv.includes('--smoke')
@@ -333,12 +344,12 @@ async function fetchJson(url: string, timeoutMs = 10000): Promise<unknown> {
   } finally { clearTimeout(t) }
 }
 
-// ---- IPC 来源校验（P1-2 / P2-9）：只接受壳层主帧，拒绝 harness iframe / 外部页 ----
+// ---- IPC 来源校验（P1-2 / P2-9）：只接受壳层主帧与内嵌管理中心子帧，拒绝 harness iframe / 外部页 ----
 function assertRendererSender(event: IpcMainInvokeEvent): void {
   const frame = event.senderFrame
-  const isMainFrame = frame === event.sender.mainFrame
-  if (!isMainFrame || frame?.url !== RENDERER_URL) {
-    throw new Error('IPC 来源校验失败：拒绝非壳层主帧调用')
+  const url = frame?.url ?? ''
+  if (!frame || !isAllowedIpcSender(url, frame === event.sender.mainFrame, RENDERER_URL)) {
+    throw new Error('IPC 来源校验失败：拒绝非壳层主帧与非法管理中心帧调用')
   }
 }
 
@@ -1364,13 +1375,13 @@ void app.whenReady().then(async () => {
   updater.setup((status) => sendPluginEvent(IPC.updatesStatus, status))
   if (SMOKE) {
     createSkeletonWindow()
-    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: false })
+    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: false, managerUrl: embeddedManagerUrl() })
     return
   }
   if (HARNESS_SMOKE) {
     await startHarnessAndWatch()
     createSkeletonWindow()
-    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: true })
+    wireSmoke({ mainWindow: () => mainWindow, harness: () => harness, artifactsDir: ARTIFACTS_DIR, harnessSmoke: true, managerUrl: embeddedManagerUrl() })
     return
   }
   // 默认产品行为：窗口先行（立即出现，状态「连接中」，绝不因 harness 慢而空白/退出），
