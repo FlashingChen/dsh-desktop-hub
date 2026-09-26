@@ -23,18 +23,67 @@ export interface PluginOpRunnerOptions {
   onFinalizeError?: (message: string) => void
   outputCap?: number
   maxCompleted?: number
+  shutdownTimeoutMs?: number
 }
 
 type ActiveOperation = {
   process: PluginOpHandle | null
   cancelRequested: boolean
+  cancelSucceeded: boolean
+  completion: Promise<void>
+  resolveCompletion: () => void
+  cancelPromise: Promise<void> | null
 }
 
 const DEFAULT_OUTPUT_CAP = 64 * 1024
 const DEFAULT_MAX_COMPLETED = 32
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 6_000
+const DISPLAY_TOKEN_MAX = 240
+const DISPLAY_COMMAND_MAX = 512
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function cappedDisplayToken(value: string): string {
+  const sanitized = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim()
+  return sanitized.length > DISPLAY_TOKEN_MAX ? `${sanitized.slice(0, DISPLAY_TOKEN_MAX - 1)}…` : sanitized
+}
+
+function redactPluginSpecForDisplay(value: string): string {
+  const sanitized = cappedDisplayToken(value)
+  try {
+    const parsed = new URL(sanitized)
+    parsed.username = ''
+    parsed.password = ''
+    parsed.search = ''
+    if (/(?:access[_-]?token|auth|credential|password|secret|api[_-]?key)/i.test(parsed.hash)) {
+      parsed.hash = '#<redacted>'
+    }
+    return cappedDisplayToken(parsed.toString())
+  } catch {
+    const withoutCredentials = sanitized.replace(
+      /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/@\s]+@/,
+      '$1<redacted>@',
+    )
+    const query = withoutCredentials.indexOf('?')
+    return cappedDisplayToken(query === -1 ? withoutCredentials : `${withoutCredentials.slice(0, query)}?<redacted>`)
+  }
+}
+
+/** 仅供 UI 展示；真实 spawn argv 不变，add spec 的 credentials/query 不进入输出。 */
+export function formatPluginCommandForDisplay(
+  profile: string,
+  action: PluginOpAction,
+  args: readonly string[],
+): string {
+  const command = buildPluginCommand(profile, action, [...args])
+  const displayed = command.map((value, index) => {
+    const isPluginPositional = index === command.length - 1 && args.length === 1
+    return isPluginPositional && action === 'add' ? redactPluginSpecForDisplay(value) : cappedDisplayToken(value)
+  })
+  const line = `dsh ${displayed.join(' ')}`
+  return line.length > DISPLAY_COMMAND_MAX ? `${line.slice(0, DISPLAY_COMMAND_MAX - 1)}…` : line
 }
 
 /**
@@ -49,15 +98,28 @@ export class PluginOpRunner {
   private readonly completed = new Map<string, PluginOpDone>()
   private readonly outputCap: number
   private readonly maxCompleted: number
+  private readonly shutdownTimeoutMs: number
+  private shuttingDown = false
+  private shutdownPromise: Promise<void> | null = null
 
   constructor(private readonly options: PluginOpRunnerOptions) {
     this.outputCap = options.outputCap ?? DEFAULT_OUTPUT_CAP
     this.maxCompleted = options.maxCompleted ?? DEFAULT_MAX_COMPLETED
+    this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS
   }
 
   start(request: PluginOpStartRequest): PluginOpStarted {
+    if (this.shuttingDown) return { ok: false, error: '应用正在退出，无法启动新的插件操作' }
     const token = this.options.nextToken()
-    const operation: ActiveOperation = { process: null, cancelRequested: false }
+    const { promise: completion, resolve: resolveCompletion } = Promise.withResolvers<void>()
+    const operation: ActiveOperation = {
+      process: null,
+      cancelRequested: false,
+      cancelSucceeded: false,
+      completion,
+      resolveCompletion,
+      cancelPromise: null,
+    }
     this.active.set(token, operation)
 
     try {
@@ -85,9 +147,82 @@ export class PluginOpRunner {
   cancel(token: string): boolean {
     const operation = this.active.get(token)
     if (!operation) return false
-    operation.cancelRequested = true
-    operation.process?.cancel()
+    void this.requestCancel(token, operation).catch(() => {
+      // 普通 UI cancel 没有异步返回通道；错误已作为 output chunk 留痕。
+      // shutdown 会复用/重试同一 ChildProcess，并把失败显式 reject 给主进程。
+    })
     return true
+  }
+
+  hasActiveOperations(): boolean {
+    return this.active.size > 0
+  }
+
+  isShuttingDown(): boolean {
+    return this.shuttingDown
+  }
+
+  /** 拒绝新操作、取消全部已登记操作，并等待每个 token 写入确定终态。 */
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise
+    this.shuttingDown = true
+    const operations = [...this.active.entries()]
+    if (operations.length === 0) {
+      this.shutdownPromise = Promise.resolve()
+      return this.shutdownPromise
+    }
+
+    const cancelErrors: unknown[] = []
+    const recordCancelError = (error: unknown): void => {
+      if (error instanceof AggregateError) cancelErrors.push(...error.errors)
+      else cancelErrors.push(error)
+    }
+    const cancellations = operations.map(async ([token, operation]) => {
+      try {
+        await this.requestCancel(token, operation)
+      } catch (firstError) {
+        // stopTree 已绑定原 ChildProcess，不存在 PID 延时复用风险。退出阶段再重试
+        // 一次可覆盖暂态 taskkill/权限竞态；两次都失败才交给有界 shutdown 上抛。
+        if (this.active.get(token) !== operation) {
+          recordCancelError(firstError)
+          return
+        }
+        try {
+          await this.requestCancel(token, operation)
+        } catch (retryError) {
+          recordCancelError(firstError)
+          recordCancelError(retryError)
+        }
+      }
+    })
+    const drain = Promise.all([
+      Promise.all(operations.map(([, operation]) => operation.completion)),
+      Promise.all(cancellations),
+    ]).then(() => {
+      if (cancelErrors.length > 0) throw new AggregateError(cancelErrors, '插件进程树停止失败')
+    })
+    this.shutdownPromise = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const activeTokens = operations.map(([token]) => token).filter((token) => this.active.has(token))
+        const timeout = new Error(
+          `等待插件操作终态超时（${this.shutdownTimeoutMs}ms；仍在运行：${activeTokens.join(', ') || '未知'}）`,
+        )
+        reject(cancelErrors.length > 0
+          ? new AggregateError([...cancelErrors, timeout], '插件操作退出收口失败')
+          : timeout)
+      }, this.shutdownTimeoutMs)
+      void drain.then(
+        () => {
+          clearTimeout(timer)
+          resolve()
+        },
+        (error: unknown) => {
+          clearTimeout(timer)
+          reject(error)
+        },
+      )
+    })
+    return this.shutdownPromise
   }
 
   status(token: string): PluginOpStatus {
@@ -112,7 +247,11 @@ export class PluginOpRunner {
     try {
       process = request.run()
       operation.process = process
-      if (operation.cancelRequested) process.cancel()
+      if (operation.cancelRequested) {
+        void this.requestCancel(token, operation).catch(() => {
+          // execute 仍继续监听 process.done；停止失败不能伪造启动失败终态。
+        })
+      }
     } catch (error) {
       this.finish(token, {
         token,
@@ -124,8 +263,7 @@ export class PluginOpRunner {
     }
 
     let output = ''
-    const command = buildPluginCommand(request.profile, request.action, request.args)
-    this.emitChunk(token, `dsh ${command.join(' ')}\n`)
+    this.emitChunk(token, `${formatPluginCommandForDisplay(request.profile, request.action, request.args)}\n`)
     const onChunk = (chunk: unknown): void => {
       const text = String(chunk)
       output = this.appendCapped(output, text)
@@ -172,6 +310,41 @@ export class PluginOpRunner {
     })
   }
 
+  private requestCancel(token: string, operation: ActiveOperation): Promise<void> {
+    operation.cancelRequested = true
+    if (!operation.process) {
+      this.finish(token, {
+        token,
+        exitCode: null,
+        signal: 'SIGTERM',
+        output: '插件操作已取消（尚未启动）\n',
+      })
+      return Promise.resolve()
+    }
+    if (operation.cancelSucceeded) return Promise.resolve()
+    if (operation.cancelPromise) return operation.cancelPromise
+    let result: void | Promise<void>
+    try {
+      result = operation.process.stop?.() ?? operation.process.cancel()
+    } catch (error) {
+      this.emitChunk(token, `插件操作取消失败：${errorMessage(error)}\n`)
+      return Promise.reject(error)
+    }
+    const pending = Promise.resolve(result)
+      .then(() => {
+        operation.cancelSucceeded = true
+      })
+      .catch((error: unknown) => {
+        this.emitChunk(token, `插件操作取消失败：${errorMessage(error)}\n`)
+        throw error
+      })
+      .finally(() => {
+        if (operation.cancelPromise === pending) operation.cancelPromise = null
+      })
+    operation.cancelPromise = pending
+    return pending
+  }
+
   private emitChunk(token: string, text: string): void {
     try {
       this.options.onChunk(token, text)
@@ -181,13 +354,16 @@ export class PluginOpRunner {
   }
 
   private finish(token: string, done: PluginOpDone): void {
-    if (!this.active.delete(token)) return
+    const operation = this.active.get(token)
+    if (!operation) return
+    this.active.delete(token)
     this.completed.set(token, done)
     while (this.completed.size > this.maxCompleted) {
       const oldest = this.completed.keys().next().value
       if (oldest === undefined) break
       this.completed.delete(oldest)
     }
+    operation.resolveCompletion()
     try {
       this.options.onDone(done)
     } catch {

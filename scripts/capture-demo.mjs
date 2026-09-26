@@ -2,38 +2,59 @@
 // 用法：npm run build && npx electron scripts/capture-demo.mjs [--harness]
 // 产物：assets/demo/*.png（mcp-flow-1..4 / skills / plugins / harness）
 import { app, BrowserWindow, ipcMain } from 'electron'
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createCaptureHome, removeCaptureHome } from './capture-demo-home.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
-const DEMO_HOME = '/tmp/dsh-demo-capture'
 const OUT_DIR = join(root, 'assets', 'demo')
 const RENDERER_HTML = join(root, 'dist', 'renderer', 'index.html')
 // 同 main.ts：Windows 下必须 pathToFileURL（file:// 拼接会产生非法 URL）
 const RENDERER_URL = pathToFileURL(RENDERER_HTML).href
 const WITH_HARNESS = process.argv.includes('--harness')
 
-process.env.DSH_HOME = DEMO_HOME
+let demoHome = null
 
-const { IPC } = await import(join(root, 'dist', 'core', 'ipc.js'))
-const mcp = await import(join(root, 'dist', 'core', 'mcp.js'))
-const { listPlugins } = await import(join(root, 'dist', 'core', 'plugins.js'))
-const { scanSkills } = await import(join(root, 'dist', 'core', 'skills.js'))
-const { startHarness, dshHome, listProfiles } = await import(join(root, 'dist', 'core', 'harness.js'))
-const { fetchMarketItems } = await import(join(root, 'dist', 'core', 'market.js'))
+let IPC
+let mcp
+let listPlugins
+let scanSkills
+let startHarness
+let dshHome
+let listProfiles
+let fetchMarketItems
+
+async function loadDependencies() {
+  const [ipcModule, mcpModule, pluginsModule, skillsModule, harnessModule, marketModule] = await Promise.all([
+    import(join(root, 'dist', 'core', 'ipc.js')),
+    import(join(root, 'dist', 'core', 'mcp.js')),
+    import(join(root, 'dist', 'core', 'plugins.js')),
+    import(join(root, 'dist', 'core', 'skills.js')),
+    import(join(root, 'dist', 'core', 'harness.js')),
+    import(join(root, 'dist', 'core', 'market.js')),
+  ])
+  IPC = ipcModule.IPC
+  mcp = mcpModule
+  listPlugins = pluginsModule.listPlugins
+  scanSkills = skillsModule.scanSkills
+  startHarness = harnessModule.startHarness
+  dshHome = harnessModule.dshHome
+  listProfiles = harnessModule.listProfiles
+  fetchMarketItems = marketModule.fetchMarketItems
+}
 
 const ACTIVE_PROFILE = 'web'
-const PROFILE_DIR = join(dshHome(), 'profiles', ACTIVE_PROFILE)
 
 // ---- 合成演示 home：与真实用户数据完全隔离 ----
 function buildDemoHome() {
-  rmSync(DEMO_HOME, { recursive: true, force: true })
-  mkdirSync(PROFILE_DIR, { recursive: true })
+  if (!demoHome) throw new Error('capture 临时目录尚未初始化')
+  const profileDir = join(dshHome(), 'profiles', ACTIVE_PROFILE)
+  mkdirSync(profileDir, { recursive: true })
 
   writeFileSync(
-    join(PROFILE_DIR, 'package.json'),
+    join(profileDir, 'package.json'),
     JSON.stringify(
       {
         name: 'web',
@@ -56,7 +77,7 @@ function buildDemoHome() {
   )
 
   writeFileSync(
-    join(PROFILE_DIR, 'cordis.patch.yml'),
+    join(profileDir, 'cordis.patch.yml'),
     [
       '- insert:',
       '    - id: mcp-memory',
@@ -242,17 +263,64 @@ async function waitFor(probeJs, timeoutMs) {
   return false
 }
 
-app.whenReady().then(async () => {
-  buildDemoHome()
-  registerIpc()
+function errorDetail(error) {
+  return error instanceof Error ? (error.stack ?? error.message) : String(error)
+}
+
+async function handleCaptureFailure(error) {
+  await finishCapture(error)
+}
+
+let finishPromise = null
+
+function finishCapture(error = null) {
+  if (finishPromise) return finishPromise
+  finishPromise = (async () => {
+    if (error) console.error(`CAPTURE FAIL: ${errorDetail(error)}`)
+    let harnessStopped = true
+    let windowDestroyed = true
+    try {
+      await harness?.stop()
+      harness = null
+    } catch (cleanupError) {
+      harnessStopped = false
+      console.error(`CAPTURE CLEANUP FAIL: Harness 停止失败：${errorDetail(cleanupError)}`)
+    }
+    try {
+      if (win && !win.isDestroyed()) win.destroy()
+      win = null
+    } catch (cleanupError) {
+      windowDestroyed = false
+      console.error(`CAPTURE CLEANUP FAIL: 窗口销毁失败：${errorDetail(cleanupError)}`)
+    }
+    if (demoHome && harnessStopped && windowDestroyed) {
+      try {
+        removeCaptureHome(demoHome)
+        demoHome = null
+      } catch (cleanupError) {
+        console.error(`CAPTURE CLEANUP FAIL: 临时目录清理失败：${errorDetail(cleanupError)}`)
+      }
+    }
+    app.exit(error ? 1 : 0)
+  })()
+  return finishPromise
+}
+
+async function startCapture() {
   try {
+    demoHome = createCaptureHome()
+    process.env.DSH_HOME = demoHome
+    await loadDependencies()
+    buildDemoHome()
+    registerIpc()
     await runCapture()
-  } catch (err) {
-    console.error(`CAPTURE FAIL: ${err?.stack ?? err}`)
-    await harness?.stop().catch(() => {})
-    app.exit(1)
+    await finishCapture()
+  } catch (error) {
+    await finishCapture(error)
   }
-})
+}
+
+void app.whenReady().then(startCapture).catch(handleCaptureFailure)
 
 async function runCapture() {
   win = new BrowserWindow({
@@ -433,11 +501,11 @@ async function runCapture() {
       }
       await shotFull('harness')
     }
-    await harness?.stop()
   }
 
   console.log('capture done')
-  app.exit(0)
 }
 
-app.on('window-all-closed', () => app.quit())
+app.on('window-all-closed', () => {
+  if (!finishPromise) app.quit()
+})

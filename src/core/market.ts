@@ -3,7 +3,8 @@
 // Plugin 不把 npm 搜索当市场：主目录来自 Awesome DSH Plugin，npm 只用于选中后的 manifest 预检。
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { MCP_PLUGIN, type McpRow } from './mcp.js'
+import { MCP_PLUGIN, validateMcpRow, type McpRow } from './mcp.js'
+import { readResponseText } from './response-body.js'
 
 export type MarketKind = 'plugin' | 'mcp' | 'skill'
 export type MarketTrust = 'bundled' | 'official' | 'curated' | 'community' | 'unreviewed'
@@ -244,7 +245,6 @@ export function findMarketItem(kind: MarketKind, id: string): MarketItem | undef
 
 const SKILLSMP_SEARCH_URL = 'https://skillsmp.com/api/v1/skills/search'
 const CLAWHUB_SEARCH_URL = 'https://clawhub.ai/api/v1/search'
-const CLAWHUB_API_URL = 'https://clawhub.ai/api/v1/skills'
 const MCP_REGISTRY_URL = 'https://registry.modelcontextprotocol.io/v0.1/servers'
 const DSH_MCP_CATALOG_URL = 'https://raw.githubusercontent.com/LKMeng2001/dsh-mcp-market/main/data/registry-snapshot.json'
 const DSH_MCP_CATALOG_API_URL = 'https://api.github.com/repos/LKMeng2001/dsh-mcp-market/contents/data/registry-snapshot.json?ref=main'
@@ -294,12 +294,17 @@ async function fetchText(url: string, timeoutMs = MARKET_FETCH_TIMEOUT_MS): Prom
     headers: { Accept: 'text/plain, text/markdown, application/json', 'User-Agent': 'DSH-Desktop-Hub/0.2' },
     signal: AbortSignal.timeout(timeoutMs),
   })
-  if (!response.ok) throw new Error(`市场请求失败（HTTP ${response.status}）`)
-  const length = Number(response.headers.get('content-length') ?? 0)
-  if (length > MARKET_MAX_RESPONSE_BYTES) throw new Error('市场响应超过大小上限')
-  const text = await response.text()
-  if (text.length > MARKET_MAX_RESPONSE_BYTES) throw new Error('市场响应超过大小上限')
-  return text
+  if (!response.ok) {
+    // 不读取错误页，但也不能把连接留给轮询/镜像请求；cancel 的同步异常与异步
+    // rejection 都只是清理失败，不得覆盖更有用的 HTTP 状态诊断。
+    try {
+      void response.body?.cancel().catch(() => {})
+    } catch {
+      /* preserve HTTP status error */
+    }
+    throw new Error(`市场请求失败（HTTP ${response.status}）`)
+  }
+  return readResponseText(response, MARKET_MAX_RESPONSE_BYTES, '市场响应超过大小上限')
 }
 
 async function fetchJson(url: string, timeoutMs = MARKET_FETCH_TIMEOUT_MS): Promise<unknown> {
@@ -625,10 +630,16 @@ async function fetchDshMcpSnapshot(): Promise<JsonRecord> {
   throw new Error('DSH MCP Market snapshot 不可用')
 }
 
-async function fetchDshMcpCatalog(query: string): Promise<MarketItem[]> {
+interface RemoteCatalogResult {
+  items: MarketItem[]
+  warning?: string
+}
+
+async function fetchDshMcpCatalog(query: string): Promise<RemoteCatalogResult> {
   const payload = await fetchDshMcpSnapshot()
   const updated = stringValue(payload.updated) ?? 'snapshot'
   const rows: McpMarketItem[] = []
+  const skippedRemoteAuth: string[] = []
   for (const raw of arrayValue(payload?.servers)) {
     const server = record(raw)
     const name = stringValue(server?.name)
@@ -646,9 +657,17 @@ async function fetchDshMcpCatalog(query: string): Promise<MarketItem[]> {
     } else {
       const url = stringValue(server?.url)
       if (!url || !/^https?:\/\//i.test(url)) continue
+      // dsh-mcp-client 的 HTTP schema 只支持 headers，不支持 env。envHint 没有携带
+      // header 名，不能猜测认证协议；跳过该条目并显式告警，避免生成必然无效的配置。
+      if (requiredEnv.length > 0) {
+        skippedRemoteAuth.push(name)
+        continue
+      }
       config.url = url
     }
-    if (requiredEnv.length > 0) config.env = Object.fromEntries(requiredEnv.map((env) => [env, `\${${env}}`]))
+    if (transport === 'stdio' && requiredEnv.length > 0) {
+      config.env = Object.fromEntries(requiredEnv.map((env) => [env, `\${${env}}`]))
+    }
     const descriptionValue = record(server?.description)
     const description = stringValue(descriptionValue?.zh) ?? stringValue(descriptionValue?.en) ?? '来自 DSH MCP Market 的精选 MCP 服务器。'
     const homepage = stringValue(server?.homepage)
@@ -672,10 +691,15 @@ async function fetchDshMcpCatalog(query: string): Promise<MarketItem[]> {
       row: { id: `mcp-dsh-catalog-${hashText(name)}`, name: MCP_PLUGIN, config },
     })
   }
-  return rows.filter((item) => matchesQuery(item, query))
+  return {
+    items: rows.filter((item) => matchesQuery(item, query)),
+    warning: skippedRemoteAuth.length > 0
+      ? `DSH MCP Market 跳过 ${skippedRemoteAuth.length} 个无法安全映射 envHint 到 HTTP headers 的远程条目：${skippedRemoteAuth.join('、')}`
+      : undefined,
+  }
 }
 
-async function fetchOfficialMcpRegistry(query: string): Promise<MarketItem[]> {
+async function fetchOfficialMcpRegistry(query: string): Promise<RemoteCatalogResult> {
   const latest = new Map<string, JsonRecord>()
   let cursor = ''
   const seenCursors = new Set<string>()
@@ -704,12 +728,7 @@ async function fetchOfficialMcpRegistry(query: string): Promise<MarketItem[]> {
     seenCursors.add(next)
     cursor = next
   }
-  return [...latest.values()].map(registryServerToMcp).filter((item): item is McpMarketItem => item !== null)
-}
-
-interface RemoteCatalogResult {
-  items: MarketItem[]
-  warning?: string
+  return { items: [...latest.values()].map(registryServerToMcp).filter((item): item is McpMarketItem => item !== null) }
 }
 
 async function fetchMcpCatalog(query: string): Promise<RemoteCatalogResult> {
@@ -717,7 +736,10 @@ async function fetchMcpCatalog(query: string): Promise<RemoteCatalogResult> {
   const items: MarketItem[] = []
   const errors: string[] = []
   for (const result of results) {
-    if (result.status === 'fulfilled') items.push(...result.value)
+    if (result.status === 'fulfilled') {
+      items.push(...result.value.items)
+      if (result.value.warning) errors.push(result.value.warning)
+    }
     else errors.push(result.reason instanceof Error ? result.reason.message : String(result.reason))
   }
   if (items.length === 0 && errors.length > 0) throw new Error(errors.join('；'))
@@ -825,7 +847,7 @@ function isMarketItem(value: unknown): value is MarketItem {
   if (item.kind === 'plugin') return typeof item.spec === 'string' && typeof item.packageName === 'string'
   if (item.kind === 'mcp') {
     const row = record(item.row)
-    return !!row && typeof row.id === 'string' && typeof row.name === 'string' && !!record(row.config) && isStringArray(item.requiredEnv)
+    return !!row && row.name === MCP_PLUGIN && isStringArray(item.requiredEnv) && validateMcpRow(row).ok
   }
   if (item.kind === 'skill') {
     const install = record(item.install)

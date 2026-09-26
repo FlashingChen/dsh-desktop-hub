@@ -3,11 +3,9 @@
 import { app, type BrowserWindow } from 'electron'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import type { HarnessHandle } from '../core/harness.js'
 import { IPC } from '../core/ipc.js'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
 const APP_TITLE = 'DSH Desktop Hub'
 
 export interface SmokeContext {
@@ -26,6 +24,15 @@ function finishSmoke(code: number): void {
   smokeFinished = true
   process.exitCode = code
   app.quit()
+}
+
+/** Run an event-triggered smoke flow without letting a rejected promise hang CI. */
+function runSmokeTask(label: string, task: () => Promise<void>): void {
+  void task().catch((error: unknown) => {
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+    console.error(`SMOKE FAIL: ${label} 异步执行失败：${detail}`)
+    finishSmoke(1)
+  })
 }
 
 interface DomSnapshot {
@@ -101,7 +108,7 @@ async function assertDomAndScreenshot(
 }
 
 /** 等待谓词为真（带超时） */
-async function waitFor(win: BrowserWindow, probe: () => Promise<boolean>, timeoutMs: number): Promise<boolean> {
+async function waitFor(probe: () => Promise<boolean>, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (await probe()) return true
@@ -133,20 +140,11 @@ export function wireSmoke(ctx: SmokeContext): void {
     finishSmoke(1)
     return
   }
-  win.webContents.on('did-fail-load', (_e, code, desc, _url, isMainFrame) => {
-    // 子帧（harness iframe）失败/中止（-3）在重启旧进程时是正常现象，容忍，由后续状态断言把关
-    if (isMainFrame) {
-      console.error(`SMOKE FAIL: main frame load failed (${code} ${desc})`)
-      finishSmoke(1)
-    }
-  })
-
   if (!ctx.harnessSmoke) {
-    // ---- 骨架冒烟：五 Tab + 数据面板加载（不依赖特定 profile 数据）----
+    // ---- 骨架冒烟：六 Tab + 数据面板加载（不依赖特定 profile 数据）----
     onShellDidFinishLoad(win, () => {
-      void (async () => {
+      runSmokeTask('骨架冒烟', async () => {
         const ready = await waitFor(
-          win,
           async () => {
             const dom = await snapshot(win)
             return (
@@ -174,7 +172,6 @@ export function wireSmoke(ctx: SmokeContext): void {
           document.getElementById('mcp-convert').click()
         })()`)
         const converted = await waitFor(
-          win,
           async () => (await win.webContents.executeJavaScript(`document.getElementById('mcp-preview').textContent.length > 0`)) as boolean,
           5000,
         )
@@ -221,7 +218,7 @@ export function wireSmoke(ctx: SmokeContext): void {
         }
         console.log(`SMOKE OK: MCP convert 端到端通过（${JSON.stringify(mcp.servers)}）`)
         finishSmoke(0)
-      })()
+      })
     })
     return
   }
@@ -235,9 +232,8 @@ export function wireSmoke(ctx: SmokeContext): void {
     }
   })
   onShellDidFinishLoad(win, () => {
-    void (async () => {
+    runSmokeTask('Harness 冒烟', async () => {
       const mounted = await waitFor(
-        win,
         async () => {
           const src = (await win.webContents.executeJavaScript(`document.getElementById('harness-frame').src`)) as string
           return src.startsWith('http://127.0.0.1:')
@@ -265,7 +261,6 @@ export function wireSmoke(ctx: SmokeContext): void {
       }
       // 状态条（renderer 经 harness:status / frame-loaded 更新）
       const connected = await waitFor(
-        win,
         async () => {
           const status = (await win.webContents.executeJavaScript(`document.getElementById('harness-status').textContent`)) as string
           return status.includes('已连接') || harnessFrameLoaded
@@ -285,7 +280,6 @@ export function wireSmoke(ctx: SmokeContext): void {
       const oldSrc = src
       await win.webContents.executeJavaScript(`document.getElementById('harness-restart').click()`)
       const remounted = await waitFor(
-        win,
         async () => {
           const current = (await win.webContents.executeJavaScript(`document.getElementById('harness-frame').src`)) as string
           return current !== oldSrc && current.startsWith('http://127.0.0.1:')
@@ -299,7 +293,6 @@ export function wireSmoke(ctx: SmokeContext): void {
       }
       const newSrc = (await win.webContents.executeJavaScript(`document.getElementById('harness-frame').src`)) as string
       const reconnected = await waitFor(
-        win,
         async () => {
           const status = (await win.webContents.executeJavaScript(`document.getElementById('harness-status').textContent`)) as string
           return status.includes('已连接')
@@ -313,7 +306,7 @@ export function wireSmoke(ctx: SmokeContext): void {
       }
       console.log(`SMOKE OK: harness 重启后 iframe 重挂载（${oldSrc} → ${newSrc}，状态已连接）`)
       finishSmoke(0)
-    })()
+    })
   })
 }
 

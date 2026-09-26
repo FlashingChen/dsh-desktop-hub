@@ -4,17 +4,16 @@
 // resources/dsh-runtime/package.json + package-lock.json 提交进仓库，安装走 npm ci。
 // 注意：本文件必须保持纯 JS（node 直接执行，不得含 TS 类型标注）。
 import { execFileSync } from 'node:child_process'
-import { createWriteStream, existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, realpathSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { join, dirname, basename, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
-import { pipeline } from 'node:stream/promises'
-import { Readable } from 'node:stream'
 import AdmZip from 'adm-zip'
+import { downloadVerifiedArtifact, fetchBoundedText } from './bounded-download.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const NODE_VER = 'v24.10.0'
-const DSH_VERSION = '0.1.0-rc.6'
+const DSH_VERSION = '0.1.7-rc.2'
 const PNPM_VERSION = '11.22.0'
 // 交叉捆绑：RUNTIME_TARGET=win32 时在非 Windows 机器上为 win32/x64 组装运行时
 // （下载 win-x64.zip + npm --os/--cpu 按目标平台解析 optionalDependencies）。
@@ -29,6 +28,10 @@ const PLAT = (TARGET ?? process.platform) === 'darwin' ? 'darwin' : IS_WIN ? 'wi
 const TARBALL = `node-${NODE_VER}-${PLAT}-${ARCH}.${IS_WIN ? 'zip' : 'tar.gz'}`
 const URL = `https://nodejs.org/dist/${NODE_VER}/${TARBALL}`
 const SHASUMS_URL = `https://nodejs.org/dist/${NODE_VER}/SHASUMS256.txt`
+const SHASUMS_MAX_BYTES = 256 * 1024
+const SHASUMS_TIMEOUT_MS = 30_000
+const NODE_ARCHIVE_MAX_BYTES = (IS_WIN ? 96 : 128) * 1024 * 1024
+const NODE_ARCHIVE_TIMEOUT_MS = 5 * 60_000
 
 const runtimeDir = join(root, 'resources', 'rt')
 const nodeDir = join(root, 'resources', 'nd')
@@ -37,16 +40,29 @@ mkdirSync(nodeDir, { recursive: true })
 
 // 1) 下载并校验 Node 官方 SHA-256（P2-13：供应链校验；已存在的 tarball 也强制复核）
 const tarPath = join(nodeDir, TARBALL)
+async function sha256File(file) {
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(file)) hash.update(chunk)
+  return hash.digest('hex')
+}
+
 async function verifyNodeSha256(file) {
-  const sums = await fetch(SHASUMS_URL)
-  if (!sums.ok) throw new Error(`SHASUMS 下载失败: ${sums.status}`)
-  const sumsText = await sums.text()
+  const size = statSync(file).size
+  if (size > NODE_ARCHIVE_MAX_BYTES) {
+    throw new Error(`Node tarball 超过大小上限 ${NODE_ARCHIVE_MAX_BYTES} bytes（实际 ${size}）`)
+  }
+  const sumsText = await fetchBoundedText(SHASUMS_URL, {
+    maxBytes: SHASUMS_MAX_BYTES,
+    timeoutMs: SHASUMS_TIMEOUT_MS,
+    label: 'SHASUMS',
+    statusError: (response) => new Error(`SHASUMS 下载失败: ${response.status}`),
+  })
   const expected = sumsText
     .split('\n')
     .find((line) => line.trim().endsWith(`  ${TARBALL}`) || line.trim().endsWith(` *${TARBALL}`))
     ?.split(/\s+/)[0]
   if (!expected) throw new Error(`SHASUMS256.txt 中找不到 ${TARBALL}`)
-  const actual = createHash('sha256').update(readFileSync(file)).digest('hex')
+  const actual = await sha256File(file)
   if (actual !== expected.toLowerCase()) {
     throw new Error(`Node tarball SHA-256 校验失败：期望 ${expected}，实际 ${actual}`)
   }
@@ -54,21 +70,22 @@ async function verifyNodeSha256(file) {
 }
 if (!existsSync(tarPath)) {
   console.log(`[bundle] 下载 Node ${NODE_VER} (${PLAT}-${ARCH})…`)
-  const res = await fetch(URL)
-  if (!res.ok || !res.body) throw new Error(`下载失败: ${res.status}`)
-  const tmpTar = `${tarPath}.part`
-  await pipeline(Readable.fromWeb(res.body), createWriteStream(tmpTar))
-  await verifyNodeSha256(tmpTar)
-  rmSync(tarPath, { force: true })
-  const { renameSync } = await import('node:fs')
-  renameSync(tmpTar, tarPath)
+  await downloadVerifiedArtifact({
+    url: URL,
+    destination: tarPath,
+    maxBytes: NODE_ARCHIVE_MAX_BYTES,
+    timeoutMs: NODE_ARCHIVE_TIMEOUT_MS,
+    label: 'Node tarball',
+    statusError: (response) => new Error(`下载失败: ${response.status}`),
+    verify: verifyNodeSha256,
+  })
 } else {
   console.log('[bundle] Node tarball 已存在，复核官方 SHASUM…')
   await verifyNodeSha256(tarPath)
 }
 
 console.log('[bundle] 解压 Node…')
-// 清空旧的解压产物但保留 zip 缓存（tarPath 在 nodeDir 内，避免重复下载）
+// 清空旧的解压产物但保留当前平台压缩缓存（zip / tar.gz）；builder 会排除缓存，只打包解压运行时。
 for (const f of readdirSync(nodeDir)) {
   if (f === basename(tarPath)) continue
   rmSync(join(nodeDir, f), { recursive: true, force: true })
@@ -155,7 +172,7 @@ if (TARGET) {
 const manifest = {
   nodeVersion: NODE_VER,
   nodeTarball: TARBALL,
-  nodeSha256: createHash('sha256').update(readFileSync(tarPath)).digest('hex'),
+  nodeSha256: await sha256File(tarPath),
   dshVersion: DSH_VERSION,
   pnpmVersion: PNPM_VERSION,
   platform: TARGET ?? process.platform, // darwin | win32 | linux

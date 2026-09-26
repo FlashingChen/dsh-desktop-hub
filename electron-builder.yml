@@ -7,7 +7,9 @@ files:
   - dist/**/*
   - package.json
   - resources/**/*
-  - '!resources/node/*.zip'
+  # Node 官方压缩包只作下载校验/复用缓存；应用仅携带 nd/ 下的解压运行时。
+  - '!resources/nd/*.zip'
+  - '!resources/nd/*.tar.gz'
   - '!**/*.map'
 # asar: false —— 去掉 app.asar.unpacked 层（-29 字符），NSIS 安装路径深度彻底低于 260 上限
 asar: false

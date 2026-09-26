@@ -3,14 +3,42 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  symlinkSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { crc32 } from 'node:zlib'
 import AdmZip from 'adm-zip'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const mod = await import(pathToFileURL(join(root, 'dist', 'core', 'skills.js')).href)
-const { scanSkills, parseSkillFile, renderSkillFile, createSkill, setInvocation, importSkillFromZip, parseGitHubSkillUrl, importSkillFromClawHub } = mod
+const {
+  scanSkills,
+  scanSkillsDetailed,
+  resolveSkillIdentity,
+  parseSkillFile,
+  renderSkillFile,
+  createSkill,
+  setInvocation,
+  importSkillFromZip,
+  parseGitHubSkillUrl,
+  importSkillFromGitHub,
+  importSkillFromClawHub,
+  writeSkillFileAtomically,
+  installExtracted,
+  MAX_SKILL_FILE_BYTES,
+  MAX_SCAN_SKILL_FILE_BYTES,
+} = mod
 
 /**
  * 构建原始 ZIP（store 方法，不做任何路径规整）。
@@ -114,6 +142,173 @@ test('scanSkills 按 rank 合并并标记 shadowed', () => {
   }
 })
 
+test('同 root 同名 bundle/flat 使用不同 opaque id，按 id 切换只修改目标', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-identity-'))
+  const dshHome = join(dir, 'home')
+  const agentsHome = join(dir, 'agents')
+  const rootDir = join(dshHome, 'skills')
+  const bundle = join(rootDir, 'foo', 'SKILL.md')
+  const flat = join(rootDir, 'foo.md')
+  try {
+    mkdirSync(dirname(bundle), { recursive: true })
+    writeFileSync(bundle, '---\nname: foo\ndescription: bundle\n---\nbundle body\n')
+    writeFileSync(flat, '---\nname: foo\ndescription: flat\n---\nflat body\n')
+    const options = { dshHome, agentsHome }
+    const foo = scanSkillsDetailed(options).skills.filter((skill) => skill.name === 'foo')
+    assert.equal(foo.length, 2)
+    const bundleSkill = foo.find((skill) => skill.kind === 'bundle')
+    const flatSkill = foo.find((skill) => skill.kind === 'flat')
+    assert.ok(bundleSkill?.id.startsWith('skill-v1.'))
+    assert.ok(flatSkill?.id.startsWith('skill-v1.'))
+    assert.notEqual(bundleSkill.id, flatSkill.id)
+    assert.equal(bundleSkill.shadowed, false, 'Hub 同 root 冲突展示规则固定 bundle 优先')
+    assert.equal(flatSkill.shadowed, true)
+    assert.equal(bundleSkill.canToggle, true)
+    assert.equal(flatSkill.canToggle, true, 'shadowed 用户项仍可预配置 fallback')
+
+    const resolvedBundle = resolveSkillIdentity(options, {
+      id: bundleSkill.id,
+      source: bundleSkill.source,
+      kind: bundleSkill.kind,
+    })
+    setInvocation(resolvedBundle.path, 'model', false)
+    assert.match(readFileSync(bundle, 'utf8'), /disable-model-invocation: true/)
+    assert.doesNotMatch(readFileSync(flat, 'utf8'), /disable-model-invocation/)
+
+    const resolvedFlat = resolveSkillIdentity(options, {
+      id: flatSkill.id,
+      source: flatSkill.source,
+      kind: flatSkill.kind,
+    })
+    setInvocation(resolvedFlat.path, 'user', false)
+    assert.match(readFileSync(flat, 'utf8'), /user-invocable: false/)
+    assert.doesNotMatch(readFileSync(bundle, 'utf8'), /user-invocable/)
+
+    assert.throws(
+      () => resolveSkillIdentity(options, { id: bundleSkill.id, source: bundleSkill.source, kind: 'flat' }),
+      /count=0/,
+    )
+    const rescanned = scanSkillsDetailed(options).skills.filter((skill) => skill.name === 'foo')
+    assert.deepEqual(rescanned.map((skill) => skill.id), foo.map((skill) => skill.id), '内容切换不得改变 opaque id')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('多个 custom root 的同 source/kind/name 仍有稳定唯一 id 且保持只读', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-root-slot-'))
+  try {
+    const roots = [join(dir, 'custom-a'), join(dir, 'custom-b')]
+    for (const [index, rootDir] of roots.entries()) {
+      mkdirSync(join(rootDir, 'same'), { recursive: true })
+      writeFileSync(join(rootDir, 'same', 'SKILL.md'), `---\nname: same\ndescription: custom ${index}\n---\nb\n`)
+    }
+    const first = scanSkillsDetailed({ dshHome: join(dir, 'home'), agentsHome: join(dir, 'agents'), customDirs: roots }).skills
+      .filter((skill) => skill.name === 'same')
+    const second = scanSkillsDetailed({ dshHome: join(dir, 'home'), agentsHome: join(dir, 'agents'), customDirs: roots }).skills
+      .filter((skill) => skill.name === 'same')
+    assert.equal(first.length, 2)
+    assert.equal(new Set(first.map((skill) => skill.id)).size, 2)
+    assert.deepEqual(first.map((skill) => skill.id), second.map((skill) => skill.id))
+    assert.ok(first.every((skill) => skill.canToggle === false))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('扫描对单文件、root 总字节与条目数设限，单条失败不拖垮正常 skill', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-scan-limits-'))
+  try {
+    const oversizeRoot = join(dir, 'oversize')
+    mkdirSync(oversizeRoot, { recursive: true })
+    writeFileSync(join(oversizeRoot, 'huge.md'), 'x'.repeat(129))
+    chmodSync(join(oversizeRoot, 'huge.md'), 0o000)
+    writeFileSync(join(oversizeRoot, 'normal.md'), '---\nname: normal\ndescription: ok\n---\nb\n')
+    const oversize = scanSkillsDetailed({
+      dshHome: join(dir, 'home'),
+      agentsHome: join(dir, 'agents'),
+      customDirs: [oversizeRoot],
+      limits: { maxFileBytes: 128 },
+    })
+    assert.deepEqual(oversize.skills.map((skill) => skill.name), ['normal'])
+    assert.ok(oversize.warnings.some((warning) => /huge\.md.*超过扫描上限 128/.test(warning)), '超限必须在尝试读取前按 metadata 拒绝')
+
+    const totalRoot = join(dir, 'total')
+    mkdirSync(totalRoot, { recursive: true })
+    const alpha = '---\nname: alpha\ndescription: first\n---\naaaaa\n'
+    const beta = '---\nname: beta\ndescription: second\n---\nbbbbb\n'
+    writeFileSync(join(totalRoot, 'alpha.md'), alpha)
+    writeFileSync(join(totalRoot, 'beta.md'), beta)
+    const total = scanSkillsDetailed({
+      dshHome: join(dir, 'home'),
+      agentsHome: join(dir, 'agents'),
+      customDirs: [totalRoot],
+      limits: { maxFileBytes: 1_024, maxTotalBytesPerRoot: Buffer.byteLength(alpha) + 1 },
+    })
+    assert.deepEqual(total.skills.map((skill) => skill.name), ['alpha'])
+    assert.ok(total.warnings.some((warning) => /beta\.md.*总读取字节/.test(warning)))
+
+    const entryRoot = join(dir, 'entries')
+    mkdirSync(entryRoot, { recursive: true })
+    for (const name of ['a', 'b', 'c', 'd']) writeFileSync(join(entryRoot, `${name}.md`), `---\nname: ${name}\ndescription: d\n---\nb\n`)
+    const entries = scanSkillsDetailed({
+      dshHome: join(dir, 'home'),
+      agentsHome: join(dir, 'agents'),
+      customDirs: [entryRoot],
+      limits: { maxEntriesPerRoot: 2 },
+    })
+    assert.equal(entries.skills.length, 2)
+    assert.ok(entries.warnings.some((warning) => /条目超过上限 2/.test(warning)))
+    assert.equal(MAX_SCAN_SKILL_FILE_BYTES < MAX_SKILL_FILE_BYTES, true, 'UI 同步扫描上限应严于写入上限')
+  } finally {
+    if (existsSync(join(dir, 'oversize', 'huge.md'))) chmodSync(join(dir, 'oversize', 'huge.md'), 0o600)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('扫描拒绝 root 外 symlink，内部 symlink 只读，并收敛目录/文件竞态', { skip: process.platform === 'win32' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-symlink-'))
+  try {
+    const rootDir = join(dir, 'skills')
+    const outside = join(dir, 'outside-secret.md')
+    mkdirSync(rootDir, { recursive: true })
+    writeFileSync(outside, '---\nname: leak\ndescription: TOP-SECRET-CONTENT\n---\nsecret\n')
+    symlinkSync(outside, join(rootDir, 'leak.md'))
+    writeFileSync(join(rootDir, 'real.md'), '---\nname: real\ndescription: inside\n---\nb\n')
+    symlinkSync(join(rootDir, 'real.md'), join(rootDir, 'alias.md'))
+    mkdirSync(join(rootDir, 'racy', 'SKILL.md'), { recursive: true })
+    writeFileSync(join(rootDir, 'valid.md'), '---\nname: valid\ndescription: survives\n---\nb\n')
+
+    const scanned = scanSkillsDetailed({ dshHome: dir, agentsHome: join(dir, 'agents') })
+    assert.ok(!scanned.skills.some((skill) => skill.name === 'leak'))
+    assert.ok(!scanned.warnings.join('\n').includes('TOP-SECRET-CONTENT'), '域外内容不得进入结果或 warning')
+    assert.ok(scanned.warnings.some((warning) => /leak\.md.*路径越过扫描根/.test(warning)))
+    assert.equal(scanned.skills.find((skill) => skill.name === 'alias')?.canToggle, false, 'symlink 即使域内也不得通过 toggle 原子替换')
+    assert.ok(scanned.skills.some((skill) => skill.name === 'valid'), '单条目录/文件竞态不得拖垮其他项')
+    assert.ok(scanned.warnings.some((warning) => /racy.*不是普通文件/.test(warning)))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('单个不可读 SKILL.md 只产生 warning，其他项仍可展示', { skip: process.platform === 'win32' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-unreadable-'))
+  const rootDir = join(dir, 'skills')
+  const unreadable = join(rootDir, 'blocked.md')
+  try {
+    mkdirSync(rootDir, { recursive: true })
+    writeFileSync(unreadable, '---\nname: blocked\ndescription: blocked\n---\nb\n')
+    chmodSync(unreadable, 0o000)
+    writeFileSync(join(rootDir, 'healthy.md'), '---\nname: healthy\ndescription: ok\n---\nb\n')
+    const scanned = scanSkillsDetailed({ dshHome: dir, agentsHome: join(dir, 'agents') })
+    assert.deepEqual(scanned.skills.map((skill) => skill.name), ['healthy'])
+    assert.ok(scanned.warnings.some((warning) => /blocked\.md.*扫描失败/.test(warning)))
+  } finally {
+    if (existsSync(unreadable)) chmodSync(unreadable, 0o600)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('parseSkillFile / renderSkillFile 往返一致', () => {
   const text = renderSkillFile({ name: 'my-skill', description: '描述', modelInvocable: false, userInvocable: true, body: '正文' })
   const { meta, body } = parseSkillFile(text)
@@ -130,7 +325,41 @@ test('createSkill 校验 kebab-case 并落盘', () => {
     const text = readFileSync(file, 'utf8')
     assert.ok(text.startsWith('---\n'))
     assert.ok(text.includes('name: hello-world'))
+    assert.throws(
+      () => createSkill({ root: join(dir, 'skills'), name: 'hello-world', description: '覆盖', body: '覆盖' }),
+      /已存在/,
+    )
+    assert.equal(readFileSync(file, 'utf8'), text, '排他创建失败不得改写已存在文件')
+    chmodSync(file, 0o640)
+    createSkill({
+      root: join(dir, 'skills'),
+      name: 'hello-world',
+      description: '覆盖版本',
+      body: '新内容',
+      overwrite: true,
+    })
+    assert.ok(readFileSync(file, 'utf8').includes('覆盖版本'))
+    assert.equal(statSync(file).mode & 0o777, 0o640, 'overwrite 原子替换必须保留 mode')
     assert.throws(() => createSkill({ root: join(dir, 'skills'), name: 'Hello World!', description: '', body: '' }), /kebab-case/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('createSkill 最终 SKILL.md 超过 10MiB 时在创建目录前拒绝', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    const skillRoot = join(dir, 'skills')
+    assert.throws(
+      () => createSkill({
+        root: skillRoot,
+        name: 'too-large',
+        description: 'd',
+        body: 'a'.repeat(MAX_SKILL_FILE_BYTES),
+      }),
+      /SKILL\.md 超过 .* 字节上限/,
+    )
+    assert.equal(existsSync(join(skillRoot, 'too-large')), false, '输入校验失败不得留下空目录')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -156,6 +385,128 @@ test('setInvocation 切换 model/user 可见性', () => {
   }
 })
 
+test('setInvocation 修复非法字符串 name，非法 fallback 则拒绝且保留原文件', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    const fixed = join(dir, 'skills', 'canonical-name', 'SKILL.md')
+    mkdirSync(dirname(fixed), { recursive: true })
+    writeFileSync(fixed, '---\nname: Bad Name\ndescription: d\nlicense: MIT\n---\n正文\n')
+    chmodSync(fixed, 0o640)
+
+    setInvocation(fixed, 'user', false)
+
+    const fixedText = readFileSync(fixed, 'utf8')
+    assert.equal(parseSkillFile(fixedText).meta.name, 'canonical-name')
+    assert.ok(fixedText.includes('license: MIT'))
+    assert.ok(fixedText.endsWith('正文\n'))
+    assert.equal(statSync(fixed).mode & 0o777, 0o640, '原子替换必须保留原文件 mode')
+
+    const rejected = join(dir, 'skills', 'Bad Directory', 'SKILL.md')
+    mkdirSync(dirname(rejected), { recursive: true })
+    const original = '---\nname: Also Bad\ndescription: d\n---\n正文\n'
+    writeFileSync(rejected, original)
+    assert.throws(() => setInvocation(rejected, 'model', false), /合法的 kebab-case/)
+    assert.equal(readFileSync(rejected, 'utf8'), original)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('原子覆盖模拟 Windows 冲突并在替换失败时恢复原文件', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    const file = join(dir, 'SKILL.md')
+    writeFileSync(file, 'old')
+    let renameCalls = 0
+    const injectedRename = (from, to) => {
+      renameCalls += 1
+      if (renameCalls === 1) throw Object.assign(new Error('windows replace conflict'), { code: 'EPERM' })
+      if (renameCalls === 3) throw Object.assign(new Error('injected replacement failure'), { code: 'EIO' })
+      renameSync(from, to)
+    }
+
+    assert.throws(
+      () => writeSkillFileAtomically(file, 'new', { rename: injectedRename }),
+      /injected replacement failure/,
+    )
+    assert.equal(readFileSync(file, 'utf8'), 'old', '替换失败必须恢复原内容')
+    assert.deepEqual(readdirSync(dir), ['SKILL.md'], '临时与备份文件必须收敛')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('原子覆盖的清理错误不会掩盖原始替换错误', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    const file = join(dir, 'SKILL.md')
+    writeFileSync(file, 'old')
+    let renameCalls = 0
+    const injectedRename = (from, to) => {
+      renameCalls += 1
+      if (renameCalls === 1) throw Object.assign(new Error('replace conflict'), { code: 'EPERM' })
+      if (renameCalls === 3) throw Object.assign(new Error('primary replacement failure'), { code: 'EIO' })
+      renameSync(from, to)
+    }
+    const injectedRemove = () => {
+      throw new Error('cleanup failure')
+    }
+
+    assert.throws(
+      () => writeSkillFileAtomically(file, 'new', { rename: injectedRename, remove: injectedRemove }),
+      (error) => {
+        assert.ok(error instanceof AggregateError)
+        assert.match(String(error.errors[0]), /primary replacement failure/)
+        assert.match(String(error.errors[1]), /cleanup failure/)
+        return true
+      },
+    )
+    assert.equal(readFileSync(file, 'utf8'), 'old')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('文件与目录提交成功后的 recovery 清理失败不假报操作失败', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    const file = join(dir, 'SKILL.md')
+    writeFileSync(file, 'old')
+    let fileRenameCalls = 0
+    const windowsRename = (from, to) => {
+      fileRenameCalls += 1
+      if (fileRenameCalls === 1) throw Object.assign(new Error('windows replace conflict'), { code: 'EPERM' })
+      renameSync(from, to)
+    }
+    const failRecoveryCleanup = (path, options) => {
+      if (String(path).includes('.old-')) throw new Error('recovery cleanup failure')
+      rmSync(path, options)
+    }
+
+    assert.doesNotThrow(() => writeSkillFileAtomically(file, 'new', {
+      rename: windowsRename,
+      remove: failRecoveryCleanup,
+    }))
+    assert.equal(readFileSync(file, 'utf8'), 'new')
+
+    const target = join(dir, 'installed-skill')
+    const extracted = join(dir, 'extracted-skill')
+    mkdirSync(target)
+    mkdirSync(extracted)
+    writeFileSync(join(target, 'SKILL.md'), 'old directory')
+    writeFileSync(join(extracted, 'SKILL.md'), 'new directory')
+
+    assert.doesNotThrow(() => installExtracted(extracted, target, true, { remove: failRecoveryCleanup }))
+    assert.equal(readFileSync(join(target, 'SKILL.md'), 'utf8'), 'new directory')
+    assert.ok(
+      readdirSync(dir).filter((entry) => entry.includes('.old-')).length >= 2,
+      '清理失败时可保留隐藏 recovery artifact',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('importSkillFromZip 从 .skill/.zip 导入 bundle 并保留资源文件', () => {
   const dir = mkdtempSync(join(tmpdir(), 'skills-'))
   try {
@@ -172,6 +523,78 @@ test('importSkillFromZip 从 .skill/.zip 导入 bundle 并保留资源文件', (
     assert.ok(existsSync(join(dir, 'skills', 'my-skill', 'references', 'ref.md')), '资源文件应一并安装')
     assert.ok(existsSync(join(dir, 'skills', 'my-skill', 'scripts', 'run.sh')))
     assert.throws(() => importSkillFromZip(buf, { root: join(dir, 'skills') }), /已存在/, '默认拒绝覆盖')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('zip 导入把缺失或非法 name 规范化为最终安装名并保留其他内容', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    for (const [nameValue, expected] of [['Bad Name', 'canonical-zip'], [null, 'missing-name']]) {
+      const zip = new AdmZip()
+      const nameLine = nameValue === null ? '' : `name: ${nameValue}\n`
+      zip.addFile(
+        `${expected}/SKILL.md`,
+        Buffer.from(`---\n${nameLine}description: d\nlicense: MIT\n---\n正文-${expected}\n`),
+      )
+      const result = importSkillFromZip(zip.toBuffer(), { root: join(dir, 'skills') })
+      const installed = readFileSync(result.file, 'utf8')
+      assert.equal(result.name, expected)
+      assert.equal(parseSkillFile(installed).meta.name, expected)
+      assert.ok(installed.includes('license: MIT'))
+      assert.ok(installed.includes(`正文-${expected}`))
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('zip 导入拒绝缺少或 malformed frontmatter，不因合法目录名而放行', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    for (const contents of ['没有 frontmatter\n', '---\nname: [broken\n---\n正文\n']) {
+      const zip = new AdmZip()
+      zip.addFile('valid-directory/SKILL.md', Buffer.from(contents))
+      assert.throws(() => importSkillFromZip(zip.toBuffer(), { root: join(dir, 'skills') }), /SKILL\.md 无效/)
+    }
+    assert.ok(!existsSync(join(dir, 'skills', 'valid-directory')))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('importSkillFromZip 导入根级 SKILL.md 及同级资源', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    const zip = new AdmZip()
+    zip.addFile('SKILL.md', Buffer.from('---\nname: root-skill\ndescription: 根级导入\n---\n正文\n'))
+    zip.addFile('references/ref.md', Buffer.from('参考资料'))
+    zip.addFile('scripts/run.sh', Buffer.from('#!/bin/sh\necho hi'))
+
+    const res = importSkillFromZip(zip.toBuffer(), { root: join(dir, 'skills') })
+
+    assert.equal(res.name, 'root-skill')
+    assert.ok(existsSync(join(dir, 'skills', 'root-skill', 'SKILL.md')))
+    assert.equal(readFileSync(join(dir, 'skills', 'root-skill', 'references', 'ref.md'), 'utf8'), '参考资料')
+    assert.ok(existsSync(join(dir, 'skills', 'root-skill', 'scripts', 'run.sh')))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('importSkillFromZip 拒绝没有合法 frontmatter name 的根级包', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  try {
+    const zip = new AdmZip()
+    zip.addFile('SKILL.md', Buffer.from('---\ndescription: 缺少名称\n---\n正文\n'))
+    zip.addFile('references/ref.md', Buffer.from('参考资料'))
+
+    assert.throws(
+      () => importSkillFromZip(zip.toBuffer(), { root: join(dir, 'skills') }),
+      /根目录 SKILL\.md.*frontmatter.*kebab-case name/,
+    )
+    assert.ok(!existsSync(join(dir, 'skills')), '拒绝时不应创建安装目录')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -204,6 +627,62 @@ test('parseGitHubSkillUrl 解析仓库根与 tree 路径', () => {
   assert.throws(() => parseGitHubSkillUrl('https://example.com/x'), /GitHub/)
 })
 
+test('GitHub 导入规范化缺失 name，落盘 name 与 canonical 目录一致', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  const originalFetch = globalThis.fetch
+  try {
+    const zip = new AdmZip()
+    zip.addFile(
+      'repo-main/github-canonical/SKILL.md',
+      Buffer.from('---\ndescription: GitHub skill\nlicense: MIT\n---\n正文\n'),
+    )
+    globalThis.fetch = async () => new Response(zip.toBuffer(), { status: 200 })
+
+    const result = await importSkillFromGitHub(
+      'https://github.com/owner/repo',
+      { root: join(dir, 'skills') },
+    )
+    const installed = readFileSync(result.file, 'utf8')
+    assert.equal(result.name, 'github-canonical')
+    assert.equal(parseSkillFile(installed).meta.name, 'github-canonical')
+    assert.ok(installed.includes('license: MIT'))
+  } finally {
+    globalThis.fetch = originalFetch
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('GitHub 非成功响应取消 body，取消失败不覆盖下载诊断', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  const originalFetch = globalThis.fetch
+  let fetchCalls = 0
+  let cancelCalls = 0
+  try {
+    globalThis.fetch = async () => {
+      fetchCalls += 1
+      return {
+        ok: false,
+        status: 503,
+        body: {
+          cancel() {
+            cancelCalls += 1
+            return Promise.reject(new Error('cancel failed'))
+          },
+        },
+      }
+    }
+    await assert.rejects(
+      importSkillFromGitHub('https://github.com/owner/repo', { root: join(dir, 'skills') }),
+      /下载失败.*owner\/repo/,
+    )
+    assert.ok(fetchCalls > 0)
+    assert.equal(cancelCalls, fetchCalls, '每个非成功响应都必须尝试取消 body')
+  } finally {
+    globalThis.fetch = originalFetch
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('importSkillFromClawHub 固定版本下载并事务写入 SKILL.md', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'skills-'))
   const originalFetch = globalThis.fetch
@@ -214,11 +693,56 @@ test('importSkillFromClawHub 固定版本下载并事务写入 SKILL.md', async 
         return new Response(JSON.stringify({ latestVersion: { version: '1.2.3' } }), { status: 200 })
       }
       assert.match(value, /\/api\/v1\/skills\/demo\/file\?/)
-      return new Response('---\nname: demo\ndescription: ClawHub skill\n---\n正文\n', { status: 200 })
+      return new Response('---\ndescription: ClawHub skill\nlicense: MIT\n---\n正文\n', { status: 200 })
     }
     const res = await importSkillFromClawHub({ owner: 'owner', slug: 'demo', version: 'latest' }, { root: join(dir, 'skills') })
     assert.equal(res.name, 'demo')
-    assert.ok(readFileSync(join(dir, 'skills', 'demo', 'SKILL.md'), 'utf8').includes('ClawHub skill'))
+    const installed = readFileSync(join(dir, 'skills', 'demo', 'SKILL.md'), 'utf8')
+    assert.equal(parseSkillFile(installed).meta.name, 'demo')
+    assert.ok(installed.includes('ClawHub skill'))
+    assert.ok(installed.includes('license: MIT'))
+  } finally {
+    globalThis.fetch = originalFetch
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('ClawHub 导入拒绝 malformed frontmatter 且不落盘', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  const originalFetch = globalThis.fetch
+  try {
+    globalThis.fetch = async () => new Response('---\nname: [broken\n---\n正文\n', { status: 200 })
+    await assert.rejects(
+      importSkillFromClawHub({ owner: 'owner', slug: 'demo', version: '1.0.0' }, { root: join(dir, 'skills') }),
+      /ClawHub SKILL\.md 无效.*frontmatter 解析失败/,
+    )
+    assert.ok(!existsSync(join(dir, 'skills')))
+  } finally {
+    globalThis.fetch = originalFetch
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('ClawHub 非成功响应取消 body，取消失败不覆盖 HTTP 诊断', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'skills-'))
+  const originalFetch = globalThis.fetch
+  let cancelCalls = 0
+  try {
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 503,
+      body: {
+        cancel() {
+          cancelCalls += 1
+          return Promise.reject(new Error('cancel failed'))
+        },
+      },
+    })
+    await assert.rejects(
+      importSkillFromClawHub({ owner: 'owner', slug: 'demo', version: '1.0.0' }, { root: join(dir, 'skills') }),
+      /ClawHub SKILL\.md 下载失败（HTTP 503）/,
+    )
+    assert.equal(cancelCalls, 1)
   } finally {
     globalThis.fetch = originalFetch
     rmSync(dir, { recursive: true, force: true })

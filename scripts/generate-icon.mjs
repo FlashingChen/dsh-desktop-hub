@@ -95,8 +95,24 @@ const design = SVG(
   '#67e8f9', // nodeColor: 青色
 )
 
-app.whenReady().then(async () => {
-  const win = new BrowserWindow({
+let win = null
+
+function errorDetail(error) {
+  return error instanceof Error ? (error.stack ?? error.message) : String(error)
+}
+
+function handleGenerateIconFailure(error) {
+  console.error(`GENERATE ICON FAIL: ${errorDetail(error)}`)
+  try {
+    if (win && !win.isDestroyed()) win.destroy()
+  } catch (cleanupError) {
+    console.error(`GENERATE ICON CLEANUP FAIL: ${errorDetail(cleanupError)}`)
+  }
+  app.exit(1)
+}
+
+async function runGenerateIcon() {
+  win = new BrowserWindow({
     width: 1024,
     height: 1024,
     show: false,
@@ -117,4 +133,6 @@ app.whenReady().then(async () => {
   writeFileSync(out, image.toPNG())
   console.log(`icon written: ${out} (${image.getSize().width}x${image.getSize().height}, alpha corners preserved)`)
   app.exit(0)
-})
+}
+
+void app.whenReady().then(runGenerateIcon).catch(handleGenerateIconFailure)
