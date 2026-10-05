@@ -30,6 +30,25 @@ function findNodeOnPath(platform: NodeJS.Platform, pathExists: (file: string) =>
 }
 
 /**
+ * 解析 Windows npm shim（.cmd/.bat）中固定的相对 JavaScript 入口。
+ * 同时支持当前 `%dp0%\...` 与历史 `%~dp0\...` 两种写法；找不到真实存在的入口时返回 null。
+ * dsh 与 pnpm 共用同一套解析，避免各自实现出现行为漂移。
+ */
+export function resolveWindowsShimEntry(
+  shim: string,
+  dependencies: Pick<DshSpawnPlanDependencies, 'readShim' | 'pathExists'> = {},
+): string | null {
+  const readShim = dependencies.readShim ?? ((file: string) => readFileSync(file, 'utf8'))
+  const pathExists = dependencies.pathExists ?? existsSync
+  const entryMatches = readShim(shim).matchAll(/%(?:d[pP]0%|~d[pP]0)[\\/]([^"\r\n]*?\.(?:[cm]?js))/gi)
+  for (const match of entryMatches) {
+    const candidate = resolve(dirname(shim), match[1].replace(/[\\/]+/g, sep))
+    if (pathExists(candidate)) return candidate
+  }
+  return null
+}
+
+/**
  * Windows cannot execute an npm .cmd/.bat shim with shell:false. Resolve only
  * the shim's relative JavaScript entry and invoke it through a real Node binary,
  * keeping every dsh argument in a separate argv element and out of cmd.exe.
@@ -45,18 +64,8 @@ export function planDshSpawn(
   const platform = dependencies.platform ?? process.platform
   if (platform !== 'win32' || !/\.(?:cmd|bat)$/i.test(dsh)) return { executable: dsh, args }
 
-  const readShim = dependencies.readShim ?? ((file: string) => readFileSync(file, 'utf8'))
   const pathExists = dependencies.pathExists ?? existsSync
-  const shim = readShim(dsh)
-  const entryMatches = shim.matchAll(/%(?:d[pP]0%|~d[pP]0)[\\/]([^"\r\n]*?\.(?:[cm]?js))/gi)
-  let entry: string | null = null
-  for (const match of entryMatches) {
-    const candidate = resolve(dirname(dsh), match[1].replace(/[\\/]+/g, sep))
-    if (pathExists(candidate)) {
-      entry = candidate
-      break
-    }
-  }
+  const entry = resolveWindowsShimEntry(dsh, dependencies)
   if (!entry) throw new Error(`无法解析 Windows dsh shim 的 JavaScript 入口：${dsh}`)
   const nodeExecutable = dependencies.findNode
     ? dependencies.findNode()

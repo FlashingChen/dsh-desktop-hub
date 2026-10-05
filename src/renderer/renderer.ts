@@ -144,7 +144,7 @@ interface DesktopApi {
     url: () => Promise<string | null>
     restart: () => Promise<{ ok: boolean; url?: string; error?: string }>
     onFrameLoaded: (cb: (url: string) => void) => void
-    onStatus: (cb: (status: { state: string; url?: string; code?: number | null; since?: number }) => void) => void
+    onStatus: (cb: (status: { state: string; url?: string; code?: number | null; error?: string; warning?: string; since?: number }) => void) => void
   }
   updates: {
     status: () => Promise<UpdateStatus>
@@ -2377,6 +2377,8 @@ const harnessLoadingProgress = document.querySelector<HTMLElement>('.harness-loa
 const harnessLoadingRetry = document.getElementById('harness-loading-retry') as HTMLButtonElement | null
 let harnessUrlCurrent: string | null = null
 let currentHarnessState = 'starting'
+/** 最近一次 ready 携带的降级告警：下一次启动尝试时清除，避免被随后无告警的 ready 推送（帧加载、重启响应）抹掉 */
+let harnessWarning: string | null = null
 let reconnectTimer: number | null = null
 
 /** 状态类驱动徽章指示灯颜色（ready 绿 / 连接中、重启中 黄 / 失败 红） */
@@ -2466,10 +2468,12 @@ function stopHarnessWaitTicker(): void {
   }
 }
 
-function setHarnessStatusText(status: { state: string; url?: string; code?: number | null; error?: string; since?: number }): void {
+function setHarnessStatusText(status: { state: string; url?: string; code?: number | null; error?: string; warning?: string; since?: number }): void {
   const el = document.getElementById('harness-status')
   if (!el) return
   currentHarnessState = status.state
+  if (status.state === 'starting' || status.state === 'restarting') harnessWarning = null
+  else if (status.state === 'ready') harnessWarning = status.warning ?? harnessWarning
   if (reconnectTimer !== null) {
     window.clearTimeout(reconnectTimer)
     reconnectTimer = null
@@ -2487,6 +2491,8 @@ function setHarnessStatusText(status: { state: string; url?: string; code?: numb
       break
     case 'ready':
       menuText = status.url ? `已连接: ${status.url}` : '已连接'
+      // 降级告警（例如桌面管理器 UI 插件未挂载）：工作区已可用，但原因必须可见
+      if (harnessWarning) menuText += ` · ${harnessWarning}`
       kind = 'ok'
       harnessUrlCurrent = status.url ?? harnessUrlCurrent
       break
@@ -2508,9 +2514,11 @@ function setHarnessStatusText(status: { state: string; url?: string; code?: numb
   } else {
     stopHarnessWaitTicker()
   }
-  // 连接完成后自动缩回左下角徽章，不再遮挡界面；故障时自动展开便于查看原因并操作
-  if (status.state === 'ready' || status.state === 'starting' || status.state === 'restarting') setHarnessMenuOpen(false)
-  else if (status.state === 'exited') setHarnessMenuOpen(true)
+  // 连接完成后自动缩回左下角徽章，不再遮挡界面；故障时自动展开便于查看原因并操作。
+  // 带降级告警的 ready 保持展开一次，否则告警只藏在收起的徽章里。
+  if (status.state === 'ready' && !harnessWarning) setHarnessMenuOpen(false)
+  else if (status.state === 'starting' || status.state === 'restarting') setHarnessMenuOpen(false)
+  else if (status.state === 'exited' || status.state === 'ready') setHarnessMenuOpen(true)
 }
 
 // DSH consumes its one-use bootstrap token, then navigates to the same origin

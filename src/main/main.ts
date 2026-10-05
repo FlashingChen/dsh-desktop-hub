@@ -24,6 +24,7 @@ import {
   runPluginOp,
 } from '../core/plugins.js'
 import { PluginOpRunner } from '../core/plugin-ops.js'
+import { planPnpmSpawn, type PnpmSpawnPlan } from '../core/pnpm-spawn.js'
 import {
   convertJsonToYaml,
   extractMcpServers,
@@ -135,6 +136,8 @@ function canAutoRestart(): boolean {
 const ACTIVE_PROFILE = 'web'
 const DESKTOP_HUB_PLUGIN_NAME = '@dsh-desktop-hub/manager'
 let desktopHubPluginPromise: Promise<string> | null = null
+/** 桌面管理器插件准备失败时的降级告警（不阻断工作区启动）；每次启动尝试重新计算 */
+let desktopHubWarning: string | null = null
 
 // ---- 单实例锁：两个实例同时操作同一 profile/patch 会写冲突（P2-11）----
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
@@ -171,10 +174,19 @@ function bundledDesktopHubPluginDir(): string {
 }
 
 function runPnpm(args: string[], cwd: string): Promise<void> {
+  const env = runtimePathEnv(ACTIVE_PROFILE, cwd)
+  let plan: PnpmSpawnPlan
+  try {
+    // Windows 上 pnpm 只有 .cmd/.ps1 shim：直接 spawn('pnpm', {shell:false}) 必然 ENOENT。
+    // 统一解析成「真实 node + pnpm 的 JS 入口 + 独立 argv」，既不进 cmd.exe 也不依赖 PATH。
+    plan = planPnpmSpawn(args, { env, dshExec: resolveDshExec() })
+  } catch (error) {
+    return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+  }
   return new Promise((resolve, reject) => {
-    const proc = spawnProcess('pnpm', args, {
+    const proc = spawnProcess(plan.executable, plan.args, {
       cwd,
-      env: runtimePathEnv(ACTIVE_PROFILE, cwd),
+      env,
       stdio: 'ignore',
       windowsHide: true,
       shell: false,
@@ -1148,7 +1160,10 @@ function watchHarness(proc: HarnessHandle['proc']): void {
 }
 
 function sendHarnessStatus(status: HarnessStatus): void {
-  lastHarnessStatus = { ...status, since: Date.now() }
+  // 降级告警属于整个会话（例如可选 UI 插件未挂载）：每次 ready 推送都要带上，
+  // 否则会被 iframe 导航完成后的状态推送覆盖掉。
+  const merged = status.state === 'ready' && desktopHubWarning ? { ...status, warning: desktopHubWarning } : status
+  lastHarnessStatus = { ...merged, since: Date.now() }
   try {
     shellWebContents()?.send(IPC.harnessStatus, lastHarnessStatus)
   } catch {
@@ -1160,10 +1175,16 @@ function sendHarnessStatus(status: HarnessStatus): void {
 async function startHarnessAndWatch(): Promise<void> {
   const generation = ++harnessStartGeneration
   let spawnedProc: ChildProcess | null = null
+  desktopHubWarning = null
   sendHarnessStatus({ state: 'starting' })
   const startedAt = Date.now()
   try {
-    const desktopHubPatch = await ensureDesktopHubPlugin()
+    // 插件安装失败（例如 Windows 上 pnpm 不可用）只降级为告警：绝不能因此让整个工作区起不来。
+    const desktopHubPatch = await ensureDesktopHubPlugin().catch((error: unknown) => {
+      desktopHubWarning = `桌面管理器 DSH 插件未挂载：${error instanceof Error ? error.message : String(error)}`
+      log(`harness: ${desktopHubWarning}（不阻断工作区启动）`)
+      return null
+    })
     const exec = resolveDshExec()
     if (!exec) {
       log('harness: resolveDshExec 返回 null —— 捆绑运行时缺失且系统无 dsh')
@@ -1172,7 +1193,7 @@ async function startHarnessAndWatch(): Promise<void> {
     log(`harness: 使用${exec.node ? '捆绑' : 'PATH 回退'}运行时（node=${exec.node ?? 'PATH'}，dsh=${exec.exec}）`)
     const next = await startHarness({
       profile: ACTIVE_PROFILE,
-      patchFiles: [desktopHubPatch],
+      patchFiles: desktopHubPatch ? [desktopHubPatch] : [],
       readyTimeoutMs: 180_000,
       onLog: (line) => {
         log(`dsh: ${line}`)
