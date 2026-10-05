@@ -91,6 +91,8 @@ export interface HarnessStatus {
   signal?: string | null
   /** 失败/退出原因（面向用户的简短说明，UI 显示；详见运行日志） */
   error?: string
+  /** 非致命降级告警（如可选 UI 插件未挂载）：state 仍为 ready，UI 需与 error 区分显示 */
+  warning?: string
   /** 该状态进入时刻（epoch ms）；renderer 用于显示「已等待 N 秒」 */
   since?: number
 }

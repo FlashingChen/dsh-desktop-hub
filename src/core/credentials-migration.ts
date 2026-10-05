@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { parseDocument, isMap, isScalar } from 'yaml'
 import { atomicWriteWithBackup } from './mcp.js'
+import { planDshSpawn } from './dsh-spawn.js'
 
 export type CredentialsFormat = 'flat' | 'versioned' | 'empty' | 'missing' | 'unknown'
 
@@ -138,9 +139,29 @@ function bundledDshVersion(): string | null {
   return null
 }
 
-function systemDshVersion(dshExec: string): string | null {
+/**
+ * PATH 上系统 dsh 的探测候选。Windows 只提供 dsh.cmd/dsh.exe shim，裸名（无扩展名）
+ * 在 shell:false 下必然 ENOENT，因此只探测 PATH 上真实存在的绝对路径。
+ */
+export function dshProbeCandidates(
+  platform: NodeJS.Platform,
+  pathValue: string,
+  pathExists: (file: string) => boolean = existsSync,
+): string[] {
+  if (platform !== 'win32') return ['dsh', '/opt/homebrew/bin/dsh', '/usr/local/bin/dsh']
+  return pathValue
+    .split(';')
+    .filter(Boolean)
+    .flatMap((dir) => ['dsh.cmd', 'dsh.exe'].map((name) => join(dir, name)))
+    .filter((file) => pathExists(file))
+}
+
+/** 探测系统 dsh 版本（导出供测试）；任何失败都收敛为 null，不向上抛。 */
+export function systemDshVersion(dshExec: string): string | null {
   try {
-    const r = spawnSync(dshExec, ['--version'], { encoding: 'utf8', timeout: 3000 })
+    // Windows 上 dsh.cmd/.bat 不能以 shell:false 直接执行：解析成 node + JS 入口再启动
+    const plan = planDshSpawn(dshExec, undefined, ['--version'])
+    const r = spawnSync(plan.executable, plan.args, { encoding: 'utf8', timeout: 3000 })
     if (r.error) return null
     const out = (r.stdout ?? '') + (r.stderr ?? '')
     const m = out.match(/(\d+\.\d+\.\d+(?:-rc\.\d+)?)/)
@@ -165,9 +186,10 @@ export function dshSupportsVersioned(): boolean {
     }
   }
   // 2) 看系统 dsh --version（以及 PATH 回退）
-  // 复用 resolve 逻辑但避免循环依赖：直接找 PATH 上的 dsh
-  // 简单探测：which dsh 变种，spawnSync 直接试 dsh
-  for (const bin of ['dsh', '/opt/homebrew/bin/dsh', '/usr/local/bin/dsh']) {
+  // 复用 dsh-spawn 的启动规划（dsh-spawn 只依赖 fs/path，不引入循环依赖）：
+  // Windows 上 PATH 安装的 dsh 是 .cmd shim，裸名在当前进程里探测不到。
+  const pathValue = process.env.Path ?? process.env.PATH ?? ''
+  for (const bin of dshProbeCandidates(process.platform, pathValue)) {
     const v = systemDshVersion(bin)
     if (!v) continue
     const pv = parseVersion(v)

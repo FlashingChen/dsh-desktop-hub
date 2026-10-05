@@ -53,6 +53,7 @@ interface HarnessStatus {
   code?: number | null
   signal?: string | null
   error?: string
+  warning?: string
 }
 
 type UpdateState = 'idle' | 'unsupported' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'not-available' | 'error'

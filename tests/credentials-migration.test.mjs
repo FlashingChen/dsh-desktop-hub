@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -70,5 +70,49 @@ test('备份迁移端到端（flat文件）', () => {
     if (origHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = origHome
     rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// issue #47 同类问题：Windows 上不能被 shell:false 直接 spawn 的 .cmd shim
+test('Windows 下系统 dsh 探测只取 PATH 上真实存在的 .cmd/.exe，不含裸名', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-probe-'))
+  try {
+    assert.deepEqual(mod.dshProbeCandidates('win32', 'C:\\bin', () => false), [])
+    writeFileSync(join(dir, 'dsh.cmd'), '@ECHO off\r\n')
+    writeFileSync(join(dir, 'dsh.exe'), '// fixture')
+    const candidates = mod.dshProbeCandidates('win32', `C:\\bin;${dir}`, existsSync)
+    assert.deepEqual(candidates, [join(dir, 'dsh.cmd'), join(dir, 'dsh.exe')])
+    assert.equal(candidates.includes('dsh'), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('POSIX 探测候选保持原样（裸名交给 PATH 解析）', () => {
+  const expected = ['dsh', '/opt/homebrew/bin/dsh', '/usr/local/bin/dsh']
+  assert.deepEqual(mod.dshProbeCandidates('darwin', '/usr/bin:/bin'), expected)
+  assert.deepEqual(mod.dshProbeCandidates('linux', ''), expected)
+})
+
+test('POSIX：systemDshVersion 走规划后的可执行文件', { skip: process.platform === 'win32' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-probe-posix-'))
+  try {
+    const script = join(dir, 'dsh')
+    writeFileSync(script, '#!/bin/sh\necho 0.9.9\n')
+    chmodSync(script, 0o755)
+    assert.equal(mod.systemDshVersion(script), '0.9.9')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('Windows：dsh.cmd shim 解析成 node + JS 入口后再探测版本', { skip: process.platform !== 'win32' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-probe-win-'))
+  try {
+    writeFileSync(join(dir, 'dsh-probe.js'), "console.log('0.9.9')\n")
+    writeFileSync(join(dir, 'dsh.cmd'), '@ECHO off\r\n"%_prog%" "%dp0%\\dsh-probe.js" %*\r\n')
+    assert.equal(mod.systemDshVersion(join(dir, 'dsh.cmd')), '0.9.9')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })

@@ -93,3 +93,10 @@ test('renderer teardown 期间状态 DOM 不可用也不会让异步调用 rejec
   assert.equal(await restart.restartHarness(), false)
   assert.match(restart.diagnostics[0], /重启失败.*document was destroyed/)
 })
+
+// issue #47：插件降级告警必须在「已连接」状态下可见，且不能被后续无告警的 ready 推送抹掉
+test('ready 状态的降级告警在状态栏呈现，并随下一次启动尝试清除', () => {
+  assert.match(renderer, /harnessWarning = status\.warning \?\? harnessWarning/)
+  assert.match(renderer, /if \(harnessWarning\) menuText \+= ` · \$\{harnessWarning\}`/)
+  assert.match(renderer, /status\.state === 'starting' \|\| status\.state === 'restarting'\) harnessWarning = null/)
+})
