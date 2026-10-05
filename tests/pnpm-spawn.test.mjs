@@ -80,20 +80,24 @@ test('Windows PATH 回退优先真实 exe，且元字符不会进入 shell', () 
 })
 
 test('POSIX 仍可直接启动 PATH 中的 pnpm，捆绑运行时存在时优先捆绑入口', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pnpm-plan-posix-'))
+  // 用合成 POSIX PATH 断言：真实临时目录在 Windows 上带盘符冒号，会被 POSIX 的 ':' 切分规则拆错
+  const posixBin = '/opt/pnpm/bin'
+  const posixPnpm = join(posixBin, 'pnpm')
+  assert.deepEqual(
+    planPnpmSpawn(['install'], {
+      platform: 'darwin',
+      env: { PATH: `${posixBin}:/usr/bin` },
+      pathExists: (file) => file === posixPnpm,
+    }),
+    { executable: posixPnpm, args: ['install'] },
+  )
+
+  const dir = mkdtempSync(join(tmpdir(), 'pnpm-plan-bundled-posix-'))
   try {
-    const shim = join(dir, 'bin', 'pnpm')
-    mkdirSync(dirname(shim), { recursive: true })
-    writeFileSync(shim, '#!/usr/bin/env node\n')
-
-    assert.deepEqual(
-      planPnpmSpawn(['install'], { platform: 'darwin', env: { PATH: join(dir, 'bin') } }),
-      { executable: shim, args: ['install'] },
-    )
-
+    // 捆绑运行时优先于 PATH：即使 PATH 里也有 pnpm，也走捆绑 node + JS 入口
     const runtime = fixtureRuntime(dir)
     assert.deepEqual(
-      planPnpmSpawn(['install'], { platform: 'darwin', env: { PATH: join(dir, 'bin') }, dshExec: runtime }),
+      planPnpmSpawn(['install'], { platform: 'darwin', env: { PATH: posixBin }, dshExec: runtime }),
       { executable: runtime.node, args: [runtime.pnpmEntry, 'install'] },
     )
   } finally {
